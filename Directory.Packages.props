@@ -1,0 +1,16 @@
+﻿<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!--
+    製品コードへの NuGet 追加は原則禁止。test / benchmark / analyzer / formatter など
+    製品成果物に残らない開発専用依存のみをここへ追加し、PrivateAssets="all" を設定する。
+    詳細は .github/instructions/fsharp-dotnet.instructions.md と docs/security.md 3 を参照。
+  -->
+  <ItemGroup>
+  </ItemGroup>
+
+</Project>
