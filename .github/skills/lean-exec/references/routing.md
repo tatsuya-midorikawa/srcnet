@@ -254,7 +254,7 @@ cost 優先では、1 体の安全上限に収まるなら並列にしない。l
 | `/compact` の直後 | 履歴を書き換えたのでキャッシュは既に切れている |
 | 背景要約の直後 | 同上 |
 
-`route.py` はこれを既定の挙動として実装している。`--turn` と `--current-model` を渡すと、上の 3 条件に当たらない限り現在のモデルを返す (`basis=sticky_prompt_cache`)。`--after-compact` / `--after-summarize` / `--force-route` で選び直しを起こせる。
+`route.py` はこれを既定の挙動として実装している。`--turn` と `--current-model` を渡すと、上の 3 条件に当たらない限り現在のモデルを返す (`basis=sticky_prompt_cache`)。compact または背景要約の直後は `--reroute`、確信度も無視して選び直す場合は `--force-route` を使う。
 
 **キャッシュはモデル単位なので、保持中も reasoning effort は選び直す。** effort を替えてもキャッシュは切れないため、そこは締めても緩めてもよい。
 

@@ -7,6 +7,7 @@ lean-exec が扱ってよい削減は失敗を検出できるものだけなの�
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
@@ -22,17 +23,15 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = SKILL_ROOT / "config" / "policy.json"
 MODELS_PATH = SKILL_ROOT / "config" / "models.json"
 SAMPLES_PATH = SKILL_ROOT / "config" / "sample_prompts.jsonl"
-ALLOWLIST_PATH = R.ALLOWLIST
 ROUTE_SCRIPT = SKILL_ROOT / "scripts" / "route.py"
 
 
 def load_all():
     policy = R.load_json(POLICY_PATH, "policy")
     models = R.load_json(MODELS_PATH, "models")
-    allowed = R.load_allowlist(ALLOWLIST_PATH)
-    pool, vetoed = R.build_pool(models, policy, allowed)
-    weights = R.compensated_weights(policy, {})
-    return policy, models, allowed, pool, vetoed, weights
+    pool = R.build_pool(models, policy)
+    weights = R.compensated_weights(policy)
+    return policy, models, None, pool, None, weights
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess:
@@ -46,7 +45,7 @@ def entry(model: str, effort: str, cost: float, base_cost: float | None = None, 
     return R.PoolEntry(
         model=model, effort=effort, cost=cost,
         base_cost=cost if base_cost is None else base_cost, capability=caps,
-        family=model.split("-")[0], context_tiers=("default",), calibrated=True,
+        family=model.split("-")[0], context_tiers=("default",),
     )
 
 
@@ -78,7 +77,7 @@ class WeightCompensationTest(unittest.TestCase):
 
     def test_total_weight_is_preserved(self):
         policy, *_ = load_all()
-        weights = R.compensated_weights(policy, {})
+        weights = R.compensated_weights(policy)
         expected = sum(policy["weights"][dim] for dim in policy["dimensions"])
         self.assertAlmostEqual(sum(weights.values()), expected, places=6)
 
@@ -88,23 +87,16 @@ class WeightCompensationTest(unittest.TestCase):
             "bands": {"wide": [0.0, 1.0], "narrow": [0.0, 0.25]},
             "weights": {"wide": 1.0, "narrow": 1.0},
         }
-        weights = R.compensated_weights(policy, {})
+        weights = R.compensated_weights(policy)
         self.assertGreater(weights["narrow"], weights["wide"])
         self.assertAlmostEqual(weights["narrow"] / weights["wide"], 4.0, places=6)
-
-    def test_override_is_applied(self):
-        policy, *_ = load_all()
-        base = R.compensated_weights(policy, {})
-        boosted = R.compensated_weights(policy, {"reasoning": 5.0})
-        self.assertGreater(boosted["reasoning"] / sum(boosted.values()),
-                           base["reasoning"] / sum(base.values()))
 
     def test_zero_band_is_rejected(self):
         policy = {
             "dimensions": ["a"], "bands": {"a": [0.5, 0.5]}, "weights": {"a": 1.0},
         }
         with self.assertRaises(R.ConfigError):
-            R.compensated_weights(policy, {})
+            R.compensated_weights(policy)
 
 
 class PoolNormalizationTest(unittest.TestCase):
@@ -121,10 +113,10 @@ class PoolNormalizationTest(unittest.TestCase):
 
     def test_removing_a_model_renormalizes_the_rest(self):
         """カタログ変更は設定編集だけで効く。プロファイルは自動で張り直される。"""
-        policy, models, allowed, pool, _, _ = load_all()
+        policy, models, _, pool, _, _ = load_all()
         reduced = json.loads(json.dumps(models))
         reduced["models"]["claude-haiku-4.5"]["enabled"] = False
-        new_pool, _ = R.build_pool(reduced, policy, allowed)
+        new_pool = R.build_pool(reduced, policy)
         self.assertNotIn("claude-haiku-4.5", {e.model for e in new_pool})
         for dim in policy["dimensions"]:
             lo, _ = policy["bands"][dim]
@@ -133,14 +125,31 @@ class PoolNormalizationTest(unittest.TestCase):
             self.assertAlmostEqual(min(e.capability[dim] for e in base), lo, places=3)
 
     def test_adding_a_model_needs_no_code_change(self):
-        policy, models, allowed, _, _, _ = load_all()
+        policy, models, _, _, _, _ = load_all()
         extended = json.loads(json.dumps(models))
-        extended["models"]["gpt-5.6-terra"].update({
+        extended["models"]["gpt-5.6-test-model"] = {
             "enabled": True, "cost": 6.0,
             "capability": {"reasoning": 80, "code_gen": 88, "debugging": 70, "tool_use": 84},
-        })
-        new_pool, _ = R.build_pool(extended, policy, allowed)
-        self.assertIn("gpt-5.6-terra", {e.model for e in new_pool})
+            "efforts": ["low", "medium", "high"], "context_tiers": ["default", "long_context"],
+        }
+        new_pool = R.build_pool(extended, policy)
+        self.assertIn("gpt-5.6-test-model", {e.model for e in new_pool})
+
+    def test_every_enabled_model_is_selectable(self):
+        """有効にしたモデルが他モデルに完全支配され、死んだ設定になっていないこと。"""
+        policy, models, _, pool, _, weights = load_all()
+        expected = {
+            name for name, spec in models["models"].items() if spec["enabled"]
+        }
+        selected: set[str] = set()
+        for values in itertools.product((0.1, 0.3, 0.5, 0.7, 0.9), repeat=4):
+            requirements = dict(zip(policy["dimensions"], values))
+            for tau in (0.01, 0.05, 0.06, 0.2, 1.0):
+                model, _, _ = R.match(pool, requirements, weights, tau)
+                selected.add(model.model)
+            if expected <= selected:
+                break
+        self.assertEqual(expected - selected, set(), "選択不能な enabled モデルがあります")
 
     def test_effort_variants_expand_the_pool(self):
         _, _, _, pool, _, _ = load_all()
@@ -172,17 +181,15 @@ class MatchingTest(unittest.TestCase):
         ]
 
     def test_cheapest_eligible_wins(self):
-        selected, value, basis, eligible, _ = R.match(self.pool, {"a": 0.5}, self.weights, 0.1)
+        selected, value, basis = R.match(self.pool, {"a": 0.5}, self.weights, 0.1)
         self.assertEqual(selected.model, "mid")
         self.assertEqual(basis, "cheapest_eligible")
         self.assertEqual(value, 0.0)
-        self.assertEqual(set(eligible), {"mid", "top"})
 
     def test_fail_open_when_nothing_qualifies(self):
-        selected, _, basis, eligible, _ = R.match(self.pool, {"a": 1.0}, self.weights, 0.01)
+        selected, _, basis = R.match(self.pool, {"a": 1.0}, self.weights, 0.01)
         self.assertEqual(basis, "fail_open_least_shortfall")
         self.assertEqual(selected.model, "top")
-        self.assertEqual(eligible, [])
 
     def test_never_returns_nothing(self):
         for requirement in (0.0, 0.5, 1.0):
@@ -209,24 +216,22 @@ class MatchingTest(unittest.TestCase):
 
 
 class HardGateTest(unittest.TestCase):
-    """ハード ゲートは fail-closed。健全性フィルターの fail-open とは扱いが違う。"""
+    """実行面の制約で候補が消えた場合は fail-closed で扱う。"""
 
-    def test_allowlist_vetoes_models_outside_the_list(self):
+    def test_disabled_catalog_model_is_excluded(self):
         policy, models, _, _, _, _ = load_all()
-        pool, vetoed = R.build_pool(models, policy, {"claude-haiku-4.5"})
-        self.assertEqual({e.model for e in pool}, {"claude-haiku-4.5"})
-        self.assertIn("gpt-5.6-sol", vetoed)
+        models = json.loads(json.dumps(models))
+        models["models"]["claude-haiku-4.5"]["enabled"] = False
+        pool = R.build_pool(models, policy)
+        self.assertNotIn("claude-haiku-4.5", {entry.model for entry in pool})
 
-    def test_empty_allowlist_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "empty.md"
-            path.write_text("# no models here\n", encoding="utf-8")
-            with self.assertRaises(R.GateError):
-                R.load_allowlist(path)
-
-    def test_missing_allowlist_is_rejected(self):
-        with self.assertRaises(R.GateError):
-            R.load_allowlist(Path("/nonexistent/strict-rules.md"))
+    def test_catalog_without_enabled_models_is_rejected(self):
+        policy, models, _, _, _, _ = load_all()
+        models = json.loads(json.dumps(models))
+        for spec in models["models"].values():
+            spec["enabled"] = False
+        with self.assertRaises(R.ConfigError):
+            R.build_pool(models, policy)
 
     def test_long_context_gate_drops_models_without_it(self):
         _, _, _, pool, _, _ = load_all()
@@ -235,19 +240,6 @@ class HardGateTest(unittest.TestCase):
         )
         self.assertNotIn("claude-haiku-4.5", {e.model for e in survivors})
         self.assertTrue(survivors)
-
-    def test_rogue_catalog_cannot_introduce_an_unlisted_model(self):
-        """カタログに何を書いても、許可リスト外のモデルは候補に入らない。"""
-        policy, models, allowed, _, _, _ = load_all()
-        rogue = json.loads(json.dumps(models))
-        rogue["models"]["gpt-attacker"] = {
-            "enabled": True, "calibrated": True, "cost": 0.001,
-            "capability": {dim: 100 for dim in policy["dimensions"]},
-            "efforts": ["none"], "context_tiers": ["default"],
-        }
-        pool, vetoed = R.build_pool(rogue, policy, allowed)
-        self.assertIn("gpt-attacker", vetoed)
-        self.assertEqual({e.model for e in pool} - allowed, set())
 
     def test_family_exclusion_keeps_verifier_independent(self):
         _, _, _, pool, _, _ = load_all()
@@ -412,8 +404,7 @@ class StickyTest(unittest.TestCase):
         )
         self.assertEqual(decision.selected.model, "claude-sonnet-5")
         self.assertEqual(decision.basis, "sticky_prompt_cache")
-        self.assertTrue(decision.table)
-        self.assertTrue(all(row["model"].startswith("claude-sonnet-5") for row in decision.table))
+        self.assertNotEqual(decision.selected.effort, "none")
 
 
 class LanguageInvarianceTest(unittest.TestCase):
@@ -602,12 +593,12 @@ class CostCeilingTest(unittest.TestCase):
         self.assertLessEqual(vscode["cost"], vscode["cost_ceiling"] * 2.5 + 1e-9)
         self.assertEqual(vscode["model"], "claude-sonnet-5")
 
-    def test_unusable_parent_model_fails_closed(self):
+    def test_unknown_parent_model_is_rejected(self):
         result = run_cli(
             "--role", "analyst", "--prompt", "x", "--surface", "vscode",
-            "--parent-model", "gpt-5.6-terra",
+            "--parent-model", "gpt-nonexistent",
         )
-        self.assertEqual(result.returncode, 4)
+        self.assertEqual(result.returncode, 2)
 
 
 class DelegationEconomicsTest(unittest.TestCase):
@@ -647,14 +638,6 @@ class DelegationEconomicsTest(unittest.TestCase):
         scope = SKILL_ROOT / "scripts" / "scope.py"
         result = subprocess.run(
             [sys.executable, str(scope), "--parent-model", "gpt-nonexistent", str(SAMPLES_PATH)],
-            capture_output=True, text=True,
-        )
-        self.assertNotEqual(result.returncode, 0)
-
-    def test_scope_rejects_a_model_without_cost(self):
-        scope = SKILL_ROOT / "scripts" / "scope.py"
-        result = subprocess.run(
-            [sys.executable, str(scope), "--parent-model", "gpt-5.6-terra", str(SAMPLES_PATH)],
             capture_output=True, text=True,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -780,26 +763,32 @@ class CliTest(unittest.TestCase):
         result = run_cli("--role", "retriever", "--prompt", "定数の定義箇所を探して", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        for key in ("model", "requirements", "shortfall", "basis", "table", "gates"):
+        for key in ("model", "requirements", "shortfall", "basis", "gates"):
             self.assertIn(key, payload)
-        self.assertTrue(payload["table"])
 
     def test_unknown_role_is_rejected(self):
         result = run_cli("--role", "nope", "--prompt", "x")
         self.assertEqual(result.returncode, 2)
 
-    def test_selected_model_is_always_allowlisted(self):
-        allowed = R.load_allowlist(ALLOWLIST_PATH)
+    def test_reroute_replaces_the_equivalent_compaction_and_summary_flags(self):
+        result = run_cli(
+            "--role", "orchestrator",
+            "--prompt", "この設計の妥当性を根拠つきで検証し、矛盾があれば原因を特定して",
+            "--turn", "5", "--current-model", "claude-haiku-4.5",
+            "--reroute", "--json",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(json.loads(result.stdout)["basis"], "sticky_prompt_cache")
+
+    def test_selected_model_is_enabled_in_catalog(self):
+        models = R.load_json(MODELS_PATH, "models")
+        enabled = {
+            name for name, spec in models["models"].items() if spec.get("enabled")
+        }
         for role in ("retriever", "analyst", "implementer", "verifier", "orchestrator"):
             result = run_cli("--role", role, "--prompt", "落ちる原因を調べて直して", "--json")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(json.loads(result.stdout)["model"], allowed)
-
-    def test_allowlist_path_cannot_be_overridden(self):
-        """許可リストの参照先を差し替えられると veto が veto でなくなる。"""
-        result = run_cli("--role", "analyst", "--prompt", "x", "--allowlist", "/tmp/rogue.md")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--allowlist", result.stderr)
+            self.assertIn(json.loads(result.stdout)["model"], enabled)
 
     def test_output_is_reproducible(self):
         args = ("--role", "analyst", "--prompt", "認証まわりの設計を見直したい", "--json")

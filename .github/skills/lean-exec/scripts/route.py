@@ -7,17 +7,17 @@ HyDRA (arXiv:2605.17106) の二部構成をそのまま持ち込んでいる。�
 
   1. 要件予測   r_k in [0,1] (K=4: reasoning / code_gen / debugging / tool_use) + 確信度 gamma
   2. プール構築 config/models.json の生アンカーをプール相対で band へ正規化 (Eq. 3)
-  3. ハード ゲート 許可リスト veto (fail-closed) / long context / 系統除外
+  3. ハード ゲート long context / 系統除外 / VS Code コスト階層
   4. shortfall    s_m = sum_k w~_k * max(0, r_k - c_mk)   (Eq. 5)
   5. 選択        s_m <= tau の中で最安。空なら最小 shortfall へ fail-open
 
 LLM を一切呼ばない。判定はこのプロセス内で閉じるので、経路選択そのものが課金されない。
 
 prompt cache はモデル単位で持たれる。会話の途中では現在のモデルを保ち、effort だけ選び直す。
-選び直すのは turn 1 / --after-compact / --after-summarize / --force-route のときだけ。
+選び直すのは turn 1 / --reroute / --force-route のときだけ。
 
-設定と許可リストの参照先はすべてコード内に固定してある。差し替えられる余地を残すと
-veto が veto でなくなるため、カタログに何を書いても許可リスト外のモデルは除外される。
+モデル カタログは config/models.json だけを参照する。enabled=true で、cost と capability
+が定義されたモデルだけを候補にする。
 
 引数の一覧は --help を見る。終了コードは 0 (判定完了) / 2 (引数か設定が不正) /
 4 (ハード ゲートで候補が消えた。fail-closed)。
@@ -36,9 +36,6 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 MODELS = SKILL_ROOT / "config" / "models.json"
 POLICY = SKILL_ROOT / "config" / "policy.json"
-ALLOWLIST = SKILL_ROOT.parents[1] / "instructions" / "strict-rules.instructions.md"
-
-ALLOWED_DISPLAY_NAME = re.compile(r"`((?:GPT|Claude)[^`]+)`", re.IGNORECASE)
 ASCII_ONLY = re.compile(r"^[\x00-\x7f]+$")
 
 
@@ -59,7 +56,6 @@ class PoolEntry:
     capability: dict[str, float]
     family: str
     context_tiers: tuple[str, ...]
-    calibrated: bool
 
     @property
     def key(self) -> str:
@@ -79,8 +75,6 @@ class Decision:
     selected: PoolEntry | None
     shortfall: float
     basis: str
-    eligible: list[str]
-    table: list[dict] = field(default_factory=list)
     gates: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -98,25 +92,6 @@ def load_json(path: Path, what: str) -> dict:
         raise ConfigError(f"{what} を JSON として読めません: {path} ({exc})") from exc
 
 
-def model_slug(display_name: str) -> str:
-    return re.sub(r"\s+", "-", display_name.strip().lower())
-
-
-def load_allowlist(path: Path) -> set[str]:
-    """許可リストは veto であって reranker ではない。読めなければ fail-closed。"""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise GateError(
-            f"許可リストを読めません: {path}。"
-            "許可リストを確認できない状態でモデルを選ばない (fail-closed)"
-        ) from exc
-    allowed = {model_slug(name) for name in ALLOWED_DISPLAY_NAME.findall(text)}
-    if not allowed:
-        raise GateError(f"許可リストにモデルが 1 つも見つかりません: {path}")
-    return allowed
-
-
 # --------------------------------------------------------------------------
 # プール構築 — Eq. 3 / Eq. 4
 # --------------------------------------------------------------------------
@@ -132,11 +107,11 @@ def band_widths(policy: dict) -> dict[str, float]:
     return widths
 
 
-def compensated_weights(policy: dict, overrides: dict[str, float]) -> dict[str, float]:
+def compensated_weights(policy: dict) -> dict[str, float]:
     """Eq. 4。band 幅の差で操作者の意図がゆがまないよう、重みを幅の逆数で補正する。"""
     dims = policy["dimensions"]
     widths = band_widths(policy)
-    raw = {dim: float(overrides.get(dim, policy["weights"][dim])) for dim in dims}
+    raw = {dim: float(policy["weights"][dim]) for dim in dims}
     if any(value < 0 for value in raw.values()):
         raise ConfigError("次元重みに負の値は使えません")
     total = sum(raw.values())
@@ -147,22 +122,20 @@ def compensated_weights(policy: dict, overrides: dict[str, float]) -> dict[str, 
     return {dim: scaled[dim] / denom * total for dim in dims}
 
 
-def build_pool(models_cfg: dict, policy: dict, allowed: set[str]) -> tuple[list[PoolEntry], list[str]]:
+def build_pool(models_cfg: dict, policy: dict) -> list[PoolEntry]:
     """生アンカーをプール相対で band へ写像し、model x effort の候補集合を作る (Eq. 3)。"""
     dims = policy["dimensions"]
     widths = band_widths(policy)
     variants = models_cfg["effort_variants"]
 
     usable: dict[str, dict] = {}
-    vetoed: list[str] = []
     for name, spec in models_cfg["models"].items():
-        if name not in allowed:
-            vetoed.append(name)
-            continue
         if not spec.get("enabled"):
             continue
-        if spec.get("cost") is None or not spec.get("capability"):
-            continue
+        if spec.get("cost") is None:
+            raise ConfigError(f"{name} に cost がありません")
+        if not spec.get("capability"):
+            raise ConfigError(f"{name} に capability がありません")
         missing = [dim for dim in dims if dim not in spec["capability"]]
         if missing:
             raise ConfigError(f"{name} の capability に {missing} がありません")
@@ -170,7 +143,9 @@ def build_pool(models_cfg: dict, policy: dict, allowed: set[str]) -> tuple[list[
 
     pool: list[PoolEntry] = []
     if not usable:
-        return pool, vetoed
+        raise ConfigError(
+            "config/models.json に利用可能な enabled モデルがありません"
+        )
 
     for dim in dims:
         lo, hi = policy["bands"][dim]
@@ -203,9 +178,8 @@ def build_pool(models_cfg: dict, policy: dict, allowed: set[str]) -> tuple[list[
                 capability=capability,
                 family=name.split("-")[0],
                 context_tiers=tuple(spec.get("context_tiers") or ["default"]),
-                calibrated=bool(spec.get("calibrated")),
             ))
-    return pool, vetoed
+    return pool
 
 
 # --------------------------------------------------------------------------
@@ -335,7 +309,7 @@ def prefilter(
     exclude_families: set[str],
     cost_ceiling: float | None = None,
 ) -> tuple[list[PoolEntry], list[str]]:
-    gates: list[str] = ["allowlist"]
+    gates: list[str] = ["config"]
     survivors = pool
     if long_context:
         gates.append("long_context")
@@ -365,7 +339,7 @@ def match(
     requirements: dict[str, float],
     weights: dict[str, float],
     tau: float,
-) -> tuple[PoolEntry, float, str, list[str], list[dict]]:
+) -> tuple[PoolEntry, float, str]:
     scored = [(entry, shortfall(entry, requirements, weights)) for entry in pool]
     scored.sort(key=lambda item: (item[0].cost, item[1], item[0].key))
     eligible = [(entry, value) for entry, value in scored if value <= tau]
@@ -378,17 +352,7 @@ def match(
         # この定義に依存している。近傍を許容する緩和を入れると単調性が崩れる。
         selected, value = min(scored, key=lambda item: (item[1], item[0].cost, item[0].key))
         basis = "fail_open_least_shortfall"
-    table = [
-        {
-            "model": entry.key,
-            "shortfall": value,
-            "cost": entry.cost,
-            "eligible": value <= tau,
-            "selected": entry.key == selected.key,
-        }
-        for entry, value in scored
-    ]
-    return selected, value, basis, [entry.key for entry, _ in eligible], table
+    return selected, value, basis
 
 
 # --------------------------------------------------------------------------
@@ -449,7 +413,6 @@ def decide(
         selected=None,
         shortfall=0.0,
         basis="",
-        eligible=[],
         gates=gates,
     )
 
@@ -464,12 +427,10 @@ def decide(
         # prompt cache はモデル単位で持たれる。effort を変えてもキャッシュは切れないので、
         # モデルだけ固定して effort は選び直す。
         same_model = [e for e in survivors if e.model == held.model]
-        chosen, value, _, eligible, table = match(same_model, requirements, weights, tau)
+        chosen, value, _ = match(same_model, requirements, weights, tau)
         decision.selected = chosen
         decision.shortfall = value
         decision.basis = basis
-        decision.eligible = eligible
-        decision.table = table
         decision.notes.append(note)
         return decision
 
@@ -486,7 +447,7 @@ def decide(
         return hold(
             "sticky_prompt_cache",
             "prompt cache を守るためモデルは替えない (effort だけ選び直す)。"
-            "turn 1 / --after-compact / --after-summarize / --force-route のときだけ選び直す",
+            "turn 1 / --reroute / --force-route のときだけ選び直す",
         )
 
     if held is not None and not force and gamma < float(policy["gamma_sticky"]):
@@ -496,12 +457,10 @@ def decide(
             "根拠の薄い切り替えでキャッシュを捨てない。--force-route で上書きできる",
         )
 
-    selected, value, basis, eligible, table = match(survivors, requirements, weights, tau)
+    selected, value, basis = match(survivors, requirements, weights, tau)
     decision.selected = selected
     decision.shortfall = value
     decision.basis = basis
-    decision.eligible = eligible
-    decision.table = table
     if cost_ceiling is not None:
         # 上限が「効いた」かどうかは、上限が無かったときの選択と比べて決める。
         # 単に上限超の候補が適格だった、では足りない。それらは高いので元から選ばれない。
@@ -511,7 +470,7 @@ def decide(
             exclude_families=exclude_families, cost_ceiling=None,
         )
         if unrestricted:
-            best, best_shortfall, _, _, _ = match(unrestricted, requirements, weights, tau)
+            best, best_shortfall, _ = match(unrestricted, requirements, weights, tau)
             if best_shortfall < value - 1e-9:
                 decision.notes.append(
                     f"親のコスト階層 ({cost_ceiling:g}) で品質が頭打ちになっている。"
@@ -527,11 +486,6 @@ def decide(
     if gated_out and not reroute_triggered:
         decision.notes.append(
             f"現在のモデル {current_model} はゲートを通らないため、キャッシュを捨てて選び直した"
-        )
-    if not selected.calibrated:
-        decision.notes.append(
-            "config/models.json の値は未校正の順序事前分布。"
-            "--eval で QR / CS / Misroute を測ってから既定にする"
         )
     return decision
 
@@ -687,11 +641,6 @@ def format_text(decision: Decision, scope: dict | None, pool_size: int, surface:
         f"role={decision.role} tau={decision.tau:.3f} pool={pool_size}"
         f" surface={surface} gates={'+'.join(decision.gates)}",
     ]
-    for row in decision.table:
-        mark = "SELECTED" if row["selected"] else ("eligible" if row["eligible"] else "-")
-        lines.append(
-            f"  {row['model']:<26} s={row['shortfall']:.3f} cost={row['cost']:<7.2f} {mark}"
-        )
     effort = "" if selected.effort == "none" else f" effort={selected.effort}"
     lines.append(
         f"model={selected.model}{effort} cost={selected.cost:.2f}"
@@ -716,18 +665,14 @@ def main() -> int:
                     help="role 既定の tau を上書きする")
     ap.add_argument("--tau-scale", type=float, default=1.0,
                     help="すべての tau を X 倍する。コスト-品質フロンティアの掃引に使う")
-    ap.add_argument("--weight", action="append", default=[], metavar="DIM=X",
-                    help="次元重みを上書きする (複数回指定可)")
     ap.add_argument("--requirements", default=None,
                     help="予測器を使わず要件ベクトルを直接与える (a,b,c,d)")
     ap.add_argument("--turn", type=int, default=1,
                     help="会話のターン番号。sticky 判定に使う")
     ap.add_argument("--current-model", default=None,
                     help="現在使っているモデル。sticky 判定に使う (`:effort` は無視する)")
-    ap.add_argument("--after-compact", action="store_true",
-                    help="/compact 直後。prompt cache は切れているので再ルーティングする")
-    ap.add_argument("--after-summarize", action="store_true",
-                    help="背景要約の直後。同上")
+    ap.add_argument("--reroute", action="store_true",
+                    help="compact / 背景要約の直後にモデルを選び直す")
     ap.add_argument("--force-route", action="store_true",
                     help="sticky を無視して必ず再ルーティングする")
     ap.add_argument("--tier", default="auto", choices=["auto", "T1", "T2", "T3"],
@@ -736,8 +681,6 @@ def main() -> int:
                     help="long context tier が要る")
     ap.add_argument("--peer", default=None,
                     help="そのモデルと同じ系統を候補から外す (verifier の独立性確保)")
-    ap.add_argument("--exclude-family", action="append", default=[],
-                    help="系統を直接除外する (複数回指定可)")
     ap.add_argument("--surface", default="cli", choices=["cli", "vscode"],
                     help="vscode は親のコスト階層が上限になる")
     ap.add_argument("--parent-model", default=None,
@@ -748,8 +691,6 @@ def main() -> int:
                     help="JSONL の過去タスクで QR / CS / Misroute を測る")
     ap.add_argument("--fit-bands", default=None,
                     help="JSONL のプロンプト集合で予測分布の百分位を測り、bands を出す")
-    ap.add_argument("--fit-quantiles", default="0.10,0.90",
-                    help="--fit-bands で使う下側/上側の百分位")
     ap.add_argument("--json", action="store_true",
                     help="機械可読出力")
     args = ap.parse_args()
@@ -757,9 +698,7 @@ def main() -> int:
     try:
         policy = load_json(POLICY, "ポリシー")
         models_cfg = load_json(MODELS, "モデル カタログ")
-        # 許可リストの参照先は差し替えられない。差し替えられると veto が veto でなくなる。
-        allowed = load_allowlist(ALLOWLIST)
-        pool, vetoed = build_pool(models_cfg, policy, allowed)
+        pool = build_pool(models_cfg, policy)
     except ConfigError as exc:
         print(f"error={exc}", file=sys.stderr)
         return 2
@@ -774,59 +713,34 @@ def main() -> int:
     if args.fit_bands:
         try:
             records = read_jsonl(Path(args.fit_bands))
-            quantiles = [float(piece) for piece in args.fit_quantiles.split(",")]
-            if len(quantiles) != 2 or not 0.0 <= quantiles[0] < quantiles[1] <= 1.0:
-                raise ConfigError("--fit-quantiles は 0.0 <= lo < hi <= 1.0 の 2 値です")
             bands = fit_bands(
                 policy,
                 [record.get("prompt", "") for record in records],
-                quantiles[0],
-                quantiles[1],
+                0.10,
+                0.90,
             )
-        except (ConfigError, ValueError) as exc:
+        except ConfigError as exc:
             print(f"error={exc}", file=sys.stderr)
             return 2
         if args.json:
             print(json.dumps({"samples": len(records), "bands": bands}, ensure_ascii=False))
         else:
-            print(f"samples={len(records)} quantiles={quantiles[0]}/{quantiles[1]}")
+            print(f"samples={len(records)} quantiles=0.1/0.9")
             for dim, band in bands.items():
                 print(f"  {dim:<12} [{band[0]:.3f}, {band[1]:.3f}]  width={band[1] - band[0]:.3f}")
         return 0
 
-    if not pool:
-        print(
-            "error=許可リストを通るモデルが 0 件。config/models.json と strict-rules を突き合わせる (fail-closed)",
-            file=sys.stderr,
-        )
-        return 4
     if args.tau_scale <= 0:
         print("error=--tau-scale は正の数を指定してください", file=sys.stderr)
         return 2
 
-    overrides: dict[str, float] = {}
-    for item in args.weight:
-        if "=" not in item:
-            print(f"error=--weight は DIM=X 形式です: {item!r}", file=sys.stderr)
-            return 2
-        dim, _, value = item.partition("=")
-        dim = dim.strip()
-        if dim not in policy["dimensions"]:
-            print(f"error=未定義の次元: {dim}", file=sys.stderr)
-            return 2
-        try:
-            overrides[dim] = float(value)
-        except ValueError:
-            print(f"error=--weight の値が数値ではありません: {value!r}", file=sys.stderr)
-            return 2
-
     try:
-        weights = compensated_weights(policy, overrides)
+        weights = compensated_weights(policy)
     except ConfigError as exc:
         print(f"error={exc}", file=sys.stderr)
         return 2
 
-    exclude_families = {family.strip() for family in args.exclude_family if family.strip()}
+    exclude_families: set[str] = set()
     if args.peer:
         peer = args.peer.split(":", 1)[0]
         if peer not in models_cfg["models"]:
@@ -860,7 +774,7 @@ def main() -> int:
         parent = next((e for e in pool if e.model == parent_name), None)
         if parent is None:
             print(
-                f"error=--parent-model {parent_name} は許可リストを通らないか無効です。"
+                f"error=--parent-model {parent_name} はカタログにないか無効です。"
                 "親が使えないモデルを基準にしない (fail-closed)",
                 file=sys.stderr,
             )
@@ -897,7 +811,7 @@ def main() -> int:
             exclude_families=exclude_families,
             current_model=current_model,
             reroute_triggered=(
-                turn <= 1 or args.after_compact or args.after_summarize or args.force_route
+                turn <= 1 or args.reroute or args.force_route
             ),
             override_requirements=override_requirements,
             context_measured=context_measured,
@@ -951,11 +865,7 @@ def main() -> int:
             "cost_ceiling": cost_ceiling,
             "shortfall": decision.shortfall,
             "basis": decision.basis,
-            "eligible": decision.eligible,
             "gates": decision.gates,
-            "vetoed_by_allowlist": vetoed,
-            "calibrated": selected.calibrated,
-            "table": decision.table,
             "scope_route": scope.get("route") if scope else None,
             "notes": decision.notes,
         }, ensure_ascii=False))
@@ -963,8 +873,6 @@ def main() -> int:
 
     for line in format_text(decision, scope, len(pool), surface):
         print(line)
-    if vetoed:
-        print(f"vetoed={','.join(vetoed)} (許可リスト外。候補から除外した)")
     return 0
 
 

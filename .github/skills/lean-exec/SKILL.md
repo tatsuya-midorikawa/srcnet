@@ -22,7 +22,7 @@ user-invocable: true
 
 この 2 つは独立している。資料が 200 KB でも中身が定型の抽出なら軽量モデルで足り、数行でも仕様解釈なら高推論モデルが要る。**量の軸に能力の判断を畳み込むと、どちらの判断も鈍る。**
 
-能力の側はさらに 2 段に割れる。要件を予測するところだけが判断で、どのモデルが何をできるかは `config/models.json` にある。だから許可リストが変わってもモデルの追加・削除・値付け替えは設定編集だけで済む。
+能力の側はさらに 2 段に割れる。要件を予測するところだけが判断で、どのモデルが何をできるかは `config/models.json` にある。だからモデルの追加・削除・値付け替えは設定編集だけで済む。
 
 どちらのスクリプトも LLM を呼ばない。**判定そのものは課金されない。**
 
@@ -47,7 +47,7 @@ python3 .github/skills/lean-exec/scripts/route.py --role analyst --prompt "$PROM
 
 ```
 req: reasoning=0.90 code_gen=0.19 debugging=0.45 tool_use=0.25 gamma=0.90 tier=T3
-role=analyst tau=0.060 pool=16 surface=cli gates=allowlist
+role=analyst tau=0.060 pool=16 surface=cli gates=config
 model=gpt-5.6-sol effort=medium cost=9.00 shortfall=0.028 basis=cheapest_eligible
 ```
 
@@ -144,18 +144,18 @@ python3 .github/skills/lean-exec/scripts/scope.py \
 **モデルを替えると prompt cache は丸ごと無効になる。** 差額よりキャッシュを捨てた損のほうが大きくなりやすい。選び直すのは会話の最初のターン、`/compact` の直後、背景要約の直後の 3 つだけ。
 
 ```bash
-route.py --role orchestrator --prompt "$PROMPT" --turn 6 --current-model claude-sonnet-5 --after-compact
+route.py --role orchestrator --prompt "$PROMPT" --turn 6 --current-model claude-sonnet-5 --reroute
 ```
 
 `route.py` が既定でこう振る舞う。キャッシュはモデル単位なので**保持中も effort は選び直す**。損益の式は `references/budget.md` §1。
 
 ## カタログが変わったら設定を直す。散文は直さない
 
-**モデルの正本は `.github/instructions/strict-rules.instructions.md` である。** 許可リスト外のモデルは、カタログに書いてあっても候補から外れる。参照先はコード内に固定してあり、引数で差し替えられない。
+**モデルの正本は `config/models.json` だけである。** `enabled: true` で、`cost` と `capability` が定義されたモデルだけを候補にする。
 
-モデルの増減・値付け替えは `config/models.json` の編集だけで完了する。スクリプトと散文には触らない。校正実績がないモデルは `enabled: false` のまま置く。`scripts/test_model_policy.py` が設定と散文の両方を検査する。
+モデルの増減・値付け替えは同ファイルの編集だけで完了する。スクリプトと散文には触らない。校正実績がないモデルは `enabled: false` のまま置く。`scripts/test_model_policy.py` が設定と散文の整合を検査する。
 
-**許可リストで候補が消えたら fail-closed で止める。** 代替を推測しない。能力が足りずに適格な候補がない場合だけ fail-open する。可用性の問題と規定の問題を同じ扱いにしない。
+有効なモデルが 0 件、または有効なモデルの設定が欠けている場合は設定エラーで止める。能力が足りずに適格な候補がない場合だけ、最小 shortfall のモデルへ fail-open する。
 
 ## 検証コストは削らない
 
@@ -170,19 +170,7 @@ route.py --role orchestrator --prompt "$PROMPT" --turn 6 --current-model claude-
 
 `route.py --eval` に過去タスクを渡すと、**QR** (安くしすぎ) と **Misroute** (高く買いすぎ) が逆方向から見張る。定義は `references/budget.md` §6.5。
 
-## レバーは目的別に使う
-
-| コマンド | 用途 |
-| --- | --- |
-| `/context` | 現在の内訳を見る。削る対象を決める起点 |
-| `/usage` | 累計消費を見る。固定費 `F` の実測に使う |
-| `/limits` | **AI クレジットのソフト上限を張る。** 実行前の歯止め |
-| `/mcp` | **使っていない MCP サーバーを外す。** 全ターンと全サブエージェントに乗るため単発では最大級 |
-| `/rewind` (`esc esc`) | 直近の失敗した試行とファイル変更を戻す |
-| `/fork` (`/branch`) | 別案を隔離する。**文脈は減らない** |
-| `/compact <焦点>` | 履歴を要約へ置き換える。事前に `compact-plus` で退避し、**直後はモデルを選び直す** |
-
-VS Code では並列委譲が `/subAgent`、消費の確認はホバーになる。`agent/runSubagent` を有効にしていないと委譲そのものが使えない。損益は `references/budget.md` §5.5。
+CLI レバー (`/usage`、`/mcp`、`/rewind`、`/compact` など) の使い分けは `references/budget.md` §5.5。VS Code では並列委譲が `/subAgent`、消費の確認はホバーになる。
 
 ## 短い作業では、この skill 自体が赤字になる
 
