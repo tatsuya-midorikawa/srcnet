@@ -1,0 +1,128 @@
+name: build
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+permissions:
+    contents: read
+
+env:
+    DOTNET_NOLOGO: true
+    DOTNET_CLI_TELEMETRY_OPTOUT: true
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+    CI: true
+
+jobs:
+    build-test:
+        # macOS と Windows の両方が必須。一方でも未検証または失敗なら完了扱いにしない。
+        # docs/testing.md 4 を参照。
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+
+            - name: Restore
+              run: dotnet restore srcnet.slnx
+
+            - name: Build
+              run: dotnet build srcnet.slnx -c Release --no-restore
+
+            - name: Test
+              run: dotnet test srcnet.slnx -c Release --no-build
+
+    determinism:
+        # T-1: 同一入力から二度生成した成果物がバイト単位で一致すること。
+        # 並列度が出力に影響しないことも同時に確かめる。docs/testing.md T-1 を参照。
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+
+            - name: Publish CLI
+              run: dotnet publish src/Srcnet.Cli/Srcnet.Cli.fsproj -c Release -o artifacts/cli
+
+            - name: Index twice and compare (POSIX)
+              if: runner.os != 'Windows'
+              run: |
+                  ./artifacts/cli/srcnet index . --out artifacts/index-a --jobs 1
+                  ./artifacts/cli/srcnet index . --out artifacts/index-b --jobs 8
+                  diff -r artifacts/index-a artifacts/index-b
+                  ./artifacts/cli/srcnet verify . --out artifacts/index-a --deterministic
+
+            - name: Index twice and compare (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  ./artifacts/cli/srcnet.exe index . --out artifacts/index-a --jobs 1
+                  ./artifacts/cli/srcnet.exe index . --out artifacts/index-b --jobs 8
+                  $a = Get-ChildItem -Recurse -File artifacts/index-a | Sort-Object FullName
+                  $b = Get-ChildItem -Recurse -File artifacts/index-b | Sort-Object FullName
+                  if ($a.Count -ne $b.Count) { throw "セグメント数が一致しません" }
+                  for ($i = 0; $i -lt $a.Count; $i++) {
+                      $left = (Get-FileHash $a[$i].FullName -Algorithm SHA256).Hash
+                      $right = (Get-FileHash $b[$i].FullName -Algorithm SHA256).Hash
+                      if ($left -ne $right) { throw "$($a[$i].Name) が一致しません" }
+                  }
+                  ./artifacts/cli/srcnet.exe verify . --out artifacts/index-a --deterministic
+
+            - name: Upload manifest for cross-OS comparison
+              uses: actions/upload-artifact@v4
+              with:
+                  name: manifest-${{ matrix.os }}
+                  path: artifacts/index-a/manifest.json
+
+    cross-platform-determinism:
+        # T-1 の 3: macOS で生成した成果物と Windows で生成した成果物が一致すること。
+        # パス正規化・Unicode 正規化・改行の扱いを同時に検証する。
+        needs: determinism
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: manifest-macos-latest
+                  path: macos
+
+            - uses: actions/download-artifact@v4
+              with:
+                  name: manifest-windows-latest
+                  path: windows
+
+            - name: Compare manifests
+              run: diff macos/manifest.json windows/manifest.json
+
+    deps-audit:
+        # T-3: 製品コードの依存閉包にネットワーク クライアントとモデル ランタイムが
+        # 含まれないことを検査する。docs/testing.md T-3 を参照。
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+
+            - name: Publish CLI
+              run: dotnet publish src/Srcnet.Cli/Srcnet.Cli.fsproj -c Release -o artifacts/cli
+
+            - name: Assert no third-party runtime dependency
+              run: python3 .github/scripts/check_dependency_closure.py artifacts/cli/srcnet.deps.json
+
+            - name: Vulnerability scan
+              run: dotnet list srcnet.slnx package --vulnerable --include-transitive

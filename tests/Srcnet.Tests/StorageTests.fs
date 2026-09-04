@@ -1,0 +1,106 @@
+/// セグメント形式と文字列表のテスト。
+module Srcnet.Tests.StorageTests
+
+open System
+open Xunit
+open Srcnet.Storage
+
+let private header: Format.Header =
+  { Kind = Format.Nodes
+    PrimaryCount = 1234UL
+    SecondaryCount = 56UL
+    RecordLength = 64u
+    PayloadLength = 78912UL }
+
+[<Fact>]
+let ``ヘッダーは往復する`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader (Span buffer) header
+  let fileLength = int64 Format.HeaderLength + int64 header.PayloadLength
+
+  match Format.tryReadHeader (ReadOnlySpan buffer) fileLength with
+  | Ok parsed -> Assert.Equal(header, parsed)
+  | Error error -> failwith (Format.FormatError.describe error)
+
+[<Fact>]
+let ``マジック番号が違うセグメントは拒否される`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader (Span buffer) header
+  buffer[0] <- 0x00uy
+  let fileLength = int64 Format.HeaderLength + int64 header.PayloadLength
+  Assert.Equal(Error Format.BadMagic, Format.tryReadHeader (ReadOnlySpan buffer) fileLength)
+
+[<Fact>]
+let ``非互換な形式版は読まずに拒否される`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader (Span buffer) header
+  Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, 8, 4), 999u)
+  let fileLength = int64 Format.HeaderLength + int64 header.PayloadLength
+  Assert.Equal(Error(Format.UnsupportedVersion 999u), Format.tryReadHeader (ReadOnlySpan buffer) fileLength)
+
+[<Fact>]
+let ``宣言された長さと実際の長さの不一致を検出する`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader (Span buffer) header
+
+  match Format.tryReadHeader (ReadOnlySpan buffer) 10L with
+  | Error(Format.LengthMismatch(declared, actual)) ->
+    Assert.Equal(header.PayloadLength, declared)
+    Assert.Equal(10L, actual)
+  | other -> failwith $"長さの不一致を検出できませんでした: {other}"
+
+[<Fact>]
+let ``短すぎるセグメントは拒否される`` () =
+  Assert.Equal(Error Format.TooShort, Format.tryReadHeader (ReadOnlySpan(Array.zeroCreate<byte> 10)) 10L)
+
+[<Fact>]
+let ``未知のセグメント種別は拒否される`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader (Span buffer) header
+  Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, 12, 4), 200u)
+  let fileLength = int64 Format.HeaderLength + int64 header.PayloadLength
+  Assert.Equal(Error(Format.UnknownSegmentKind 200u), Format.tryReadHeader (ReadOnlySpan buffer) fileLength)
+
+[<Fact>]
+let ``セグメント種別コードは往復する`` () =
+  let all =
+    [ Format.Nodes; Format.Files; Format.Strings; Format.StringOffsets; Format.AdjacencyCsr; Format.IdMap ]
+
+  for kind in all do
+    Assert.Equal(ValueSome kind, Format.SegmentKind.ofCode (Format.SegmentKind.toCode kind))
+
+// --- 文字列表 ---
+
+[<Fact>]
+let ``空文字列は常に索引 0 である`` () =
+  let table = Strings.StringTable()
+  Assert.Equal(0, table.Intern "")
+  Assert.Equal(1, table.Count)
+
+[<Fact>]
+let ``同じ文字列は同じ索引を返す`` () =
+  let table = Strings.StringTable()
+  let first = table.Intern "kernel/sched"
+  let second = table.Intern "kernel/sched"
+  Assert.Equal(first, second)
+  Assert.Equal(2, table.Count)
+
+[<Fact>]
+let ``オフセットは累積和になり、末尾は blob 長に一致する`` () =
+  let table = Strings.StringTable()
+  table.Intern "abc" |> ignore
+  table.Intern "日本語" |> ignore
+  let offsets = table.Offsets()
+  Assert.Equal(table.Count + 1, offsets.Length)
+  Assert.Equal(0UL, offsets[0])
+  Assert.Equal(0UL, offsets[1])
+  Assert.Equal(3UL, offsets[2])
+  // 日本語は UTF-8 で 9 バイト。
+  Assert.Equal(12UL, offsets[3])
+  Assert.Equal(uint64 table.TotalBytes, offsets[table.Count])
+
+[<Fact>]
+let ``CJK 文字列のバイト長を正しく数える`` () =
+  let table = Strings.StringTable()
+  let index = table.Intern "日本語"
+  Assert.Equal(9, table.ByteLength index)

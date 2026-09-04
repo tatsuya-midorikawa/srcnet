@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <RootNamespace>Srcnet.Benchmarks</RootNamespace>
+        <IsPackable>false</IsPackable>
+        <!-- ベンチマークは Release でのみ意味を持つ -->
+        <Optimize>true</Optimize>
+        <ServerGarbageCollection>true</ServerGarbageCollection>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="HashBenchmarks.fs" />
+        <Compile Include="Program.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../../src/Srcnet.Core/Srcnet.Core.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Text/Srcnet.Text.fsproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- ベンチマーク専用依存。PrivateAssets=all により製品成果物の依存閉包へ入らない -->
+        <PackageReference Include="BenchmarkDotNet" PrivateAssets="all" />
+    </ItemGroup>
+
+</Project>

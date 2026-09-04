@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <RootNamespace>Srcnet.Discovery</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Ignore.fs" />
+        <Compile Include="Classify.fs" />
+        <Compile Include="Content.fs" />
+        <Compile Include="Walk.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
+        <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
+    </ItemGroup>
+
+</Project>

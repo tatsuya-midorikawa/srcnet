@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <RootNamespace>Srcnet.Storage</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Format.fs" />
+        <Compile Include="Strings.fs" />
+        <Compile Include="Writer.fs" />
+        <Compile Include="Manifest.fs" />
+        <Compile Include="Reader.fs" />
+        <Compile Include="Stats.fs" />
+        <Compile Include="Verify.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
+        <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
+    </ItemGroup>
+
+</Project>

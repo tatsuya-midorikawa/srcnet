@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <AssemblyName>srcnet</AssemblyName>
+        <RootNamespace>Srcnet.Cli</RootNamespace>
+        <InvariantGlobalization>false</InvariantGlobalization>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Terminal.fs" />
+        <Compile Include="Args.fs" />
+        <Compile Include="Commands.fs" />
+        <Compile Include="Program.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
+        <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
+        <ProjectReference Include="../Srcnet.Discovery/Srcnet.Discovery.fsproj" />
+        <ProjectReference Include="../Srcnet.Storage/Srcnet.Storage.fsproj" />
+    </ItemGroup>
+
+</Project>

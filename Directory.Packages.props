@@ -1,4 +1,4 @@
-﻿<Project>
+<Project>
 
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
@@ -11,6 +11,26 @@
     詳細は .github/instructions/fsharp-dotnet.instructions.md と docs/security.md 3 を参照。
   -->
   <ItemGroup>
+    <!--
+      Central Package Management を有効にすると、F# SDK は FSharp.Core の暗黙参照を
+      無効化する（DisableImplicitFSharpCoreReference=true）。ここで版を宣言しないと
+      実行時に FSharp.Core が出力へ複製されず、起動に失敗する。
+      版は global.json が指定する SDK に同梱されるものへ合わせること。
+    -->
+    <PackageVersion Include="FSharp.Core" Version="10.0.102" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- テスト専用。製品成果物には含めない -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="2.5.7" />
+    <PackageVersion Include="FsCheck" Version="3.3.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ベンチマーク専用。製品成果物には含めない -->
+    <PackageVersion Include="BenchmarkDotNet" Version="0.13.12" />
   </ItemGroup>
 
 </Project>

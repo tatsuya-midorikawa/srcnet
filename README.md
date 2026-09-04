@@ -1,10 +1,12 @@
-﻿# srcnet
+# srcnet
 
 `srcnet` は、ソースコードから **AI を一切使わずに** ナレッジ グラフを生成し、AI コーディング エージェントが「リポジトリ全体を読む」代わりに参照できるようにするツールです。
 
 Chromium や Linux カーネルのような数千万行規模のリポジトリを、実用的な時間とメモリで扱いきることを最優先の設計目標としています。
 
-> **状態: 設計段階。** 実装はまだありません。この README と [docs/](docs/) は実装に先立つ仕様であり、記載された性能値はすべて計測前の「目標」です。
+> **状態: 開発初期。** [マイルストーン](docs/roadmap.md) M0（基盤）と M1（構造グラフ）を実装済みです。
+> シンボル抽出、解決、増分更新、検索はまだありません。記載された性能値のうち実測済みのものは
+> [性能](docs/performance.md) 5.1 に、それ以外は目標として本文に記載しています。
 
 ## 解決する問題
 
@@ -47,6 +49,55 @@ srcnet はリポジトリの構造を事前に一度だけ解析してグラフ�
 - **決定的**: 同一入力に対してバイト単位で同一の成果物を生成する
 - **有界**: メモリ使用量をリポジトリ規模に対して有界に保つ
 - **移植性**: macOS と Windows を対等に扱い、CJK を含む入力で破綻しない
+
+## 使い方
+
+.NET 10 SDK が必要です（[global.json](global.json) で版を固定しています）。
+
+```console
+$ dotnet build srcnet.slnx -c Release
+$ dotnet test srcnet.slnx -c Release
+```
+
+現時点で動作するサブコマンドは次の 3 つです。
+
+```console
+$ srcnet index <path> [--out <dir>] [--jobs <n>] [--no-gitignore] [--json]
+$ srcnet stats [<path>] [--out <dir>] [--json]
+$ srcnet verify [<path>] [--out <dir>] [--deterministic] [--json]
+```
+
+`index` はリポジトリを走査して `Repository` / `Directory` / `File` ノードと `CONTAINS` エッジを
+`<repo>/.srcnet/` へ書き出します。`verify --deterministic` は同じ入力から二度生成し、成果物が
+バイト単位で一致することを確認します。オプションの一覧は `srcnet --help` にあります。
+
+```console
+$ srcnet index .
+リポジトリ: srcnet
+ディレクトリ: 27
+ファイル: 68
+ノード: 96
+エッジ (CONTAINS): 95
+文字列: 173 (3485 バイト)
+完全な走査: はい
+```
+
+`stdout` には結果のみを出力し、進捗・警告・診断は `stderr` へ出します。終了コードは
+[クエリと CLI](docs/query-and-cli.md) 2.2 に従います。
+
+## 実装の構成
+
+| プロジェクト | 内容 |
+| --- | --- |
+| `src/Srcnet.Text` | Unicode 正規化、東アジア文字幅、符号化判定、出力の無害化、語分割 |
+| `src/Srcnet.Core` | BLAKE3、ノード ID、論理パス、グラフの領域モデル、診断 |
+| `src/Srcnet.Discovery` | 走査、`.gitignore` 照合、言語分類、読取と内容ハッシュ |
+| `src/Srcnet.Storage` | 列指向セグメント、CSR、マニフェスト、mmap 読み取り、検証 |
+| `src/Srcnet.Cli` | 引数解析、端末出力、サブコマンド |
+| `tests/Srcnet.Tests` | 単体・性質・通しテスト |
+| `bench/Srcnet.Benchmarks` | ベンチマーク（開発専用依存） |
+
+製品コードの依存は `FSharp.Core` のみで、CI が依存閉包を機械的に検査します。
 
 ## ドキュメント
 

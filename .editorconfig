@@ -1,19 +1,30 @@
 # EditorConfig — https://editorconfig.org
-# windbg-vscode (F# / Fable) 開発用設定
+# srcnet 開発用設定
 
 # このファイルがプロジェクトのルート設定であることを示す
 root = true
 
 ##############################################
 # 全ファイル共通
+#
+# BOM なし UTF-8 と LF に統一する。BOM は一部のツールで問題を起こし、
+# CRLF は macOS 側の開発と衝突する。改行の統一は成果物の決定性
+# （docs/requirements.md NFR-11）の前提でもある。
+# 判断の記録は docs/decisions.md ADR-7 を参照。
 ##############################################
 [*]
-charset = utf-8-bom
-end_of_line = crlf
+charset = utf-8
+end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 indent_style = space
 indent_size = 2
+
+##############################################
+# Windows でのみ実行されるスクリプト
+##############################################
+[*.{cmd,bat,ps1}]
+end_of_line = crlf
 
 ##############################################
 # F# ソース (.fs / .fsx / .fsi)
@@ -61,7 +72,7 @@ fsharp_experimental_keep_indent_in_branch = false
 ##############################################
 # F# プロジェクト / MSBuild / XML ファイル
 ##############################################
-[*.{fsproj,csproj,props,targets,xml,config}]
+[*.{fsproj,props,targets,xml,config,slnx}]
 indent_style = space
 indent_size = 4
 
@@ -71,13 +82,6 @@ indent_size = 4
 [*.{json,jsonc}]
 indent_style = space
 indent_size = 4
-
-##############################################
-# JavaScript / TypeScript（Fable 出力・補助スクリプト）
-##############################################
-[*.{js,mjs,cjs,ts}]
-indent_style = space
-indent_size = 2
 
 ##############################################
 # YAML（CI ワークフローなど）

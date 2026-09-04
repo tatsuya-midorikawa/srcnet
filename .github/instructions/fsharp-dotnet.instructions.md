@@ -1,4 +1,4 @@
-﻿---
+---
 description: "Use when implementing, reviewing, refactoring, testing, optimizing, or configuring ultra-fast and lightweight F# 10 applications and libraries on .NET 10. Enforces macOS and Windows compatibility, defect-free and secure operation, CJK support, crash and freeze prevention, large-file and search performance, resource efficiency, SIMD, testing, and tooling practices."
 name: "F# 10 and .NET 10 Engineering"
 applyTo: "**/*.fs, **/*.fsi, **/*.fsx, **/*.fsproj, **/global.json, **/Directory.Build.props, **/Directory.Build.targets, **/Directory.Packages.props, **/*.sln, **/*.slnx, .github/workflows/*.yml, .github/workflows/*.yaml"

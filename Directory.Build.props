@@ -1,12 +1,20 @@
-﻿<Project>
+<Project>
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>10.0</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <WarningLevel>9999</WarningLevel>
+    <!-- F# コンパイラの警告レベルは 0..5 で、5 が最大 -->
+    <WarningLevel>5</WarningLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- 未使用の束縛、壊れた XML doc、inline されなかった InlineIfLambda を見逃さない -->
+    <WarnOn>1182;3390;3517;3559</WarnOn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- 実装段階に合わせた版。srcnet の版表示と manifest.json の toolVersion に現れる -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -26,5 +34,14 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Central Package Management が有効な場合、F# SDK は FSharp.Core の暗黙参照を
+      無効化する（Microsoft.FSharp.NetSdk.props）。明示的に参照しないと実行時に
+      FSharp.Core が出力へ複製されず起動に失敗する。版は Directory.Packages.props で管理する。
+    -->
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
 
 </Project>

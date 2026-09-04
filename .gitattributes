@@ -1,0 +1,25 @@
+# 改行の正規化はプラットフォーム間の決定性の前提である。
+# 作業ツリーの改行が OS で変わると、内容ハッシュとノード ID が OS 依存になり、
+# 決定性要件 NFR-11 が破れる。docs/decisions.md ADR-7 を参照。
+* text=auto eol=lf
+
+# Windows でのみ実行されるスクリプトは CRLF を必要とする。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# バイナリとして扱い、改行変換もマージも行わないもの。
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+
+# srcnet の生成物はバイナリ セグメントを含む。差分を取らない。
+*.nodes binary
+*.files binary
+*.strings binary
+*.stroffsets binary
+*.idmap binary
+*.tombstones binary

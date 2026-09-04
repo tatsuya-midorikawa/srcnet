@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <RootNamespace>Srcnet.Tests</RootNamespace>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+        <!--
+          FsCheck は null 許容注釈を持たないため、生成値の受け渡しで nullness 警告が出る。
+          製品コードでは nullness を有効のままにし、例外はこのテスト プロジェクトに限定する。
+        -->
+        <Nullable>disable</Nullable>
+        <!-- テスト名は日本語の逐語識別子を使うため、記号を含む識別子の警告を許容する -->
+        <NoWarn>$(NoWarn);FS0064</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Blake3Tests.fs" />
+        <Compile Include="TextTests.fs" />
+        <Compile Include="EncodingTests.fs" />
+        <Compile Include="CoreTests.fs" />
+        <Compile Include="DiscoveryTests.fs" />
+        <Compile Include="StorageTests.fs" />
+        <Compile Include="IndexTests.fs" />
+        <Compile Include="PropertyTests.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../../src/Srcnet.Core/Srcnet.Core.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Text/Srcnet.Text.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Discovery/Srcnet.Discovery.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Storage/Srcnet.Storage.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Cli/Srcnet.Cli.fsproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- 開発専用依存。PrivateAssets=all により製品成果物の依存閉包へ入らない -->
+        <PackageReference Include="Microsoft.NET.Test.Sdk" PrivateAssets="all" />
+        <PackageReference Include="xunit" PrivateAssets="all" />
+        <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+        <PackageReference Include="FsCheck" PrivateAssets="all" />
+    </ItemGroup>
+
+</Project>
