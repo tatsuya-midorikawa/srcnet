@@ -1,0 +1,101 @@
+# EditorConfig — https://editorconfig.org
+# windbg-vscode (F# / Fable) 開発用設定
+
+# このファイルがプロジェクトのルート設定であることを示す
+root = true
+
+##############################################
+# 全ファイル共通
+##############################################
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+##############################################
+# F# ソース (.fs / .fsx / .fsi)
+##############################################
+[*.{fs,fsx,fsi}]
+indent_style = space
+indent_size = 2
+
+# Fantomas (F# フォーマッタ) 設定
+# https://fsprojects.github.io/fantomas/docs/end-users/Configuration.html
+max_line_length = 120
+fsharp_max_line_length = 120
+
+# 関数型スタイルを重視した整形
+fsharp_space_before_uppercase_invocation = false
+fsharp_space_before_lowercase_invocation = false
+fsharp_space_before_class_constructor = false
+fsharp_space_before_member = false
+fsharp_space_before_colon = false
+fsharp_space_after_comma = true
+fsharp_space_before_semicolon = false
+fsharp_space_after_semicolon = true
+fsharp_space_around_delimiter = true
+
+# 制御構文・式の整形
+fsharp_max_if_then_else_short_width = 60
+fsharp_max_infix_operator_expression = 80
+fsharp_keep_if_then_in_same_line = true
+fsharp_indent_on_try_with = false
+
+# 型定義・メンバーの整形
+fsharp_newline_between_type_definition_and_members = true
+fsharp_bar_before_discriminated_union_declaration = false
+fsharp_alternative_long_member_definitions = false
+
+# 複数行のブラケット・ラムダの整形
+fsharp_multiline_block_brackets_on_same_column = false
+fsharp_multi_line_lambda_closing_newline = false
+fsharp_blank_lines_around_nested_multiline_expressions = true
+
+# 命名・整列
+fsharp_align_function_signature_to_indentation = false
+fsharp_experimental_keep_indent_in_branch = false
+
+##############################################
+# F# プロジェクト / MSBuild / XML ファイル
+##############################################
+[*.{fsproj,csproj,props,targets,xml,config}]
+indent_style = space
+indent_size = 4
+
+##############################################
+# JSON / JSONC（package.json, tsconfig, dotnet-tools.json など）
+##############################################
+[*.{json,jsonc}]
+indent_style = space
+indent_size = 4
+
+##############################################
+# JavaScript / TypeScript（Fable 出力・補助スクリプト）
+##############################################
+[*.{js,mjs,cjs,ts}]
+indent_style = space
+indent_size = 2
+
+##############################################
+# YAML（CI ワークフローなど）
+##############################################
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 4
+
+##############################################
+# Markdown（行末空白はソフト改行として保持）
+##############################################
+[*.md]
+trim_trailing_whitespace = false
+indent_size = 4
+
+##############################################
+# シェルスクリプト
+##############################################
+[*.sh]
+indent_style = space
+indent_size = 4

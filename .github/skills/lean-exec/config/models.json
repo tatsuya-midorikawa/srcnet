@@ -1,0 +1,98 @@
+{
+  "models": {
+    "claude-haiku-4.5": {
+      "enabled": true,
+      "calibrated": false,
+      "cost": 1.0,
+      "capability": {
+        "reasoning": 30,
+        "code_gen": 40,
+        "debugging": 30,
+        "tool_use": 45
+      },
+      "efforts": ["none"],
+      "context_tiers": ["default"]
+    },
+    "claude-sonnet-5": {
+      "enabled": true,
+      "calibrated": false,
+      "cost": 5.0,
+      "capability": {
+        "reasoning": 70,
+        "code_gen": 85,
+        "debugging": 75,
+        "tool_use": 80
+      },
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "context_tiers": ["default", "long_context"]
+    },
+    "gpt-5.6-sol": {
+      "enabled": true,
+      "calibrated": false,
+      "cost": 9.0,
+      "capability": {
+        "reasoning": 95,
+        "code_gen": 85,
+        "debugging": 92,
+        "tool_use": 88
+      },
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "context_tiers": ["default", "long_context"]
+    },
+    "claude-opus-5": {
+      "enabled": true,
+      "calibrated": false,
+      "cost": 22.0,
+      "capability": {
+        "reasoning": 97,
+        "code_gen": 90,
+        "debugging": 95,
+        "tool_use": 92
+      },
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "context_tiers": ["default", "long_context"]
+    },
+    "gpt-5.6-terra": {
+      "enabled": false,
+      "calibrated": false,
+      "cost": null,
+      "capability": null,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "context_tiers": ["default", "long_context"]
+    },
+    "gpt-5.6-luna": {
+      "enabled": false,
+      "calibrated": false,
+      "cost": null,
+      "capability": null,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "context_tiers": ["default", "long_context"]
+    }
+  },
+  "effort_variants": {
+    "none": {
+      "band_delta": 0.0,
+      "cost_multiplier": 1.0
+    },
+    "low": {
+      "band_delta": -0.15,
+      "cost_multiplier": 0.7
+    },
+    "medium": {
+      "band_delta": 0.0,
+      "cost_multiplier": 1.0
+    },
+    "high": {
+      "band_delta": 0.06,
+      "cost_multiplier": 1.4
+    },
+    "xhigh": {
+      "band_delta": 0.1,
+      "cost_multiplier": 1.9
+    },
+    "max": {
+      "band_delta": 0.13,
+      "cost_multiplier": 2.5
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "bash \".github/hooks/compact-plus/session-index.sh\"",
+        "timeout": 10
+      }
+    ],
+    "PreCompact": [
+      {
+        "type": "command",
+        "command": "bash \".github/hooks/compact-plus/precompact-backup.sh\"",
+        "timeout": 30
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "bash \".github/hooks/compact-plus/recovery-inject.sh\"",
+        "timeout": 10
+      }
+    ]
+  }
+}
