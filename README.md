@@ -4,8 +4,9 @@
 
 Chromium や Linux カーネルのような数千万行規模のリポジトリを、実用的な時間とメモリで扱いきることを最優先の設計目標としています。
 
-> **状態: 開発初期。** [マイルストーン](docs/roadmap.md) M0（基盤）と M1（構造グラフ）を実装済みです。
-> シンボル抽出、解決、増分更新、検索はまだありません。記載された性能値のうち実測済みのものは
+> **状態: 開発初期。** [マイルストーン](docs/roadmap.md) M0（基盤）と M1（構造グラフ）を実装済みで、
+> M2 の構文解析基盤（tree-sitter の統合）まで入っています。シンボルのグラフ化、解決、
+> 増分更新、検索はまだありません。記載された性能値のうち実測済みのものは
 > [性能](docs/performance.md) 5.1 に、それ以外は目標として本文に記載しています。
 
 ## 解決する問題
@@ -19,6 +20,7 @@ srcnet はリポジトリの構造を事前に一度だけ解析してグラフ�
 | | 既存ツール（graphify / code-review-graph 系） | srcnet |
 | --- | --- | --- |
 | 実装 | Python | F# 10 / .NET 10 |
+| 構文解析 | tree-sitter ほか | tree-sitter |
 | 保存形式 | 単一 JSON / SQLite | 列指向 + memory-mapped セグメント |
 | 想定規模 | 数千〜数万ファイル | 数十万ファイル / 数千万行 |
 | コード解析の LLM | 不使用 | 不使用 |
@@ -92,12 +94,29 @@ $ srcnet index .
 | `src/Srcnet.Text` | Unicode 正規化、東アジア文字幅、符号化判定、出力の無害化、語分割 |
 | `src/Srcnet.Core` | BLAKE3、ノード ID、論理パス、グラフの領域モデル、診断 |
 | `src/Srcnet.Discovery` | 走査、`.gitignore` 照合、言語分類、読取と内容ハッシュ |
+| `src/Srcnet.Extraction` | tree-sitter による構文解析（相互運用の境界検証を含む） |
 | `src/Srcnet.Storage` | 列指向セグメント、CSR、マニフェスト、mmap 読み取り、検証 |
 | `src/Srcnet.Cli` | 引数解析、端末出力、サブコマンド |
 | `tests/Srcnet.Tests` | 単体・性質・通しテスト |
 | `bench/Srcnet.Benchmarks` | ベンチマーク（開発専用依存） |
 
-製品コードの依存は `FSharp.Core` のみで、CI が依存閉包を機械的に検査します。
+製品コードの managed 依存は `FSharp.Core` のみで、CI が依存閉包を機械的に検査します。
+唯一のネイティブ依存が構文解析器の tree-sitter で、版とチェックサムを
+[native/sources.json](native/sources.json) で固定しています。
+
+### 構文解析器の構築
+
+構文解析は任意の構成要素です。構築しなくてもビルド・テスト・`index` は動作し、
+その場合は構造グラフ（ファイル・ディレクトリ・`CONTAINS`）までが生成されます。
+
+```console
+$ python3 tools/build_native.py                       # 全言語
+$ python3 tools/build_native.py --languages c python  # 一部の言語
+```
+
+同梱できる文法は C, C++, Python, Rust, Go, Java, JavaScript, C#, TypeScript, TSX, F# です。
+C コンパイラと、初回のみ GitHub への到達性が必要です。詳細は
+[native/README.md](native/README.md) を参照してください。
 
 ## ドキュメント
 

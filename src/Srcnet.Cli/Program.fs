@@ -33,6 +33,15 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
       return Commands.ExitCode.Success
     | Ok Args.Version ->
       Terminal.outLine $"srcnet {Srcnet.Storage.Manifest.toolVersion}"
+
+      // 構文解析器は任意の構成要素なので、解析できる言語を版と一緒に示す。
+      // 構築の有無を確かめる手段がないと、抽出結果が変わった原因を切り分けられない。
+      match Srcnet.Extraction.Parsing.availableLanguages () with
+      | [||] -> Terminal.outLine "構文解析器: 未構築 (python3 tools/build_native.py で構築します)"
+      | languages ->
+        let joined = String.Join(", ", languages)
+        Terminal.outLine $"構文解析器: {joined}"
+
       return Commands.ExitCode.Success
     | Ok(Args.Index arguments) -> return! Commands.index arguments cancellation
     | Ok(Args.Stats arguments) -> return Commands.stats arguments

@@ -21,6 +21,7 @@
         <Compile Include="DiscoveryTests.fs" />
         <Compile Include="StorageTests.fs" />
         <Compile Include="IndexTests.fs" />
+        <Compile Include="ExtractionTests.fs" />
         <Compile Include="PropertyTests.fs" />
     </ItemGroup>
 
@@ -29,6 +30,7 @@
         <ProjectReference Include="../../src/Srcnet.Text/Srcnet.Text.fsproj" />
         <ProjectReference Include="../../src/Srcnet.Discovery/Srcnet.Discovery.fsproj" />
         <ProjectReference Include="../../src/Srcnet.Storage/Srcnet.Storage.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Extraction/Srcnet.Extraction.fsproj" />
         <ProjectReference Include="../../src/Srcnet.Cli/Srcnet.Cli.fsproj" />
     </ItemGroup>
 

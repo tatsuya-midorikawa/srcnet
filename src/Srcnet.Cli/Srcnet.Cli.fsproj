@@ -18,6 +18,7 @@
         <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
         <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
         <ProjectReference Include="../Srcnet.Discovery/Srcnet.Discovery.fsproj" />
+        <ProjectReference Include="../Srcnet.Extraction/Srcnet.Extraction.fsproj" />
         <ProjectReference Include="../Srcnet.Storage/Srcnet.Storage.fsproj" />
     </ItemGroup>
 

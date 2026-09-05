@@ -432,3 +432,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# tree-sitter の取得物と構築成果物。版は native/sources.json で固定する
+native/.cache/
+native/.build/
+native/build/

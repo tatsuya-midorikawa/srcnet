@@ -71,7 +71,7 @@ flowchart TD
 Srcnet.Core          純粋な領域モデル、グラフ表現、ID 計算、決定的アルゴリズム
 Srcnet.Text          エンコーディング検出、Unicode 正規化、字句走査、表示幅
 Srcnet.Discovery     走査、無視設定、言語分類、読取と内容ハッシュ（段 1〜3）
-Srcnet.Extraction    言語別抽出器と抽出結果の共通表現
+Srcnet.Extraction    tree-sitter による構文解析と、言語別抽出器・抽出結果の共通表現
 Srcnet.Resolution    大域シンボル表とエッジ解決
 Srcnet.Storage       セグメント形式、mmap 読み書き、索引、増分管理
 Srcnet.Analysis      中心性、コミュニティ検出、コミュニティ命名
@@ -84,6 +84,10 @@ Srcnet.Cli           コマンド解析、進捗表示、終了コード
 `Core` と `Text` は I/O を持たない純粋層で、副作用は `Discovery`、`Storage`、`Cli` の境界に閉じる。
 
 抽出器は共通インターフェイスを実装するが、**プラグインを外部から動的読み込みしない**。対象リポジトリ由来のコードを実行しないという脅威モデル上の制約による（[セキュリティ](security.md)）。
+
+構文解析には tree-sitter を再利用する（[設計判断](decisions.md) ADR-3）。同梱する文法は
+コンパイル時に固定した一覧で、対象リポジトリの内容や設定から文法を読み込む経路は持たない。
+共有ライブラリが無い環境では構文解析を「利用不可」として扱い、構造グラフの生成は続行する。
 
 ## 5. エラーと部分的失敗
 

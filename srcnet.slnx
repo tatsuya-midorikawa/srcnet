@@ -6,6 +6,7 @@
     <Project Path="src/Srcnet.Cli/Srcnet.Cli.fsproj" />
     <Project Path="src/Srcnet.Core/Srcnet.Core.fsproj" />
     <Project Path="src/Srcnet.Discovery/Srcnet.Discovery.fsproj" />
+    <Project Path="src/Srcnet.Extraction/Srcnet.Extraction.fsproj" />
     <Project Path="src/Srcnet.Storage/Srcnet.Storage.fsproj" />
     <Project Path="src/Srcnet.Text/Srcnet.Text.fsproj" />
   </Folder>

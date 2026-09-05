@@ -56,7 +56,9 @@ let private languageOfCode (code: uint16) =
        Toml
        Xml
        Markdown
-       Owners |]
+       Owners
+       Tsx
+       FSharpSignature |]
 
   match all |> Array.tryFind (fun language -> Language.toCode language = code) with
   | Some language -> language

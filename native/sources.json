@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "構文解析器として tree-sitter を再利用する（docs/decisions.md ADR-3）。",
+    "文法の生成済み parser.c は 1 言語で数 MB から 30 MB あり、対応言語を増やすほど",
+    "リポジトリに載せられない大きさになるため、版とチェックサムを固定したうえで取得する。",
+    "取得先・版・チェックサムをここで固定することが供給網に対する防御になる。",
+    "1 つのリポジトリが複数の文法を持つ場合は subdirectory で指定する。",
+    "取得と構築は tools/build_native.py が行い、成果物は native/build/ に置かれる。",
+    "fsharp_signature は同梱しない。実測では module 宣言を含む現実的な .fsi を解析できず、通常の fsharp 文法が同じ入力を誤りなく解析したため（docs/decisions.md ADR-3）。"
+  ],
+  "runtime": {
+    "repository": "tree-sitter/tree-sitter",
+    "version": "v0.25.10",
+    "sha256": "ad5040537537012b16ef6e1210a572b927c7cdc2b99d1ee88d44a7dcdc3ff44c",
+    "license": "MIT",
+    "_note": "ABI 13..15 に対応する。F# の文法が ABI 15 を要求するため 0.24 系では読み込めない。 0.26 以降は ts_parser_set_timeout_micros / ts_parser_set_cancellation_flag を 削除しているため、更新時は進捗コールバック API への移行が必要になる。"
+  },
+  "grammars": [
+    {
+      "language": "c",
+      "repository": "tree-sitter/tree-sitter-c",
+      "version": "v0.23.4",
+      "sha256": "b66c5043e26d84e5f17a059af71b157bcf202221069ed220aa1696d7d1d28a7a",
+      "symbol": "tree_sitter_c",
+      "license": "MIT"
+    },
+    {
+      "language": "cpp",
+      "repository": "tree-sitter/tree-sitter-cpp",
+      "version": "v0.23.4",
+      "sha256": "7a2c55afe3028f4105f25762ea58cc16537d1f5a1dcd9cca90410b3cd5d46051",
+      "symbol": "tree_sitter_cpp",
+      "license": "MIT"
+    },
+    {
+      "language": "python",
+      "repository": "tree-sitter/tree-sitter-python",
+      "version": "v0.23.6",
+      "sha256": "630a0f45eccd9b69a66a07bf47d1568e96a9c855a2f30e0921c8af7121e8af96",
+      "symbol": "tree_sitter_python",
+      "license": "MIT"
+    },
+    {
+      "language": "rust",
+      "repository": "tree-sitter/tree-sitter-rust",
+      "version": "v0.23.2",
+      "sha256": "71ce61738f8aff4531afed443572ca68aa74a66a07569a1d50863eb34787c782",
+      "symbol": "tree_sitter_rust",
+      "license": "MIT"
+    },
+    {
+      "language": "go",
+      "repository": "tree-sitter/tree-sitter-go",
+      "version": "v0.23.4",
+      "sha256": "967870d7d120e9b760e538aeb8331a72f70ffcca4f1eaf1e1dea5375886d25d2",
+      "symbol": "tree_sitter_go",
+      "license": "MIT"
+    },
+    {
+      "language": "java",
+      "repository": "tree-sitter/tree-sitter-java",
+      "version": "v0.23.5",
+      "sha256": "cb199e0faae4b2c08425f88cbb51c1a9319612e7b96315a174a624db9bf3d9f0",
+      "symbol": "tree_sitter_java",
+      "license": "MIT"
+    },
+    {
+      "language": "javascript",
+      "repository": "tree-sitter/tree-sitter-javascript",
+      "version": "v0.23.1",
+      "sha256": "fc5b8f5a491a6db33ca4854b044b89363ff7615f4291977467f52c1b92a0c032",
+      "symbol": "tree_sitter_javascript",
+      "license": "MIT"
+    },
+    {
+      "language": "csharp",
+      "repository": "tree-sitter/tree-sitter-c-sharp",
+      "version": "v0.23.1",
+      "sha256": "c0b008dca3c6820604bf0853b9668ba034f9750d89d170ba834261e94e2cd917",
+      "symbol": "tree_sitter_c_sharp",
+      "license": "MIT"
+    },
+    {
+      "language": "typescript",
+      "repository": "tree-sitter/tree-sitter-typescript",
+      "version": "v0.23.2",
+      "sha256": "2c4ce711ae8d1218a3b2f899189298159d672870b5b34dff5d937bed2f3e8983",
+      "subdirectory": "typescript",
+      "symbol": "tree_sitter_typescript",
+      "license": "MIT"
+    },
+    {
+      "language": "tsx",
+      "repository": "tree-sitter/tree-sitter-typescript",
+      "version": "v0.23.2",
+      "sha256": "2c4ce711ae8d1218a3b2f899189298159d672870b5b34dff5d937bed2f3e8983",
+      "subdirectory": "tsx",
+      "symbol": "tree_sitter_tsx",
+      "license": "MIT"
+    },
+    {
+      "language": "fsharp",
+      "repository": "ionide/tree-sitter-fsharp",
+      "version": "v0.2.0",
+      "sha256": "cb7aedceb6e215304023558e9192ac84c492a03356c154b10147bff21d605143",
+      "subdirectory": "fsharp",
+      "symbol": "tree_sitter_fsharp",
+      "license": "MIT"
+    }
+  ]
+}

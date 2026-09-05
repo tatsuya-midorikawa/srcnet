@@ -162,3 +162,15 @@ let ``規則数の上限を超えた無視ファイルは切り詰められる``
   Assert.True rules.IsTruncated
   let withinLimit = ruleSet 0 [ "*.o" ]
   Assert.False withinLimit.IsTruncated
+
+[<Fact>]
+let ``tsx と fsi は文法が異なるため別の言語として分類する`` () =
+  let language path = Classify.language (ok (tryCreate path))
+  Assert.Equal(TypeScript, language "src/app.ts")
+  Assert.Equal(TypeScript, language "src/app.mts")
+  // JSX を含むため TypeScript とは別の文法で解析する。
+  Assert.Equal(Tsx, language "src/App.tsx")
+  Assert.Equal(FSharp, language "src/Program.fs")
+  Assert.Equal(FSharp, language "build.fsx")
+  // シグネチャ ファイルは本体と区別して記録する。
+  Assert.Equal(FSharpSignature, language "src/Program.fsi")

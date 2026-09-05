@@ -4,6 +4,10 @@
 docs/testing.md T-3 に対応する。ネットワーク クライアントとモデル ランタイムが
 製品バイナリの依存閉包に含まれないことを、許可リスト方式で機械的に確認する。
 新しい依存を意図して追加した場合は ALLOWED を更新すること。
+
+唯一のネイティブ依存である tree-sitter は managed の依存閉包には現れない。
+その供給網上の統制は native/sources.json での版とチェックサムの固定が担う
+（docs/decisions.md ADR-3、docs/security.md 3.1）。
 """
 
 import json
@@ -16,6 +20,7 @@ ALLOWED = {
     "Srcnet.Core",
     "Srcnet.Text",
     "Srcnet.Discovery",
+    "Srcnet.Extraction",
     "Srcnet.Storage",
     "FSharp.Core",
 }

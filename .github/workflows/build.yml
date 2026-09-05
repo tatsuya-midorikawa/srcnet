@@ -40,6 +40,34 @@ jobs:
             - name: Test
               run: dotnet test srcnet.slnx -c Release --no-build
 
+    parser:
+        # 構文解析器（tree-sitter）は任意の構成要素なので、構築の有無を分けて検証する。
+        # docs/decisions.md ADR-3 を参照。
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
+            - name: Verify pinned sources
+              run: python tools/build_native.py --check
+
+            - name: Build parser
+              run: python tools/build_native.py --languages c cpp python go typescript tsx fsharp
+
+            - name: Test with parser available
+              run: dotnet test srcnet.slnx -c Release
+
     determinism:
         # T-1: 同一入力から二度生成した成果物がバイト単位で一致すること。
         # 並列度が出力に影響しないことも同時に確かめる。docs/testing.md T-1 を参照。

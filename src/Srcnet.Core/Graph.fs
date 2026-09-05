@@ -204,6 +204,10 @@ type Language =
   | Xml
   | Markdown
   | Owners
+  /// JSX 構文を含む TypeScript。`.tsx` は文法が別なので言語としても区別する。
+  | Tsx
+  /// F# のシグネチャ ファイル（`.fsi`）。C/C++ のヘッダーと同じ理由で本体と区別する。
+  | FSharpSignature
 
 module Language =
 
@@ -237,6 +241,8 @@ module Language =
     | Xml -> 25us
     | Markdown -> 26us
     | Owners -> 27us
+    | Tsx -> 28us
+    | FSharpSignature -> 29us
 
   let name language =
     match language with
@@ -268,6 +274,8 @@ module Language =
     | Xml -> "xml"
     | Markdown -> "markdown"
     | Owners -> "owners"
+    | Tsx -> "tsx"
+    | FSharpSignature -> "fsharp-signature"
 
 /// ノードの属性ビット。docs/graph-model.md 5 の `flags` に対応する。
 [<Flags>]

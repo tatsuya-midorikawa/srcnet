@@ -37,14 +37,14 @@ let private byExtension =
   add "cjs" JavaScript
   add "jsx" JavaScript
   add "ts" TypeScript
-  add "tsx" TypeScript
+  add "tsx" Tsx
   add "mts" TypeScript
   add "cts" TypeScript
   add "java" Java
   add "go" Go
   add "cs" CSharp
   add "fs" FSharp
-  add "fsi" FSharp
+  add "fsi" FSharpSignature
   add "fsx" FSharp
   add "s" Assembly
   add "asm" Assembly
