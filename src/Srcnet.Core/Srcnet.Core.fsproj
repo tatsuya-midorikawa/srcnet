@@ -6,6 +6,7 @@
 
     <ItemGroup>
         <Compile Include="Blake3.fs" />
+        <Compile Include="Hashing.fs" />
         <Compile Include="Graph.fs" />
         <Compile Include="Paths.fs" />
         <Compile Include="Ids.fs" />

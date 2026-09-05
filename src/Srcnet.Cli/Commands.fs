@@ -130,14 +130,13 @@ let private walkOptions (arguments: Args.IndexArguments) (excluded: string[]) =
 /// 同期処理としてここに分離している。
 let private writeStaged
   (outputDirectory: string)
+  (stagedSegments: string)
   (input: Writer.IndexInput)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
   =
-  Manifest.discardStaging outputDirectory
-
   try
-    Writer.write (Manifest.stagingPath outputDirectory) input diagnostics cancellation
+    Writer.write stagedSegments input diagnostics cancellation
   with ex ->
     Manifest.discardStaging outputDirectory
     reraise' ex
@@ -151,6 +150,85 @@ let private toFileInput (file: Walk.DiscoveredFile) : Writer.FileInput =
     LineCount = file.LineCount
     ContentHash = file.Hash }
 
+/// インデックス生成が成果物を残さずに終わる理由。
+/// 終了コードを分けるため、利用者の入力に起因するものと走査結果に起因するものを区別する。
+type private IndexFailure =
+  /// 走査が不完全で、既存の成果物を上書きしなかった。
+  | PartialRefused of message: string
+  /// 出力先が信頼できず、書き込みを行わなかった。
+  | OutputRejected of message: string
+
+module private IndexFailure =
+
+  let message failure =
+    match failure with
+    | PartialRefused text -> text
+    | OutputRejected text -> text
+
+/// 走査結果からセグメントを書き、成果物を公開する。
+///
+/// 同期処理としてここへ分離しているのは、`task { }` の中で分岐と `return` が増えると
+/// ステート マシンを静的にコンパイルできず、遅い動的実装へ落ちるためである。
+let private publishIndex
+  (outputDirectory: string)
+  (repository: RepositoryId)
+  (options: Walk.WalkOptions)
+  (walk: Walk.WalkResult)
+  (diagnostics: DiagnosticSink)
+  (cancellation: CancellationToken)
+  : Result<Manifest.Manifest, IndexFailure> =
+  // 出力先がリンクだと、生成、移動、再帰削除のすべてが管理外のファイルへ届く。
+  // 書き始める前に信頼できる出力ルートを確定させる。docs/security.md C-3 を参照。
+  match Artifact.prepareRoot outputDirectory with
+  | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
+  | Ok trustedOutput ->
+
+  let input: Writer.IndexInput =
+    { Repository = repository
+      Directories = walk.Directories
+      Files = walk.Files |> Array.map toFileInput }
+
+  // セグメントはいったん staging へ書き、成功したときだけ差し替える。
+  // 最終位置へ直接書くと、途中で失敗したときに既存の成果物を壊す。
+  match Manifest.prepareStaging trustedOutput with
+  | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
+  | Ok stagedSegments ->
+
+  let result = writeStaged trustedOutput stagedSegments input diagnostics cancellation
+
+  // 書き出しは長い。中断したのに新しい世代を公開して正常終了しないよう、
+  // 切替の直前で必ず確認する。docs/query-and-cli.md 2.2 の終了コード 5 に対応する。
+  cancellation.ThrowIfCancellationRequested()
+
+  let generation = Manifest.generationOf result.Segments
+
+  let manifest: Manifest.Manifest =
+    { ManifestVersion = Manifest.ManifestVersion
+      FormatVersion = Format.FormatVersion
+      ToolVersion = Manifest.toolVersion
+      RepositoryId = RepositoryId.value repository
+      Complete = walk.Complete
+      Options =
+        { FollowSymbolicLinks = options.FollowSymbolicLinks
+          RespectIgnoreFiles = options.RespectIgnoreFiles
+          MaxDepth = options.MaxDepth
+          MaxFileSizeBytes = options.MaxFileSizeBytes }
+      Counts =
+        { Nodes = result.NodeCount
+          Edges = result.EdgeCount
+          Strings = result.StringCount
+          StringBytes = result.StringBytes
+          Directories = walk.Directories.Length
+          Files = walk.Files.Length }
+      Segments = Manifest.qualify generation result.Segments
+      Diagnostics = diagnosticCounts diagnostics }
+
+  match Manifest.publish trustedOutput generation manifest with
+  | Error error ->
+    Manifest.discardStaging trustedOutput
+    Error(OutputRejected(Artifact.PathError.describe error))
+  | Ok() -> Ok manifest
+
 /// インデックスを生成し、書き出したマニフェストを返す。
 let private buildIndex
   (rootFullPath: string)
@@ -160,47 +238,18 @@ let private buildIndex
   (allowPartial: bool)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
-  : Task<Result<Manifest.Manifest, string>> =
+  : Task<Result<Manifest.Manifest, IndexFailure>> =
   task {
     let! walk = Walk.run rootFullPath options diagnostics cancellation
 
     if not walk.Complete && not allowPartial && (Manifest.read outputDirectory |> Result.isOk) then
       return
-        Error "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください"
+        Error(
+          PartialRefused
+            "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください"
+        )
     else
-
-    let input: Writer.IndexInput =
-      { Repository = repository
-        Directories = walk.Directories
-        Files = walk.Files |> Array.map toFileInput }
-
-    // セグメントはいったん staging へ書き、成功したときだけ差し替える。
-    // 最終位置へ直接書くと、途中で失敗したときに既存の成果物を壊す。
-    let result = writeStaged outputDirectory input diagnostics cancellation
-
-    let manifest: Manifest.Manifest =
-      { ManifestVersion = Manifest.ManifestVersion
-        FormatVersion = Format.FormatVersion
-        ToolVersion = Manifest.toolVersion
-        RepositoryId = RepositoryId.value repository
-        Complete = walk.Complete
-        Options =
-          { FollowSymbolicLinks = options.FollowSymbolicLinks
-            RespectIgnoreFiles = options.RespectIgnoreFiles
-            MaxDepth = options.MaxDepth
-            MaxFileSizeBytes = options.MaxFileSizeBytes }
-        Counts =
-          { Nodes = result.NodeCount
-            Edges = result.EdgeCount
-            Strings = result.StringCount
-            StringBytes = result.StringBytes
-            Directories = walk.Directories.Length
-            Files = walk.Files.Length }
-        Segments = result.Segments
-        Diagnostics = diagnosticCounts diagnostics }
-
-    Manifest.publish outputDirectory manifest
-    return Ok manifest
+      return publishIndex outputDirectory repository options walk diagnostics cancellation
   }
 
 let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : Task<int> =
@@ -224,10 +273,14 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
     let diagnostics = DiagnosticSink()
 
     match! buildIndex rootFullPath outputDirectory repository options arguments.AllowPartial diagnostics cancellation with
-    | Error message ->
+    | Error failure ->
       reportDiagnostics diagnostics
-      Terminal.errLine message
-      return ExitCode.CompletedWithDiagnostics
+      Terminal.errLine (IndexFailure.message failure)
+
+      return
+        match failure with
+        | OutputRejected _ -> ExitCode.UserError
+        | PartialRefused _ -> ExitCode.CompletedWithDiagnostics
     | Ok manifest ->
       reportDiagnostics diagnostics
 
@@ -271,16 +324,20 @@ let private locateArtifact (explicitOutput: string voption) (rootPath: string vo
 let stats (arguments: Args.StatsArguments) : int =
   let outputDirectory = locateArtifact arguments.OutputDirectory arguments.RootPath
 
-  match Manifest.read outputDirectory with
+  // マニフェストとセグメントを別々に開くと、その間に公開が完了したとき、
+  // 旧世代の件数と新世代の集計を混ぜた結果を正常終了で返してしまう。
+  let observed =
+    Manifest.readStable outputDirectory (fun manifest ->
+      struct (manifest, Stats.readFileStatistics outputDirectory manifest))
+
+  match observed with
   | Error error ->
     Terminal.errLine (Manifest.ManifestError.describe error)
     ExitCode.MissingArtifact
-  | Ok manifest ->
-    match Stats.readFileStatistics outputDirectory manifest with
-    | Error error ->
-      Terminal.errLine (Reader.OpenError.describe error)
-      ExitCode.MissingArtifact
-    | Ok statistics ->
+  | Ok(struct (_, Error error)) ->
+    Terminal.errLine (Reader.OpenError.describe error)
+    ExitCode.MissingArtifact
+  | Ok(struct (manifest, Ok statistics)) ->
       if arguments.Json then
         writeJson (fun writer ->
           writer.WriteString("command", "stats")
@@ -308,6 +365,8 @@ let stats (arguments: Args.StatsArguments) : int =
             writer.WriteStartObject()
             writer.WriteString("encoding", Encodings.name entry.Encoding)
             writer.WriteNumber("files", entry.Files)
+            // 検出器が単一へ確定できなかった件数。利用側が曖昧さを検知できるようにする。
+            writer.WriteNumber("ambiguous", entry.Ambiguous)
             writer.WriteEndObject()
 
           writer.WriteEndArray())
@@ -326,9 +385,72 @@ let stats (arguments: Args.StatsArguments) : int =
         Terminal.outLine "符号化:"
 
         for entry in statistics.Encodings do
-          Terminal.outLine $"  {Encodings.name entry.Encoding}: {entry.Files} ファイル"
+          if entry.Ambiguous = 0 then
+            Terminal.outLine $"  {Encodings.name entry.Encoding}: {entry.Files} ファイル"
+          else
+            Terminal.outLine
+              $"  {Encodings.name entry.Encoding}: {entry.Files} ファイル (うち {entry.Ambiguous} 件は候補が複数で未確定)"
 
       if manifest.Counts.Files = 0 then ExitCode.NoResults else ExitCode.Success
+
+/// 成果物ディレクトリ内のファイルを、相対パス昇順で列挙する。
+///
+/// 生成中の一時領域と、退役待ちの旧世代は現行の内容ではないため除く。旧世代は
+/// 読み手への猶予として意図的に残しているので、差として報告してはならない。
+/// それ以外の残骸は数え、追加・欠落として検出できるようにする。
+let private artifactFiles (directory: string) (generation: string voption) =
+  let isRetiredGeneration (relative: string) =
+    let parts = relative.Split '/'
+
+    parts.Length > 2
+    && parts[0] = Artifact.SegmentDirectory
+    && Artifact.isGeneration parts[1]
+    && ValueSome parts[1] <> generation
+
+  if not (Directory.Exists directory) then Array.empty
+  else
+    Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+    |> Seq.map (fun path -> Path.GetRelativePath(directory, path).Replace('\\', '/'))
+    |> Seq.filter (fun relative ->
+      not (relative.StartsWith(Manifest.StagingDirectory, StringComparison.Ordinal))
+      && not (isRetiredGeneration relative))
+    |> Seq.sortWith (fun left right -> String.CompareOrdinal(left, right))
+    |> Seq.toArray
+
+/// 二つの成果物ディレクトリをファイル単位で突き合わせる。
+///
+/// セグメントの記述子だけを比べると、`manifest.json` にしか現れない非決定性
+/// （診断、オプション、件数、版、プロパティ順、シリアライズ形式）を見逃す。
+/// 相対パスの一覧と全ファイルのバイト列を比べることで、追加・欠落・順序差も検出する。
+let private compareArtifacts
+  (original: string)
+  (originalGeneration: string voption)
+  (rebuilt: string)
+  (rebuiltGeneration: string voption)
+  =
+  let mismatches = ResizeArray<string>()
+  let left = artifactFiles original originalGeneration
+  let right = artifactFiles rebuilt rebuiltGeneration
+  let leftSet = Set.ofArray left
+  let rightSet = Set.ofArray right
+
+  for name in Set.difference leftSet rightSet do
+    mismatches.Add $"再生成した成果物に {name} がありません"
+
+  for name in Set.difference rightSet leftSet do
+    mismatches.Add $"再生成した成果物にだけ {name} があります"
+
+  for name in Set.intersect leftSet rightSet do
+    let leftBytes = File.ReadAllBytes(Path.Combine(original, name.Replace('/', Path.DirectorySeparatorChar)))
+    let rightBytes = File.ReadAllBytes(Path.Combine(rebuilt, name.Replace('/', Path.DirectorySeparatorChar)))
+
+    if not (leftBytes.AsSpan().SequenceEqual(ReadOnlySpan rightBytes)) then
+      mismatches.Add $"{name} がバイト単位で一致しません"
+
+  // 検出順が集合演算の走査順に依存しないよう、報告は序数順に固定する。
+  let ordered = mismatches.ToArray()
+  Array.sortInPlaceWith (fun (a: string) (b: string) -> String.CompareOrdinal(a, b)) ordered
+  ordered
 
 /// 同一入力から二度生成し、成果物がバイト単位で一致することを確認する。
 /// docs/architecture.md 2 の `srcnet verify --deterministic` に対応する。
@@ -363,26 +485,16 @@ let private checkDeterminism
       let diagnostics = DiagnosticSink()
 
       match! buildIndex rootFullPath temporary repository options true diagnostics cancellation with
-      | Error message -> return Error message
+      | Error failure -> return Error(IndexFailure.message failure)
       | Ok rebuilt ->
-        let mismatches = ResizeArray<string>()
-
-        if rebuilt.Segments.Length <> manifest.Segments.Length then
-          mismatches.Add $"セグメント数が {manifest.Segments.Length} ではなく {rebuilt.Segments.Length} です"
-        else
-          for index in 0 .. rebuilt.Segments.Length - 1 do
-            let expected = manifest.Segments[index]
-            let actual = rebuilt.Segments[index]
-
-            if expected.Name <> actual.Name then
-              mismatches.Add $"セグメント名が {expected.Name} ではなく {actual.Name} です"
-            elif expected.Checksum <> actual.Checksum then
-              mismatches.Add $"{expected.Name} のチェックサムが一致しません"
-            elif expected.ByteLength <> actual.ByteLength then
-              mismatches.Add $"{expected.Name} の長さが一致しません"
-
-        let expectedManifest = File.ReadAllBytes(Path.Combine(temporary, Manifest.FileName))
-        return Ok(mismatches.ToArray(), expectedManifest.Length)
+        return
+          Ok(
+            compareArtifacts
+              originalOutputDirectory
+              (Manifest.generationIn manifest)
+              temporary
+              (Manifest.generationIn rebuilt)
+          )
     finally
       if Directory.Exists temporary then
         try
@@ -419,7 +531,7 @@ let verify (arguments: Args.VerifyArguments) (cancellation: CancellationToken) :
                 ValueSome(
                   match result with
                   | Error message -> Error message
-                  | Ok(mismatches, _) -> Ok mismatches
+                  | Ok mismatches -> Ok mismatches
                 )
       }
 

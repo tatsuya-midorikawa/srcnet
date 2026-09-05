@@ -5,6 +5,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="Artifact.fs" />
         <Compile Include="Format.fs" />
         <Compile Include="Strings.fs" />
         <Compile Include="Writer.fs" />

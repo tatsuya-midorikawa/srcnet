@@ -74,16 +74,16 @@ let ``n-gram は重複のない昇順である`` () =
   )
 
 [<Fact>]
-let ``BLAKE3 は入力の分割位置に依存しない`` () =
+let ``内容ハッシュは入力の分割位置に依存しない`` () =
   check (
     Prop.forAll (ArbMap.defaults |> ArbMap.arbitrary<byte[]>) (fun bytes ->
       isNull bytes
-      || (let whole = Blake3.hash (ReadOnlySpan bytes)
-          let hasher = Blake3.Hasher()
+      || (let whole = Hashing.hash (ReadOnlySpan bytes)
+          use hasher = new Hashing.Hasher()
           let half = bytes.Length / 2
           hasher.Update(ReadOnlySpan(bytes, 0, half))
           hasher.Update(ReadOnlySpan(bytes, half, bytes.Length - half))
-          let split = Array.zeroCreate<byte> Blake3.HashLength
+          let split = Array.zeroCreate<byte> Hashing.HashLength
           hasher.Finish(Span split)
           whole = split))
   )
@@ -144,7 +144,31 @@ let ``グロブ照合はどんな入力でも例外を投げず終了する`` ()
   )
 
 [<Fact>]
-let ``セグメント ヘッダーは往復する`` () =
+let ``不変条件を満たすセグメント ヘッダーは往復する`` () =
+  check (
+    Prop.forAll (ArbMap.defaults |> ArbMap.arbitrary<uint16>) (fun count ->
+      let primary = uint64 count
+
+      let header: Format.Header =
+        { Kind = Format.Nodes
+          PrimaryCount = primary
+          SecondaryCount = 0UL
+          RecordLength = uint32 Format.RecordLength
+          PayloadLength = primary * uint64 Format.RecordLength }
+
+      let buffer = Array.zeroCreate<byte> Format.HeaderLength
+      Format.writeHeader (Span buffer) header
+      let fileLength = int64 Format.HeaderLength + int64 header.PayloadLength
+
+      match Format.tryReadHeader (ReadOnlySpan buffer) fileLength with
+      | Ok parsed -> parsed = header
+      | Error _ -> false)
+  )
+
+[<Fact>]
+let ``不変条件を破るセグメント ヘッダーは例外なく拒否される`` () =
+  // 破損した成果物は外部入力である。どのような件数とレコード長の組でも、
+  // 未処理例外や算術 overflow ではなく形式エラーで終わらなければならない。
   check (
     Prop.forAll
       (ArbMap.defaults |> ArbMap.arbitrary<uint64 * uint64 * uint32>)
@@ -159,9 +183,15 @@ let ``セグメント ヘッダーは往復する`` () =
         let buffer = Array.zeroCreate<byte> Format.HeaderLength
         Format.writeHeader (Span buffer) header
 
+        let satisfiesInvariants =
+          primary <= uint64 Int32.MaxValue
+          && secondary = 0UL
+          && recordLength = uint32 Format.RecordLength
+          && primary * uint64 Format.RecordLength = 128UL
+
         match Format.tryReadHeader (ReadOnlySpan buffer) (int64 Format.HeaderLength + 128L) with
-        | Ok parsed -> parsed = header
-        | Error _ -> false)
+        | Ok parsed -> satisfiesInvariants && parsed = header
+        | Error _ -> not satisfiesInvariants)
   )
 
 [<Fact>]

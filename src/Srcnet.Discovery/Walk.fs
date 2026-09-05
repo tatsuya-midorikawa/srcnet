@@ -58,9 +58,11 @@ type DiscoveredFile =
     SizeBytes: int64
     Language: Language
     Flags: NodeFlags
-    /// BLAKE3 の 32 バイト ダイジェスト。読み取れなかった場合はすべて 0。
+    /// 内容ハッシュ (SHA-256) の 32 バイト ダイジェスト。読み取れなかった場合はすべて 0。
     Hash: byte[]
     Encoding: Encodings.DetectedEncoding
+    /// 構造規則を満たした符号化候補。単一に確定した場合は空。
+    EncodingCandidates: Encodings.DetectedEncoding[]
     LineCount: int }
 
 type WalkResult =
@@ -77,7 +79,7 @@ let private GitIgnoreFileName = ".gitignore"
 [<Literal>]
 let private SrcnetIgnoreFileName = ".srcnetignore"
 
-let private emptyHash = Array.zeroCreate<byte> Blake3.HashLength
+let private emptyHash = Array.zeroCreate<byte> Hashing.HashLength
 
 [<Struct>]
 type private WorkItem =
@@ -136,16 +138,66 @@ let private resolveChild (parentRealPath: string) (name: string) (linkTarget: st
 
     canonicalizePath absolute
 
-let private readIgnoreFile (physicalPath: string) (baseDepth: int) (diagnostics: DiagnosticSink) (logicalPath: string) =
+/// 無視ファイルの読取結果。
+///
+/// 読めなかった場合と打ち切った場合は、適用できなかった規則が残る。
+/// 走査対象を確定できないため、いずれも走査の完全性を損なう事実として扱う。
+[<Struct>]
+type private IgnoreOutcome =
+  | IgnoreLoaded of ruleSet: Ignore.RuleSet
+  | IgnoreRejected of reason: string
+
+/// 無視ファイル 1 つを読む。
+///
+/// 通常のエントリと同じ順序で属性とリンクを検証してから開く。先に読んでしまうと、
+/// `--follow-symlinks` を指定していなくても解析ルート外のファイルを読み込む。
+/// docs/security.md C-3 を参照。
+///
+/// サイズ 0 のファイルは開かない。FIFO やキャラクタ デバイスは `stat` 上のサイズが 0 で
+/// 通常ファイルと managed API では区別できず、開くと無期限に blocking するためである。
+let private readIgnoreFile
+  (entry: FileSystemInfo)
+  (parentRealPath: string)
+  (isInsideRoot: string -> bool)
+  (baseDepth: int)
+  (cancellation: CancellationToken)
+  =
+  if not (isNull entry.LinkTarget) then
+    IgnoreRejected "リンク経由の無視ファイルは信頼境界の外にあるため読みません"
+  else
+
+  let real = Path.Combine(parentRealPath, entry.Name)
+
+  if not (isInsideRoot real) then IgnoreRejected "実体が解析ルートの外です"
+  else
+
+  let length =
+    match entry with
+    | :? FileInfo as file -> file.Length
+    | _ -> 0L
+
+  if length = 0L then
+    // 空ファイルの規則集合は開かずに決定できる。特殊ファイルによる停止を構造的に防ぐ。
+    IgnoreLoaded(Ignore.parse baseDepth Seq.empty)
+  else
+
   try
-    ValueSome(Ignore.parse baseDepth (File.ReadLines(physicalPath, Text.Encoding.UTF8)))
+    use stream =
+      new FileStream(
+        entry.FullName,
+        FileStreamOptions(
+          Mode = FileMode.Open,
+          Access = FileAccess.Read,
+          Share = (FileShare.ReadWrite ||| FileShare.Delete),
+          BufferSize = 0,
+          Options = FileOptions.SequentialScan
+        )
+      )
+
+    IgnoreLoaded(Ignore.read baseDepth stream cancellation)
   with
-  | :? IOException as ex ->
-    diagnostics.Add(IgnoreFileUnreadable, logicalPath, ex.Message)
-    ValueNone
-  | :? UnauthorizedAccessException ->
-    diagnostics.Add(IgnoreFileUnreadable, logicalPath, "読み取り権限がありません")
-    ValueNone
+  | :? IOException as ex -> IgnoreRejected ex.Message
+  | :? UnauthorizedAccessException -> IgnoreRejected "読み取り権限がありません"
 
 /// 解析ルート配下を走査し、ファイル ノードの材料を集める。
 ///
@@ -236,18 +288,21 @@ let run
               (entry.Name = GitIgnoreFileName || entry.Name = SrcnetIgnoreFileName)
               && not (entry :? DirectoryInfo))
             |> Array.choose (fun entry ->
-              match readIgnoreFile entry.FullName baseDepth diagnostics (value item.Path) with
-              | ValueSome ruleSet when not (Ignore.isEmpty ruleSet) ->
-                if ruleSet.IsTruncated then
+              match readIgnoreFile entry item.RealPath isInsideRoot baseDepth cancellation with
+              | IgnoreRejected reason ->
+                diagnostics.Add(IgnoreFileUnreadable, value item.Path, $"{entry.Name}: {reason}")
+                None
+              | IgnoreLoaded ruleSet ->
+                match ruleSet.Truncation with
+                | ValueSome truncation ->
                   diagnostics.Add(
                     IgnoreFileUnreadable,
                     value item.Path,
-                    $"{entry.Name}: 規則数が上限 {Ignore.MaxRulesPerFile} を超えたため一部を読み捨てました"
+                    $"{entry.Name}: {Ignore.Truncation.describe truncation}"
                   )
+                | ValueNone -> ()
 
-                Some ruleSet
-              | ValueSome _
-              | ValueNone -> None)
+                if Ignore.isEmpty ruleSet then None else Some ruleSet)
 
           if found.Length = 0 then item.RuleSets else Array.append item.RuleSets found
 
@@ -332,6 +387,14 @@ let run
                 if summary.Encoding = Encodings.Undetermined then
                   diagnostics.Add(UndeterminedEncoding, childValue, "置換文字で復号します")
 
+                // 候補が複数残った場合、判定順の先頭を確定値として黙って採用しない。
+                // ADR-5 に従い曖昧さを利用者へ渡す。
+                if summary.EncodingCandidates.Length > 1 then
+                  let names =
+                    summary.EncodingCandidates |> Array.map Encodings.name |> String.concat ", "
+
+                  diagnostics.Add(AmbiguousEncoding, childValue, $"複数の符号化に適合します ({names})")
+
                 files.Add
                   { Path = childPath
                     SizeBytes = fileInfo.Length
@@ -339,6 +402,7 @@ let run
                     Flags = pathFlags ||| linkFlag ||| summary.Flags
                     Hash = summary.Hash
                     Encoding = summary.Encoding
+                    EncodingCandidates = summary.EncodingCandidates
                     LineCount = summary.LineCount }
               | Error error ->
                 let kind =
@@ -357,6 +421,7 @@ let run
                     Flags = pathFlags ||| linkFlag ||| NodeFlags.Skipped
                     Hash = emptyHash
                     Encoding = Encodings.Undetermined
+                    EncodingCandidates = Array.empty
                     LineCount = 0 }
 
       for entry in entries do
@@ -426,8 +491,17 @@ let run
 
     // 走査の網羅性を損なう診断。個々のファイルの読み取り失敗と違い、
     // これらは「どれだけ見落としたか分からない」状態を意味する。
+    //
+    // `IgnoreFileUnreadable` を含めるのは、適用できなかった無視規則があると
+    // 索引対象そのものが確定しないためである。除外すべきファイルを取り込んだのか、
+    // 取り込むべきファイルを落としたのかを、成果物から判別できない。
     let incompleteKinds =
-      [| PermissionDenied; DepthLimitExceeded; EntryLimitExceeded; DirectoryCycle; FileUnreadable |]
+      [| PermissionDenied
+         DepthLimitExceeded
+         EntryLimitExceeded
+         DirectoryCycle
+         FileUnreadable
+         IgnoreFileUnreadable |]
 
     let observed = diagnostics.Counts() |> Array.map (fun (struct (kind, _)) -> kind)
 

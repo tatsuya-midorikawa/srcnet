@@ -5,12 +5,14 @@ open System
 open Xunit
 open Srcnet.Storage
 
+/// 種別ごとの不変条件を満たすヘッダー。`Nodes` は 64 バイト固定長で、
+/// payload 長は件数 × レコード長に一致し、従属件数を持たない。
 let private header: Format.Header =
   { Kind = Format.Nodes
     PrimaryCount = 1234UL
-    SecondaryCount = 56UL
+    SecondaryCount = 0UL
     RecordLength = 64u
-    PayloadLength = 78912UL }
+    PayloadLength = 1234UL * 64UL }
 
 [<Fact>]
 let ``ヘッダーは往復する`` () =

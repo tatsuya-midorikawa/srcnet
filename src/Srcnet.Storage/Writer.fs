@@ -23,6 +23,17 @@ let InitialSegmentId = "0001"
 [<Literal>]
 let private WriteBufferBytes = 65536
 
+/// 大規模ループでキャンセルを確認する間隔。2 の冪にしてビット積で判定する。
+///
+/// 毎反復で確認すると内側ループの分岐が増えて throughput を損なう。
+/// 1 回の確認あたりの処理量が十分小さく、かつ確認自体が無視できる値を選ぶ。
+[<Literal>]
+let private CancellationCheckStride = 8192
+
+let inline private checkCancellation (cancellation: CancellationToken) (index: int) =
+  if index &&& (CancellationCheckStride - 1) = 0 then
+    cancellation.ThrowIfCancellationRequested()
+
 type FileInput =
   { Path: LogicalPath
     SizeBytes: int64
@@ -30,7 +41,7 @@ type FileInput =
     EncodingCode: uint16
     Flags: NodeFlags
     LineCount: int
-    /// BLAKE3 の 32 バイト ダイジェスト。
+    /// 内容ハッシュ (SHA-256) の 32 バイト ダイジェスト。
     ContentHash: byte[] }
 
 type IndexInput =
@@ -41,10 +52,10 @@ type IndexInput =
     Files: FileInput[] }
 
 type SegmentDescriptor =
-  { /// 出力ディレクトリからの相対パス。区切りは `/` に固定する。
+  { /// セグメント ディレクトリ内の名前。公開時に `segments/<generation>/` を前置きする。
     Name: string
     ByteLength: int64
-    /// BLAKE3 の 16 進小文字表記。
+    /// チェックサム (SHA-256) の 16 進小文字表記。
     Checksum: string }
 
 type WriteResult =
@@ -54,7 +65,7 @@ type WriteResult =
     StringCount: int
     StringBytes: int64 }
 
-/// 1 セグメント分の書き出し器。書きながら BLAKE3 を計算するため、
+/// 1 セグメント分の書き出し器。書きながらチェックサムを計算するため、
 /// 完全性検証のための再読み込みが不要になる。
 [<Sealed>]
 type private SegmentWriter(directory: string, name: string) =
@@ -65,11 +76,15 @@ type private SegmentWriter(directory: string, name: string) =
     | null -> ()
     | parent -> IO.Directory.CreateDirectory parent |> ignore
 
+  // 既存の項目がリンクだと `FileMode.Create` はリンク先を上書きしてしまう。
+  // 先に項目自体を取り除き、排他的に新規作成することでリンクを追跡しない。
+  do File.Delete fullPath
+
   let stream =
     new FileStream(
       fullPath,
       FileStreamOptions(
-        Mode = FileMode.Create,
+        Mode = FileMode.CreateNew,
         Access = FileAccess.Write,
         Share = FileShare.None,
         BufferSize = 0,
@@ -77,7 +92,7 @@ type private SegmentWriter(directory: string, name: string) =
       )
     )
 
-  let hasher = Blake3.Hasher()
+  let hasher = new Hashing.Hasher()
   let buffer = ArrayPool<byte>.Shared.Rent WriteBufferBytes
   let mutable position = 0
   let mutable total = 0L
@@ -118,7 +133,7 @@ type private SegmentWriter(directory: string, name: string) =
   member this.Complete() =
     this.FlushBuffer()
     stream.Flush()
-    let digest = Array.zeroCreate<byte> Blake3.HashLength
+    let digest = Array.zeroCreate<byte> Hashing.HashLength
     hasher.Finish(Span digest)
 
     { Name = name
@@ -129,19 +144,23 @@ type private SegmentWriter(directory: string, name: string) =
 
     member _.Dispose() =
       ArrayPool<byte>.Shared.Return buffer
+      (hasher :> IDisposable).Dispose()
       stream.Dispose()
 
-let private segmentName (suffix: string) = $"segments/{InitialSegmentId}.{suffix}"
+let private segmentName (suffix: string) = $"{InitialSegmentId}.{suffix}"
 
 /// 論理パスからノード名（最後のセグメント）を取り出す。ルートは空文字列。
 let private nodeName (path: LogicalPath) = fileName path
 
-/// 成果物を書き出す。
+/// セグメントを書き出す。
+///
+/// `segmentDirectory` は staging 内のセグメント ディレクトリで、返す名前はその中での
+/// 相対名である。世代を含む最終的な名前は公開時に決まる。
 ///
 /// ノードの密インデックスは「0 = リポジトリ、続いてディレクトリ、続いてファイル」の順で、
 /// それぞれ論理パスの序数昇順に並ぶ。この順序が決定性の基礎になる。
 let write
-  (outputDirectory: string)
+  (segmentDirectory: string)
   (input: IndexInput)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
@@ -157,6 +176,7 @@ let write
   let directoryPathRefs = Array.zeroCreate<int> directoryCount
 
   for index in 0 .. directoryCount - 1 do
+    checkCancellation cancellation index
     let path = input.Directories[index]
     directoryNameRefs[index] <- strings.Intern(nodeName path)
     directoryPathRefs[index] <- strings.Intern(value path)
@@ -165,6 +185,7 @@ let write
   let filePathRefs = Array.zeroCreate<int> fileCount
 
   for index in 0 .. fileCount - 1 do
+    checkCancellation cancellation index
     let path = input.Files[index].Path
     fileNameRefs[index] <- strings.Intern(nodeName path)
     filePathRefs[index] <- strings.Intern(value path)
@@ -178,9 +199,11 @@ let write
   ids[0] <- builder.Compute(Repository, input.Repository, root, RepositoryId.value input.Repository, 0u)
 
   for index in 0 .. directoryCount - 1 do
+    checkCancellation cancellation index
     ids[1 + index] <- builder.Compute(Directory, input.Repository, input.Directories[index], "", 0u)
 
   for index in 0 .. fileCount - 1 do
+    checkCancellation cancellation index
     ids[1 + directoryCount + index] <- builder.Compute(File, input.Repository, input.Files[index].Path, "", 0u)
 
   // 衝突は握りつぶさず明示的な診断にする。docs/graph-model.md 4.2 を参照。
@@ -188,6 +211,8 @@ let write
   Array.sortInPlace sortedIds
 
   for index in 1 .. nodeCount - 1 do
+    checkCancellation cancellation index
+
     if sortedIds[index] = sortedIds[index - 1] then
       diagnostics.Add(NodeIdCollision, "", $"ノード ID {sortedIds[index]} が重複しています")
 
@@ -215,9 +240,11 @@ let write
         0
 
   for index in 0 .. directoryCount - 1 do
+    checkCancellation cancellation index
     parents[1 + index] <- resolveParent input.Directories[index]
 
   for index in 0 .. fileCount - 1 do
+    checkCancellation cancellation index
     parents[1 + directoryCount + index] <- resolveParent input.Files[index].Path
 
   let edgeCount = nodeCount - 1
@@ -247,7 +274,7 @@ let write
   let blobLength = stringOffsets[strings.Count]
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName "strings")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "strings")
 
     writer.WriteHeader
       { Kind = Format.Strings
@@ -261,6 +288,7 @@ let write
 
     try
       for index in 0 .. strings.Count - 1 do
+        checkCancellation cancellation index
         let text = strings[index]
         let required = encoder.GetMaxByteCount text.Length
 
@@ -276,7 +304,7 @@ let write
       ArrayPool<byte>.Shared.Return scratch
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName "stroffsets")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "stroffsets")
     let payloadLength = uint64 (stringOffsets.Length * 8)
 
     writer.WriteHeader
@@ -286,13 +314,17 @@ let write
         RecordLength = 8u
         PayloadLength = payloadLength }
 
+    let mutable offsetIndex = 0
+
     for offset in stringOffsets do
+      checkCancellation cancellation offsetIndex
+      offsetIndex <- offsetIndex + 1
       BinaryPrimitives.WriteUInt64LittleEndian(writer.Reserve 8, offset)
 
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName "files")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "files")
     let payloadLength = uint64 fileCount * uint64 Format.RecordLength
 
     writer.WriteHeader
@@ -303,6 +335,7 @@ let write
         PayloadLength = payloadLength }
 
     for index in 0 .. fileCount - 1 do
+      checkCancellation cancellation index
       let file = input.Files[index]
       let record = writer.Reserve Format.RecordLength
       BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4), uint32 filePathRefs[index])
@@ -319,7 +352,7 @@ let write
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName "nodes")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "nodes")
     let payloadLength = uint64 nodeCount * uint64 Format.RecordLength
 
     writer.WriteHeader
@@ -344,6 +377,8 @@ let write
     writeNode ids[0] Repository Unknown NodeFlags.None Format.NodeRecord.NoFile repositoryNameRef repositoryNameRef 0
 
     for index in 0 .. directoryCount - 1 do
+      checkCancellation cancellation index
+
       writeNode
         ids[1 + index]
         Directory
@@ -355,6 +390,7 @@ let write
         0
 
     for index in 0 .. fileCount - 1 do
+      checkCancellation cancellation index
       let file = input.Files[index]
 
       writeNode
@@ -370,7 +406,7 @@ let write
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName $"edges.{EdgeKind.name Contains}")
+    use writer = new SegmentWriter(segmentDirectory, segmentName $"edges.{EdgeKind.name Contains}")
     let payloadLength = uint64 (nodeCount + 1) * 8UL + uint64 edgeCount * 4UL
 
     writer.WriteHeader
@@ -380,10 +416,16 @@ let write
         RecordLength = 0u
         PayloadLength = payloadLength }
 
+    let mutable csrIndex = 0
+
     for offset in offsets do
+      checkCancellation cancellation csrIndex
+      csrIndex <- csrIndex + 1
       BinaryPrimitives.WriteUInt64LittleEndian(writer.Reserve 8, offset)
 
     for target in targets do
+      checkCancellation cancellation csrIndex
+      csrIndex <- csrIndex + 1
       BinaryPrimitives.WriteUInt32LittleEndian(writer.Reserve 4, target)
 
     descriptors.Add(writer.Complete())
@@ -391,7 +433,7 @@ let write
   do
     // 後方 CSR。「このノードを含むのは誰か」を全走査せずに解けるようにする。
     // CONTAINS では各ノードの親は高々 1 つなので、隣接は 0 個か 1 個になる。
-    use writer = new SegmentWriter(outputDirectory, segmentName $"redges.{EdgeKind.name Contains}")
+    use writer = new SegmentWriter(segmentDirectory, segmentName $"redges.{EdgeKind.name Contains}")
     let payloadLength = uint64 (nodeCount + 1) * 8UL + uint64 edgeCount * 4UL
 
     writer.WriteHeader
@@ -405,17 +447,20 @@ let write
     BinaryPrimitives.WriteUInt64LittleEndian(writer.Reserve 8, running)
 
     for index in 0 .. nodeCount - 1 do
+      checkCancellation cancellation index
       if parents[index] >= 0 then running <- running + 1UL
       BinaryPrimitives.WriteUInt64LittleEndian(writer.Reserve 8, running)
 
     for index in 0 .. nodeCount - 1 do
+      checkCancellation cancellation index
+
       if parents[index] >= 0 then
         BinaryPrimitives.WriteUInt32LittleEndian(writer.Reserve 4, uint32 parents[index])
 
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(outputDirectory, segmentName "idmap")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "idmap")
     let payloadLength = uint64 nodeCount * uint64 (Ids.NodeIdLength + 4)
 
     writer.WriteHeader
@@ -428,10 +473,16 @@ let write
     let order = Array.init nodeCount id
     Array.sortInPlaceWith (fun (a: int) (b: int) -> compare ids[a] ids[b]) order
 
+    let mutable idMapIndex = 0
+
     for position in order do
+      checkCancellation cancellation idMapIndex
+      idMapIndex <- idMapIndex + 1
       NodeId.writeTo (writer.Reserve Ids.NodeIdLength) ids[position]
 
     for position in order do
+      checkCancellation cancellation idMapIndex
+      idMapIndex <- idMapIndex + 1
       BinaryPrimitives.WriteUInt32LittleEndian(writer.Reserve 4, uint32 position)
 
     descriptors.Add(writer.Complete())

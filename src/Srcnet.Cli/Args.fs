@@ -93,42 +93,60 @@ let private tryParseInt (text: string) =
   | true, value -> ValueSome value
   | false, _ -> ValueNone
 
+/// 位置引数の候補。`TokenIndex` は元のトークン位置である。
+/// オプション値として消費された引数を、文字列一致ではなく位置で取り除くために使う。
+[<Struct>]
+type private Positional = { TokenIndex: int; Text: string }
+
+/// 走査したオプション 1 つ分。
+///
+/// `ValueTokenIndex` は空白区切り形式で値になり得る次トークンの位置で、
+/// `--option=value` のインライン形式では -1 になる。この区別がないと、
+/// インライン値と同じ文字列を持つ正当な位置引数まで取り除いてしまう。
+[<Struct>]
+type private ParsedOption =
+  { Name: string
+    Value: string voption
+    ValueTokenIndex: int }
+
 /// 位置引数とオプションを 1 回走査で振り分ける。
 /// `--option value` と `--option=value` の両方を受け付ける。
 let private split (arguments: string[]) =
-  let positional = ResizeArray<string>()
-  let options = ResizeArray<struct (string * string voption)>()
+  let positional = ResizeArray<Positional>()
+  let options = ResizeArray<ParsedOption>()
   let mutable index = 0
-  let mutable error = ValueNone
 
-  while error.IsNone && index < arguments.Length do
+  while index < arguments.Length do
     let argument = arguments[index]
 
     if argument.StartsWith("--", StringComparison.Ordinal) then
       let separator = argument.IndexOf '='
 
       if separator > 0 then
-        options.Add(struct (argument.Substring(0, separator), ValueSome(argument.Substring(separator + 1))))
-        index <- index + 1
+        options.Add
+          { Name = argument.Substring(0, separator)
+            Value = ValueSome(argument.Substring(separator + 1))
+            ValueTokenIndex = -1 }
       else
         // 値を取るかどうかは呼び出し側で決めるため、ここでは次の引数を暫定的に添える。
-        let next =
-          if index + 1 < arguments.Length && not (arguments[index + 1].StartsWith("--", StringComparison.Ordinal)) then
-            ValueSome arguments[index + 1]
-          else ValueNone
+        let takesNext =
+          index + 1 < arguments.Length
+          && not (arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
 
-        options.Add(struct (argument, next))
-        index <- index + 1
+        options.Add
+          { Name = argument
+            Value = (if takesNext then ValueSome arguments[index + 1] else ValueNone)
+            ValueTokenIndex = (if takesNext then index + 1 else -1) }
+
+      index <- index + 1
     else
-      positional.Add argument
+      positional.Add { TokenIndex = index; Text = argument }
       index <- index + 1
 
-  match error with
-  | ValueSome e -> Error e
-  | ValueNone -> Ok(positional, options)
+  struct (positional, options)
 
 /// オプションの走査結果を保持する補助。値を消費した引数は位置引数から取り除く。
-type private OptionReader(options: ResizeArray<struct (string * string voption)>, positional: ResizeArray<string>) =
+type private OptionReader(options: ResizeArray<ParsedOption>, positional: ResizeArray<Positional>) =
   let consumed = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
   let mutable error = ValueNone
 
@@ -137,8 +155,8 @@ type private OptionReader(options: ResizeArray<struct (string * string voption)>
   member _.Flag(name: string) =
     let mutable found = false
 
-    for struct (option, _) in options do
-      if option = name then
+    for option in options do
+      if option.Name = name then
         consumed.Add name |> ignore
         found <- true
 
@@ -147,35 +165,48 @@ type private OptionReader(options: ResizeArray<struct (string * string voption)>
   member _.Value(name: string) =
     let mutable result = ValueNone
 
-    for struct (option, value) in options do
-      if option = name then
+    for option in options do
+      if option.Name = name then
         consumed.Add name |> ignore
 
-        match value with
+        match option.Value with
         | ValueNone -> if error.IsNone then error <- ValueSome(MissingValue name)
         | ValueSome text ->
           result <- ValueSome text
-          // `--jobs 4` の形式では値が位置引数として重複しているため取り除く。
-          positional.Remove text |> ignore
+
+          // `--jobs 4` の形式でのみ、値のトークンが位置引数としても数えられている。
+          // 取り除く対象はそのトークン自身であり、同じ文字列を持つ別の引数ではない。
+          if option.ValueTokenIndex >= 0 then
+            let mutable cursor = 0
+
+            while cursor < positional.Count do
+              if positional[cursor].TokenIndex = option.ValueTokenIndex then positional.RemoveAt cursor
+              else cursor <- cursor + 1
 
     result
 
   member _.Unknown() =
     let mutable unknown = ValueNone
 
-    for struct (option, _) in options do
-      if not (consumed.Contains option) && unknown.IsNone then unknown <- ValueSome option
+    for option in options do
+      if not (consumed.Contains option.Name) && unknown.IsNone then unknown <- ValueSome option.Name
 
     unknown
 
-let private finish (reader: OptionReader) (positional: ResizeArray<string>) (expected: int) (build: unit -> Command) =
+let private finish
+  (reader: OptionReader)
+  (positional: ResizeArray<Positional>)
+  (expected: int)
+  (build: unit -> Command)
+  =
   match reader.Error with
   | ValueSome error -> Error error
   | ValueNone ->
     match reader.Unknown() with
     | ValueSome option -> Error(UnknownOption option)
     | ValueNone ->
-      if positional.Count > expected then Error(UnexpectedArgument positional[expected]) else Ok(build ())
+      if positional.Count > expected then Error(UnexpectedArgument positional[expected].Text)
+      else Ok(build ())
 
 let parse (arguments: string[]) : Result<Command, ParseError> =
   if arguments.Length = 0 then Error NoCommand
@@ -189,10 +220,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
   | command ->
 
   let rest = arguments[1..]
-
-  match split rest with
-  | Error error -> Error error
-  | Ok(positional, options) ->
+  let struct (positional, options) = split rest
 
   let reader = OptionReader(options, positional)
   let json = reader.Flag "--json"
@@ -245,7 +273,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
 
         finish reader positional 1 (fun () ->
           Index
-            { RootPath = positional[0]
+            { RootPath = positional[0].Text
               OutputDirectory = output
               RepositoryId = repository
               Jobs = unwrap jobs
@@ -261,7 +289,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     finish reader positional 1 (fun () ->
       Stats
         { OutputDirectory = output
-          RootPath = (if positional.Count > 0 then ValueSome positional[0] else ValueNone)
+          RootPath = (if positional.Count > 0 then ValueSome positional[0].Text else ValueNone)
           Json = json })
   | "verify" ->
     let output = optionalValue "--out"
@@ -270,7 +298,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     finish reader positional 1 (fun () ->
       Verify
         { OutputDirectory = output
-          RootPath = (if positional.Count > 0 then ValueSome positional[0] else ValueNone)
+          RootPath = (if positional.Count > 0 then ValueSome positional[0].Text else ValueNone)
           Deterministic = deterministic
           Json = json })
   | other -> Error(UnknownCommand other)

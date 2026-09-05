@@ -7,11 +7,14 @@ module Srcnet.Storage.Format
 
 open System
 open System.Buffers.Binary
+open Srcnet.Core
 
 /// セグメント形式の版。レイアウトを変えるたびに増やす。
 /// 版が異なる成果物は読まずに拒否する。docs/requirements.md NFR-14 を参照。
+///
+/// 2: 内容ハッシュとノード ID のハッシュを SHA-256 へ変更（ADR-8 の見直し）。
 [<Literal>]
-let FormatVersion = 1u
+let FormatVersion = 2u
 
 /// ヘッダー長。ペイロードの先頭を 64 バイト境界に揃えるためにこの値を選ぶ。
 [<Literal>]
@@ -71,6 +74,9 @@ type FormatError =
   | UnsupportedVersion of found: uint32
   | UnknownSegmentKind of code: uint32
   | LengthMismatch of declared: uint64 * actual: int64
+  | InvalidCount of field: string * found: uint64
+  | InvalidRecordLength of found: uint32 * expected: uint32
+  | PayloadMismatch of declared: uint64 * expected: uint64
 
 module FormatError =
 
@@ -81,6 +87,10 @@ module FormatError =
     | UnsupportedVersion found -> $"セグメント形式版 {found} は未対応です (対応版 {FormatVersion})"
     | UnknownSegmentKind code -> $"未知のセグメント種別コード {code} です"
     | LengthMismatch(declared, actual) -> $"宣言された長さ {declared} と実際の長さ {actual} が一致しません"
+    | InvalidCount(field, found) -> $"{field} の値 {found} が扱える範囲を超えています"
+    | InvalidRecordLength(found, expected) -> $"レコード長が {expected} ではなく {found} です"
+    | PayloadMismatch(declared, expected) ->
+      $"宣言された payload 長 {declared} が、件数から求まる {expected} と一致しません"
 
 let writeHeader (destination: Span<byte>) (header: Header) =
   if destination.Length < HeaderLength then
@@ -94,6 +104,43 @@ let writeHeader (destination: Span<byte>) (header: Header) =
   BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(24, 8), header.SecondaryCount)
   BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(32, 4), header.RecordLength)
   BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(40, 8), header.PayloadLength)
+
+/// セグメント種別ごとの不変条件。
+///
+/// 件数とレコード長から求まる必要 payload 長を先に検証しなければ、破損した件数のまま
+/// `Span.Slice` や反復処理へ進み、範囲外アクセスや巨大ループを引き起こす。
+/// 乗算前に件数を上限で抑えることで、算術 overflow も同時に排除する。
+/// docs/security.md C-6 を参照。
+let private checkInvariants (kind: SegmentKind) (header: Header) =
+  // payload はファイル長で抑えられているため、件数が payload 長を超えることはない。
+  // 先に件数を抑えてから乗算すれば、以降の算術は uint64 の範囲に必ず収まる。
+  let limit = uint64 Int32.MaxValue
+
+  if header.PrimaryCount > limit then Error(InvalidCount("primaryCount", header.PrimaryCount))
+  elif header.SecondaryCount > limit then Error(InvalidCount("secondaryCount", header.SecondaryCount))
+  else
+
+  let inline expect (recordLength: uint32) (payloadLength: uint64) (secondary: uint64 voption) =
+    if header.RecordLength <> recordLength then
+      Error(InvalidRecordLength(header.RecordLength, recordLength))
+    elif header.PayloadLength <> payloadLength then
+      Error(PayloadMismatch(header.PayloadLength, payloadLength))
+    else
+      match secondary with
+      | ValueSome expected when header.SecondaryCount <> expected ->
+        Error(InvalidCount("secondaryCount", header.SecondaryCount))
+      | ValueSome _
+      | ValueNone -> Ok header
+
+  match kind with
+  | Nodes
+  | Files -> expect (uint32 RecordLength) (header.PrimaryCount * uint64 RecordLength) (ValueSome 0UL)
+  | Strings -> expect 0u header.SecondaryCount ValueNone
+  | StringOffsets -> expect 8u ((header.PrimaryCount + 1UL) * 8UL) ValueNone
+  | AdjacencyCsr -> expect 0u ((header.PrimaryCount + 1UL) * 8UL + header.SecondaryCount * 4UL) ValueNone
+  | IdMap ->
+    let recordLength = uint32 (Ids.NodeIdLength + 4)
+    expect recordLength (header.PrimaryCount * uint64 recordLength) (ValueSome 0UL)
 
 /// ヘッダーを読み、形式版と宣言された長さを検証する。
 /// 破損を検出した場合は部分的に読み進めず失敗させる。docs/security.md C-6 を参照。
@@ -117,7 +164,8 @@ let tryReadHeader (source: ReadOnlySpan<byte>) (fileLength: int64) : Result<Head
     if uint64 fileLength <> uint64 HeaderLength + payloadLength then
       Error(LengthMismatch(payloadLength, fileLength))
     else
-      Ok
+      checkInvariants
+        kind
         { Kind = kind
           PrimaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(16, 8))
           SecondaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(24, 8))

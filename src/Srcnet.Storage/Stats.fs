@@ -19,7 +19,10 @@ type LanguageCount =
 
 type EncodingCount =
   { Encoding: Encodings.DetectedEncoding
-    Files: int }
+    Files: int
+    /// 構造規則を満たす候補が複数あり、単一の符号化へ確定できなかったファイル数。
+    /// 記録された符号化は候補の先頭にすぎないため、確定値として表示してはならない。
+    Ambiguous: int }
 
 type FileStatistics =
   { Languages: LanguageCount[]
@@ -91,18 +94,30 @@ let readFileStatistics (outputDirectory: string) (manifest: Manifest.Manifest) :
   with
   | None -> Error(Reader.SegmentNotFound "files")
   | Some descriptor ->
-    let path = Path.Combine(outputDirectory, descriptor.Name.Replace('/', Path.DirectorySeparatorChar))
+    // 名前からパスへの変換は `verify` と同じ検証を通す。改変された成果物だけで
+    // 成果物外のファイルを memory map できてはならない。docs/security.md C-6 を参照。
+    match Artifact.tryResolveSegment outputDirectory descriptor.Name with
+    | Error error -> Error(Reader.OpenFailed(descriptor.Name, Artifact.PathError.describe error))
+    | Ok path ->
 
     match Reader.MappedSegment.Open path with
     | Error error -> Error error
     | Ok segment ->
       use segment = segment
+
+      // 種別の取り違えは破損である。ヘッダーで件数とレコード長の不変条件は
+      // 検証済みなので、以降の `Slice` は範囲内に収まる。
+      if segment.Header.Kind <> Format.Files then
+        Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
+      else
+
       let payload = segment.Payload
       let count = int segment.Header.PrimaryCount
       let languageFiles = Dictionary<uint16, int>()
       let languageBytes = Dictionary<uint16, int64>()
       let languageLines = Dictionary<uint16, int64>()
       let encodingFiles = Dictionary<uint16, int>()
+      let encodingAmbiguous = Dictionary<uint16, int>()
       let mutable totalBytes = 0L
       let mutable totalLines = 0L
 
@@ -120,6 +135,7 @@ let readFileStatistics (outputDirectory: string) (manifest: Manifest.Manifest) :
         let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
         let languageCode = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.LanguageOffset, 2))
         let encodingCode = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2))
+        let flags = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4))
         let lineCount = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4))
         let sizeBytes = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8))
 
@@ -127,6 +143,10 @@ let readFileStatistics (outputDirectory: string) (manifest: Manifest.Manifest) :
         bumpLong languageBytes languageCode sizeBytes
         bumpLong languageLines languageCode (int64 lineCount)
         bump encodingFiles encodingCode 1
+
+        if flags &&& uint32 NodeFlags.AmbiguousEncoding <> 0u then
+          bump encodingAmbiguous encodingCode 1
+
         totalBytes <- totalBytes + sizeBytes
         totalLines <- totalLines + int64 lineCount
 
@@ -149,7 +169,11 @@ let readFileStatistics (outputDirectory: string) (manifest: Manifest.Manifest) :
         encodingFiles
         |> Seq.map (fun entry ->
           { Encoding = encodingOfCode entry.Key
-            Files = entry.Value })
+            Files = entry.Value
+            Ambiguous =
+              match encodingAmbiguous.TryGetValue entry.Key with
+              | true, count -> count
+              | false, _ -> 0 })
         |> Seq.sortWith (fun left right ->
           let byFiles = compare right.Files left.Files
 

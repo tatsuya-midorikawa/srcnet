@@ -32,9 +32,12 @@ module ReadError =
     | IoFailure message -> message
 
 type ContentSummary =
-  { /// BLAKE3 の 32 バイト ダイジェスト。
+  { /// 内容ハッシュ (SHA-256) の 32 バイト ダイジェスト。
     Hash: byte[]
     Encoding: Encodings.DetectedEncoding
+    /// 構造規則を満たした符号化候補。単一に確定した場合は空。
+    /// 検出器が持っていた不確実性を discovery より下流でも失わないために保持する。
+    EncodingCandidates: Encodings.DetectedEncoding[]
     /// 改行種別によらない論理的な行数。判定できない場合は 0。
     LineCount: int
     Flags: NodeFlags }
@@ -47,7 +50,7 @@ let private crlf = [| 0x0Duy; 0x0Auy |]
 /// ファイルごとの割り当てをダイジェストの 32 バイトだけに抑える。
 [<Sealed>]
 type ContentReader(maxFileSizeBytes: int64) =
-  let hasher = Blake3.Hasher()
+  let hasher = new Hashing.Hasher()
   let buffer = ArrayPool<byte>.Shared.Rent ReadBufferBytes
   let prefix = Array.zeroCreate<byte> Encodings.DetectionPrefixBytes
   let mutable disposed = false
@@ -67,8 +70,9 @@ type ContentReader(maxFileSizeBytes: int64) =
     if knownLength > maxFileSizeBytes then Error(TooLarge knownLength)
     elif knownLength = 0L then
       Ok
-        { Hash = Blake3.hash ReadOnlySpan.Empty
+        { Hash = Hashing.hash ReadOnlySpan.Empty
           Encoding = Encodings.Utf8
+          EncodingCandidates = Array.empty
           LineCount = 0
           Flags = NodeFlags.None }
     else
@@ -141,6 +145,8 @@ type ContentReader(maxFileSizeBytes: int64) =
 
       let mutable flags = NodeFlags.None
 
+      if detection.Ambiguous then flags <- flags ||| NodeFlags.AmbiguousEncoding
+
       let lineCount =
         match detection.Encoding with
         | Encodings.Binary ->
@@ -168,12 +174,13 @@ type ContentReader(maxFileSizeBytes: int64) =
           elif endsWithTerminator then terminators
           else terminators + 1
 
-      let digest = Array.zeroCreate<byte> Blake3.HashLength
+      let digest = Array.zeroCreate<byte> Hashing.HashLength
       hasher.Finish(Span digest)
 
       Ok
         { Hash = digest
           Encoding = detection.Encoding
+          EncodingCandidates = detection.Candidates
           LineCount = lineCount
           Flags = flags }
     with
@@ -187,4 +194,5 @@ type ContentReader(maxFileSizeBytes: int64) =
     member _.Dispose() =
       if not disposed then
         disposed <- true
+        (hasher :> IDisposable).Dispose()
         ArrayPool<byte>.Shared.Return buffer

@@ -107,3 +107,69 @@ let ``符号化コードは往復する`` () =
 
   let codes = all |> List.map Encodings.toCode
   Assert.Equal(codes.Length, List.distinct codes |> List.length)
+
+// --- 打ち切られた prefix 末尾の扱い（backlogs/009） ---
+
+/// 元ファイルが prefix より長いことを検出器へ伝える。
+let private detectTruncated (bytes: byte[]) =
+  Encodings.detect (ReadOnlySpan bytes) (int64 bytes.Length + 1L)
+
+[<Fact>]
+let ``prefix 末尾で途切れた妥当な多バイト列は許容する`` () =
+  // 2〜4 バイト列のそれぞれについて、途中で切れた形をすべて許容しなければならない。
+  let sequences =
+    [ Text.Encoding.UTF8.GetBytes "é" // 2 バイト
+      Text.Encoding.UTF8.GetBytes "あ" // 3 バイト
+      Text.Encoding.UTF8.GetBytes "𠮷" ] // 4 バイト
+
+  for sequence in sequences do
+    for keep in 1 .. sequence.Length - 1 do
+      let bytes = Array.append (Text.Encoding.ASCII.GetBytes "abc") sequence[0 .. keep - 1]
+      Assert.Equal(Encodings.Utf8, (detectTruncated bytes).Encoding)
+
+[<Fact>]
+let ``prefix 末尾にある常に不正なバイトは UTF-8 として受理しない`` () =
+  // 機械的に末尾 3 バイトを削ると、これらを見逃して UTF-8 と誤判定する。
+  for invalid in [ 0x80uy; 0xC0uy; 0xC1uy; 0xF5uy; 0xF8uy; 0xFEuy; 0xFFuy ] do
+    let bytes = Array.append (Text.Encoding.ASCII.GetBytes "abc") [| invalid |]
+    Assert.NotEqual(Encodings.Utf8, (detectTruncated bytes).Encoding)
+
+[<Fact>]
+let ``prefix 末尾の overlong と surrogate は不完全列として許容しない`` () =
+  // E0 A0..BF / ED 80..9F / F0 90..BF / F4 80..8F の範囲外は、
+  // 続きが何であっても妥当な scalar にならない。
+  let rejected =
+    [ [| 0xE0uy; 0x9Fuy |] // overlong
+      [| 0xEDuy; 0xA0uy |] // surrogate
+      [| 0xF0uy; 0x8Fuy |] // overlong
+      [| 0xF4uy; 0x90uy |] ] // 範囲外 scalar
+
+  for sequence in rejected do
+    let bytes = Array.append (Text.Encoding.ASCII.GetBytes "abc") sequence
+    Assert.NotEqual(Encodings.Utf8, (detectTruncated bytes).Encoding)
+
+[<Fact>]
+let ``prefix 境界の前後をずらしても判定は一貫する`` () =
+  // 不正バイトの位置を prefix 末尾から動かしても、UTF-8 と判定してはならない。
+  for offset in 0..6 do
+    let bytes =
+      Array.concat
+        [ Text.Encoding.ASCII.GetBytes(String('a', 8))
+          [| 0xFFuy |]
+          Text.Encoding.ASCII.GetBytes(String('b', offset)) ]
+
+    Assert.NotEqual(Encodings.Utf8, (detectTruncated bytes).Encoding)
+
+[<Fact>]
+let ``曖昧な判定は候補を捨てずに返す`` () =
+  // ADR-5 に従い、判定順の先頭を確定値として扱わせない。
+  let detection = detect [| 0x81uy; 0x81uy |]
+  Assert.True detection.Ambiguous
+  Assert.True(detection.Candidates.Length > 1)
+  Assert.Contains(Encodings.ShiftJis, detection.Candidates)
+
+[<Fact>]
+let ``確定した判定は候補を持たない`` () =
+  let detection = detect (Text.Encoding.UTF8.GetBytes "日本語")
+  Assert.False detection.Ambiguous
+  Assert.Empty detection.Candidates

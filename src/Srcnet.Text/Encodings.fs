@@ -66,7 +66,10 @@ type Detection =
     /// BOM の長さ（バイト）。BOM がなければ 0。
     BomLength: int
     /// 構造規則を満たす候補が複数あった。ADR-5 に従い曖昧さを隠さない。
-    Ambiguous: bool }
+    Ambiguous: bool
+    /// 構造規則を満たした候補の一覧。`Ambiguous` でなければ空。
+    /// 判定順の先頭を確定値として扱わせないため、候補を捨てずに呼び出し側へ渡す。
+    Candidates: DetectedEncoding[] }
 
 let private bomLengthOf (bytes: ReadOnlySpan<byte>) =
   if bytes.Length >= 3 && bytes[0] = 0xEFuy && bytes[1] = 0xBBuy && bytes[2] = 0xBFuy then struct (3, ValueSome Utf8WithBom)
@@ -79,18 +82,65 @@ let private bomLengthOf (bytes: ReadOnlySpan<byte>) =
 [<Literal>]
 let private MaxIncompleteTail = 3
 
+let inline private isContinuation (b: byte) (low: byte) (high: byte) = b >= low && b <= high
+
+/// 先頭バイトから、その UTF-8 列に必要な総バイト数を返す。
+/// 単独では出現し得ないバイト（`0x80`〜`0xC1`、`0xF5`〜`0xFF`）は 0 を返す。
+let private sequenceLength (lead: byte) =
+  if lead >= 0xC2uy && lead <= 0xDFuy then 2
+  elif lead >= 0xE0uy && lead <= 0xEFuy then 3
+  elif lead >= 0xF0uy && lead <= 0xF4uy then 4
+  else 0
+
+/// `bytes` が「妥当な UTF-8 列の途中まで」であるかを判定する。
+///
+/// 単に長さが足りないだけでは不十分で、既に読めている継続バイトが
+/// overlong、surrogate、範囲外 scalar を作らない範囲に収まっている必要がある。
+let private isIncompleteSequence (bytes: ReadOnlySpan<byte>) =
+  let lead = bytes[0]
+  let required = sequenceLength lead
+
+  if required = 0 || bytes.Length >= required then false
+  elif bytes.Length = 1 then true
+  else
+    // 第 2 バイトの許容範囲は先頭バイトで狭まる。ここを緩めると overlong と
+    // surrogate を UTF-8 として受理してしまう。
+    let low =
+      if lead = 0xE0uy then 0xA0uy
+      elif lead = 0xF0uy then 0x90uy
+      else 0x80uy
+
+    let high =
+      if lead = 0xEDuy then 0x9Fuy
+      elif lead = 0xF4uy then 0x8Fuy
+      else 0xBFuy
+
+    if not (isContinuation bytes[1] low high) then false
+    elif bytes.Length = 2 then true
+    else isContinuation bytes[2] 0x80uy 0xBFuy
+
+/// prefix 末尾に残った不完全な UTF-8 列の長さ。不完全列でなければ 0。
+let private incompleteTailLength (bytes: ReadOnlySpan<byte>) =
+  let mutable length = 0
+  let mutable back = 1
+
+  while length = 0 && back <= MaxIncompleteTail && back <= bytes.Length do
+    if isIncompleteSequence (bytes.Slice(bytes.Length - back, back)) then length <- back
+    back <- back + 1
+
+  length
+
+/// prefix が UTF-8 として妥当か。
+///
+/// 元ファイルが prefix より長い場合に限り、末尾の**不完全列**を許容する。
+/// 機械的に末尾を削ると `0xFF` のような常に不正なバイトまで見逃すため、
+/// 削る対象が実際に妥当な列の途中であることを確認する。
 let private isValidUtf8 (bytes: ReadOnlySpan<byte>) (truncated: bool) =
   if Utf8.IsValid bytes then true
   elif not truncated then false
   else
-    let mutable ok = false
-    let mutable drop = 1
-
-    while not ok && drop <= MaxIncompleteTail && drop <= bytes.Length do
-      if Utf8.IsValid(bytes.Slice(0, bytes.Length - drop)) then ok <- true
-      drop <- drop + 1
-
-    ok
+    let tail = incompleteTailLength bytes
+    tail > 0 && Utf8.IsValid(bytes.Slice(0, bytes.Length - tail))
 
 let private containsNul (bytes: ReadOnlySpan<byte>) = bytes.IndexOf 0uy >= 0
 
@@ -283,17 +333,20 @@ let detect (prefix: ReadOnlySpan<byte>) (totalLength: int64) : Detection =
   | ValueSome encoding ->
     { Encoding = encoding
       BomLength = bomLength
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }
   | ValueNone ->
 
   if prefix.Length = 0 then
     { Encoding = Utf8
       BomLength = 0
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }
   elif containsNul prefix then
     { Encoding = Binary
       BomLength = 0
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }
   else
 
   let truncated = int64 prefix.Length < totalLength
@@ -304,21 +357,25 @@ let detect (prefix: ReadOnlySpan<byte>) (totalLength: int64) : Detection =
   if isIso2022Jp prefix then
     { Encoding = Iso2022Jp
       BomLength = 0
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }
   elif Ascii.IsValid prefix || isValidUtf8 prefix truncated then
     { Encoding = Utf8
       BomLength = 0
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }
   else
 
   let mutable chosen = ValueNone
   let mutable matches = 0
+  let mutable matched = 0u
 
   for index in 0 .. legacyOrder.Length - 1 do
     let candidate = legacyOrder[index]
 
     if validateLegacy candidate prefix then
       matches <- matches + 1
+      matched <- matched ||| (1u <<< index)
 
       if chosen.IsNone then chosen <- ValueSome candidate
 
@@ -326,8 +383,17 @@ let detect (prefix: ReadOnlySpan<byte>) (totalLength: int64) : Detection =
   | ValueSome encoding ->
     { Encoding = encoding
       BomLength = 0
-      Ambiguous = matches > 1 }
+      Ambiguous = matches > 1
+      // 候補が 1 つのときだけ確定とみなせる。配列の割り当ては曖昧なときに限る。
+      Candidates =
+        if matches > 1 then
+          legacyOrder
+          |> Array.mapi (fun index candidate -> struct (index, candidate))
+          |> Array.choose (fun (struct (index, candidate)) ->
+            if matched &&& (1u <<< index) <> 0u then Some candidate else None)
+        else Array.empty }
   | ValueNone ->
     { Encoding = Undetermined
       BomLength = 0
-      Ambiguous = false }
+      Ambiguous = false
+      Candidates = Array.empty }

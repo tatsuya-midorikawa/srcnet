@@ -8,7 +8,42 @@ module Srcnet.Discovery.Ignore
 open System
 open System.Buffers
 open System.Collections.Generic
+open System.IO
+open System.Threading
 open Srcnet.Core.Paths
+
+/// 1 つの無視ファイルから読み込む規則数の上限。
+///
+/// 規則数は照合コストに線形に効き、対象リポジトリが自由に決められる値である。
+/// 上限を置かなければ、巨大な `.gitignore` 1 つで走査時間を任意に伸ばせる。
+/// docs/security.md C-4 を参照。
+[<Literal>]
+let MaxRulesPerFile = 10000
+
+/// 1 つの無視ファイルから読み取るバイト数の上限。
+/// 規則数の上限だけでは、空行やコメントばかりの巨大ファイルを止められない。
+[<Literal>]
+let MaxFileBytes = 1_048_576
+
+/// 1 行の長さの上限（バイト）。
+/// 現実の無視規則はパス長に収まる。これを超える行は病的入力とみなす。
+[<Literal>]
+let MaxLineBytes = 4096
+
+/// 読み取りを打ち切った理由。打ち切りは適用できない規則が残ることを意味するため、
+/// 呼び出し側は走査を不完全として扱わなければならない。
+type Truncation =
+  | RuleCountExceeded
+  | ByteLimitExceeded
+  | LineLengthExceeded
+
+module Truncation =
+
+  let describe truncation =
+    match truncation with
+    | RuleCountExceeded -> $"規則数が上限 {MaxRulesPerFile} を超えたため一部を読み捨てました"
+    | ByteLimitExceeded -> $"内容が上限 {MaxFileBytes} バイトを超えたため一部を読み捨てました"
+    | LineLengthExceeded -> $"1 行が上限 {MaxLineBytes} バイトを超えたため以降を読み捨てました"
 
 /// セグメント内のグロブ トークン。パターン解析時に一度だけ構築する。
 type private GlobToken =
@@ -38,10 +73,10 @@ type RuleSet =
   private
     { BaseDepth: int
       Rules: Rule[]
-      Truncated: bool }
+      Truncated: Truncation voption }
 
-  /// 規則数の上限に達し、一部の規則を読み捨てたか。
-  member this.IsTruncated = this.Truncated
+  /// 上限に達して規則を読み捨てた場合、その理由。読み切れた場合は `ValueNone`。
+  member this.Truncation = this.Truncated
 
 /// 適用結果。最後に一致した規則が結論を決める。
 type Decision =
@@ -258,23 +293,16 @@ let private parseLine (line: string) : Rule voption =
       DirectoryOnly = directoryOnly
       Segments = segments }
 
-/// 1 つの無視ファイルから読み込む規則数の上限。
-///
-/// 規則数は照合コストに線形に効き、対象リポジトリが自由に決められる値である。
-/// 上限を置かなければ、巨大な `.gitignore` 1 つで走査時間を任意に伸ばせる。
-/// docs/security.md C-4 を参照。
-[<Literal>]
-let MaxRulesPerFile = 10000
-
 /// 無視ファイルの内容から規則集合を構築する。
 /// `baseDepth` は無視ファイルが置かれたディレクトリの階層の深さ。
-/// 上限を超えた規則は読み捨て、`Truncated` で呼び出し側に知らせる。
+/// 上限を超えた規則は読み捨て、`Truncation` で呼び出し側に知らせる。
 let parse (baseDepth: int) (lines: string seq) =
   let rules = List<Rule>()
-  let mutable truncated = false
+  let mutable truncation = ValueNone
 
   for line in lines do
-    if rules.Count >= MaxRulesPerFile then truncated <- true
+    if rules.Count >= MaxRulesPerFile then
+      if truncation.IsNone then truncation <- ValueSome RuleCountExceeded
     else
       match parseLine line with
       | ValueSome rule -> rules.Add rule
@@ -282,7 +310,78 @@ let parse (baseDepth: int) (lines: string seq) =
 
   { BaseDepth = baseDepth
     Rules = rules.ToArray()
-    Truncated = truncated }
+    Truncated = truncation }
+
+/// 開いた無視ファイルから規則集合を構築する。
+///
+/// 通常コンテンツと同じく、処理量を有界に保ち、取り消しへ速やかに応じる。
+/// `File.ReadLines` を使わないのは、行長にもバイト数にも上限がなく、
+/// `CancellationToken` も伝播しないためである。docs/security.md C-4 を参照。
+let read (baseDepth: int) (stream: Stream) (cancellation: CancellationToken) =
+  let rules = List<Rule>()
+  let mutable truncation = ValueNone
+  let buffer = ArrayPool<byte>.Shared.Rent 65536
+  // 行は上限バイト数までしか保持しない。超過分は捨てて打ち切る。
+  let line = ArrayPool<byte>.Shared.Rent MaxLineBytes
+
+  try
+    let mutable lineLength = 0
+    let mutable totalBytes = 0
+    let mutable reading = true
+
+    let commit () =
+      // 末尾の CR を取り除き、CRLF と LF のどちらでも同じ規則になるようにする。
+      let effective =
+        if lineLength > 0 && line[lineLength - 1] = 0x0Duy then lineLength - 1 else lineLength
+
+      if rules.Count >= MaxRulesPerFile then
+        if truncation.IsNone then truncation <- ValueSome RuleCountExceeded
+        reading <- false
+      elif effective > 0 then
+        // 無効な UTF-8 は置換文字へ変換する。規則が壊れていても走査は続けられる。
+        let text = Text.Encoding.UTF8.GetString(ReadOnlySpan(line, 0, effective))
+
+        match parseLine text with
+        | ValueSome rule -> rules.Add rule
+        | ValueNone -> ()
+
+      lineLength <- 0
+
+    while reading do
+      cancellation.ThrowIfCancellationRequested()
+      let read = stream.Read(Span(buffer, 0, buffer.Length))
+
+      if read = 0 then reading <- false
+      else
+        totalBytes <- totalBytes + read
+        let mutable index = 0
+
+        while reading && index < read do
+          let b = buffer[index]
+          index <- index + 1
+
+          if b = 0x0Auy then commit ()
+          elif lineLength >= MaxLineBytes then
+            // 行として成立しない長さに達した。以降の規則も信用できないため打ち切る。
+            if truncation.IsNone then truncation <- ValueSome LineLengthExceeded
+            reading <- false
+          else
+            line[lineLength] <- b
+            lineLength <- lineLength + 1
+
+        if reading && totalBytes >= MaxFileBytes then
+          if truncation.IsNone then truncation <- ValueSome ByteLimitExceeded
+          reading <- false
+
+    // 改行で終わらないファイルの最終行も規則として扱う。打ち切り時は捨てる。
+    if truncation.IsNone && lineLength > 0 then commit ()
+
+    { BaseDepth = baseDepth
+      Rules = rules.ToArray()
+      Truncated = truncation }
+  finally
+    ArrayPool<byte>.Shared.Return buffer
+    ArrayPool<byte>.Shared.Return line
 
 let isEmpty (ruleSet: RuleSet) = ruleSet.Rules.Length = 0
 

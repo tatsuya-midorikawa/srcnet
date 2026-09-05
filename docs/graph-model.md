@@ -72,7 +72,7 @@
 ### 4.2 定義
 
 ```text
-NodeId = BLAKE3(kind ‖ repoId ‖ normalizedPath ‖ qualifiedName ‖ ordinal)[0..16]
+NodeId = SHA-256(schemeVersion ‖ kind ‖ repoId ‖ normalizedPath ‖ qualifiedName ‖ ordinal)[0..16]
 ```
 
 | 要素 | 正規化規則 |

@@ -13,10 +13,12 @@ open Srcnet.Text
 open Srcnet.Core.Graph
 open Srcnet.Core.Paths
 
-/// ID 計算方式の版。材料の並びや区切り方を変えるときに増やす。
+/// ID 計算方式の版。材料の並びや区切り方、ハッシュ関数を変えるときに増やす。
 /// 版が変われば同じ入力から別の ID が出るため、成果物の非互換変更になる。
+///
+/// 2: ハッシュを自前 BLAKE3 から BCL の SHA-256 へ変更（ADR-8 の見直し）。
 [<Literal>]
-let SchemeVersion = 1uy
+let SchemeVersion = 2uy
 
 /// ノード ID のバイト長。128 ビットあれば 10^9 ノードでも衝突確率は無視できる。
 [<Literal>]
@@ -133,44 +135,52 @@ module RepositoryId =
 /// 材料は `方式版 ‖ 種別 ‖ repoId ‖ 論理パス ‖ 修飾名 ‖ 序数` で、各文字列は
 /// 長さ前置きにより連結の曖昧さを排除する。長さを前置きしなければ、
 /// `("ab", "c")` と `("a", "bc")` が同じ ID になってしまう。
+///
+/// 材料をいったん 1 つのバッファへ組み立ててから一度だけハッシュするのは、
+/// ノード 1 件ごとに計算する熱い経路で、逐次 API の相互運用往復を 1 回に抑えるためである。
 [<Sealed>]
 type NodeIdBuilder() =
-  let hasher = Blake3.Hasher()
   let mutable buffer = ArrayPool<byte>.Shared.Rent 512
+  let mutable length = 0
   let mutable disposed = false
 
   let ensureCapacity (required: int) =
     if buffer.Length < required then
+      let grown = ArrayPool<byte>.Shared.Rent required
+      Array.blit buffer 0 grown 0 length
       ArrayPool<byte>.Shared.Return buffer
-      buffer <- ArrayPool<byte>.Shared.Rent required
+      buffer <- grown
 
-  let updateLengthPrefixed (text: string) =
+  let appendByte (value: byte) =
+    ensureCapacity (length + 1)
+    buffer[length] <- value
+    length <- length + 1
+
+  let appendUInt32 (value: uint32) =
+    ensureCapacity (length + 4)
+    BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, length, 4), value)
+    length <- length + 4
+
+  let appendLengthPrefixed (text: string) =
     let maxBytes = Encoding.UTF8.GetMaxByteCount text.Length
-    ensureCapacity (maxBytes + 4)
-    let written = Encoding.UTF8.GetBytes(text.AsSpan(), Span(buffer, 4, buffer.Length - 4))
-    BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, 0, 4), uint32 written)
-    hasher.Update(ReadOnlySpan(buffer, 0, written + 4))
+    ensureCapacity (length + 4 + maxBytes)
+    let written = Encoding.UTF8.GetBytes(text.AsSpan(), Span(buffer, length + 4, buffer.Length - length - 4))
+    BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, length, 4), uint32 written)
+    length <- length + 4 + written
 
   member _.Compute(kind: NodeKind, repository: RepositoryId, path: LogicalPath, qualifiedName: string, ordinal: uint32) =
     ObjectDisposedException.ThrowIf(disposed, typeof<NodeIdBuilder>)
-    hasher.Reset()
+    length <- 0
+    appendByte SchemeVersion
+    appendByte (NodeKind.toCode kind)
+    appendLengthPrefixed repository.Value
+    appendLengthPrefixed path.Value
+    appendLengthPrefixed qualifiedName
+    appendUInt32 ordinal
 
-    let mutable header = Span<byte>(Array.zeroCreate 2)
-    header[0] <- SchemeVersion
-    header[1] <- NodeKind.toCode kind
-    hasher.Update(Span.op_Implicit header)
-
-    updateLengthPrefixed repository.Value
-    updateLengthPrefixed path.Value
-    updateLengthPrefixed qualifiedName
-
-    ensureCapacity 4
-    BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, 0, 4), ordinal)
-    hasher.Update(ReadOnlySpan(buffer, 0, 4))
-
-    let mutable digest = Span<byte>(Array.zeroCreate NodeIdLength)
-    hasher.Finish digest
-    NodeId.ofBytes(Span.op_Implicit digest)
+    let mutable digest = Span<byte>(Array.zeroCreate Hashing.HashLength)
+    Hashing.hashInto (ReadOnlySpan(buffer, 0, length)) digest
+    NodeId.ofBytes (Span.op_Implicit digest)
 
   interface IDisposable with
 

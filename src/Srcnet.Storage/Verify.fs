@@ -22,6 +22,8 @@ type Issue =
   | ReferenceOutOfRange of name: string * detail: string
   | OrderViolation of name: string * detail: string
   | UnknownNodeKind of name: string * code: byte
+  /// セグメント名から成果物内のパスへ変換できなかった。
+  | SegmentPathRejected of name: string * detail: string
 
 module Issue =
 
@@ -36,6 +38,7 @@ module Issue =
     | ReferenceOutOfRange(name, detail) -> $"{name}: 参照が範囲外です ({detail})"
     | OrderViolation(name, detail) -> $"{name}: 整列の不変条件が破れています ({detail})"
     | UnknownNodeKind(name, code) -> $"{name}: 未知のノード種別コード {code} です"
+    | SegmentPathRejected(_, detail) -> detail
 
 type Report =
   { Issues: Issue[]
@@ -48,7 +51,7 @@ type Report =
 let private HashBufferBytes = 262144
 
 let private hashFile (path: string) (cancellation: CancellationToken) =
-  let hasher = Blake3.Hasher()
+  use hasher = new Hashing.Hasher()
   let buffer = ArrayPool<byte>.Shared.Rent HashBufferBytes
 
   try
@@ -71,14 +74,11 @@ let private hashFile (path: string) (cancellation: CancellationToken) =
       let read = stream.Read(Span(buffer, 0, buffer.Length))
       if read = 0 then reading <- false else hasher.Update(ReadOnlySpan(buffer, 0, read))
 
-    let digest = Array.zeroCreate<byte> Blake3.HashLength
+    let digest = Array.zeroCreate<byte> Hashing.HashLength
     hasher.Finish(Span digest)
     Convert.ToHexStringLower digest
   finally
     ArrayPool<byte>.Shared.Return buffer
-
-let private physicalPath (outputDirectory: string) (name: string) =
-  Path.Combine(outputDirectory, name.Replace('/', Path.DirectorySeparatorChar))
 
 let private findSegment (manifest: Manifest.Manifest) (suffix: string) =
   manifest.Segments
@@ -248,44 +248,56 @@ let private checkIdMap (name: string) (segment: Reader.MappedSegment) (nodeCount
 
       index <- index + 1
 
-/// 出力ディレクトリの成果物を検証する。
-let run (outputDirectory: string) (cancellation: CancellationToken) : Result<Report, Manifest.ManifestError> =
-  match Manifest.read outputDirectory with
-  | Error error -> Error error
-  | Ok manifest ->
-
+let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (cancellation: CancellationToken) =
   let issues = ResizeArray<Issue>()
   let mutable bytesChecked = 0L
   let mutable checkedSegments = 0
 
   for descriptor in manifest.Segments do
     cancellation.ThrowIfCancellationRequested()
-    let path = physicalPath outputDirectory descriptor.Name
 
-    if not (File.Exists path) then issues.Add(SegmentMissing descriptor.Name)
-    else
-      let actualLength = FileInfo(path).Length
+    // 名前からパスへの変換は必ず検証を通す。成果物外のファイルを読み、
+    // 「問題ありません」と報告してしまうのを防ぐ。docs/security.md C-6 を参照。
+    match Artifact.tryResolveSegment outputDirectory descriptor.Name with
+    | Error error -> issues.Add(SegmentPathRejected(descriptor.Name, Artifact.PathError.describe error))
+    | Ok path ->
 
-      if actualLength <> descriptor.ByteLength then
-        issues.Add(LengthMismatch(descriptor.Name, descriptor.ByteLength, actualLength))
+    // 権限や、検証中に退役した世代による読み取り失敗は、破損した成果物と同じく
+    // 想定内の失敗である。内部エラーで終わらせず問題として記録し、
+    // `readStable` にマニフェストを読み直させる。
+    try
+      if not (File.Exists path) then issues.Add(SegmentMissing descriptor.Name)
       else
-        let actual = hashFile path cancellation
+        let actualLength = FileInfo(path).Length
 
-        if not (String.Equals(actual, descriptor.Checksum, StringComparison.Ordinal)) then
-          issues.Add(ChecksumMismatch(descriptor.Name, descriptor.Checksum, actual))
+        if actualLength <> descriptor.ByteLength then
+          issues.Add(LengthMismatch(descriptor.Name, descriptor.ByteLength, actualLength))
+        else
+          let actual = hashFile path cancellation
 
-        bytesChecked <- bytesChecked + actualLength
-        checkedSegments <- checkedSegments + 1
+          if not (String.Equals(actual, descriptor.Checksum, StringComparison.Ordinal)) then
+            issues.Add(ChecksumMismatch(descriptor.Name, descriptor.Checksum, actual))
+
+          bytesChecked <- bytesChecked + actualLength
+          checkedSegments <- checkedSegments + 1
+    with
+    | :? FileNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
+    | :? DirectoryNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
+    | :? IOException as ex -> issues.Add(SegmentUnreadable(descriptor.Name, ex.Message))
+    | :? UnauthorizedAccessException -> issues.Add(SegmentUnreadable(descriptor.Name, "読み取り権限がありません"))
 
   let openSegment (suffix: string) (check: string -> Reader.MappedSegment -> unit) =
     match findSegment manifest suffix with
     | None -> issues.Add(SegmentMissing suffix)
     | Some descriptor ->
-      match Reader.MappedSegment.Open(physicalPath outputDirectory descriptor.Name) with
-      | Error error -> issues.Add(SegmentUnreadable(descriptor.Name, Reader.OpenError.describe error))
-      | Ok segment ->
-        use segment = segment
-        check descriptor.Name segment
+      match Artifact.tryResolveSegment outputDirectory descriptor.Name with
+      | Error error -> issues.Add(SegmentPathRejected(descriptor.Name, Artifact.PathError.describe error))
+      | Ok path ->
+        match Reader.MappedSegment.Open path with
+        | Error error -> issues.Add(SegmentUnreadable(descriptor.Name, Reader.OpenError.describe error))
+        | Ok segment ->
+          use segment = segment
+          check descriptor.Name segment
 
   // チェックサムが壊れている状態で構造を読むと、誤った診断が連鎖する。
   if issues.Count = 0 then
@@ -296,7 +308,13 @@ let run (outputDirectory: string) (cancellation: CancellationToken) : Result<Rep
     openSegment $"redges.{EdgeKind.name Contains}" (fun name segment -> checkCsr name segment manifest.Counts.Nodes issues)
     openSegment "idmap" (fun name segment -> checkIdMap name segment manifest.Counts.Nodes issues)
 
-  Ok
-    { Issues = issues.ToArray()
-      SegmentsChecked = checkedSegments
-      BytesChecked = bytesChecked }
+  { Issues = issues.ToArray()
+    SegmentsChecked = checkedSegments
+    BytesChecked = bytesChecked }
+
+/// 出力ディレクトリの成果物を検証する。
+///
+/// 検証中に再索引が完了すると、退役した世代を参照したまま欠損を報告してしまう。
+/// `readStable` で観測の一貫性を確かめ、切替と競合した場合は測り直す。
+let run (outputDirectory: string) (cancellation: CancellationToken) : Result<Report, Manifest.ManifestError> =
+  Manifest.readStable outputDirectory (fun manifest -> inspect outputDirectory manifest cancellation)

@@ -19,8 +19,10 @@
         <Compile Include="EncodingTests.fs" />
         <Compile Include="CoreTests.fs" />
         <Compile Include="DiscoveryTests.fs" />
+        <Compile Include="ArtifactTests.fs" />
         <Compile Include="StorageTests.fs" />
         <Compile Include="IndexTests.fs" />
+        <Compile Include="CliTests.fs" />
         <Compile Include="ExtractionTests.fs" />
         <Compile Include="PropertyTests.fs" />
     </ItemGroup>

@@ -1,6 +1,7 @@
 /// 無視パターンの照合と言語判定のテスト。
 module Srcnet.Tests.DiscoveryTests
 
+open System
 open Xunit
 open Srcnet.Core.Graph
 open Srcnet.Core.Paths
@@ -159,9 +160,9 @@ let ``規則数の上限を超えた無視ファイルは切り詰められる``
   // 規則数は照合コストに線形に効き、対象リポジトリが自由に決められる値である。
   let lines = List.init (Ignore.MaxRulesPerFile + 500) (fun index -> $"pattern{index}/*.o")
   let rules = ruleSet 0 lines
-  Assert.True rules.IsTruncated
+  Assert.Equal(ValueSome Ignore.RuleCountExceeded, rules.Truncation)
   let withinLimit = ruleSet 0 [ "*.o" ]
-  Assert.False withinLimit.IsTruncated
+  Assert.Equal(ValueNone, withinLimit.Truncation)
 
 [<Fact>]
 let ``tsx と fsi は文法が異なるため別の言語として分類する`` () =
@@ -174,3 +175,49 @@ let ``tsx と fsi は文法が異なるため別の言語として分類する``
   Assert.Equal(FSharp, language "build.fsx")
   // シグネチャ ファイルは本体と区別して記録する。
   Assert.Equal(FSharpSignature, language "src/Program.fsi")
+
+// --- 無視ファイル読取の上限とキャンセル（backlogs/004） ---
+
+let private readRules (content: string) =
+  use stream = new IO.MemoryStream(Text.Encoding.UTF8.GetBytes content)
+  Ignore.read 0 stream Threading.CancellationToken.None
+
+[<Fact>]
+let ``無視ファイルは改行の種別によらず同じ規則になる`` () =
+  let expected = decide [| readRules "*.o\nbuild/\n" |] "main.o" false
+  Assert.Equal(Ignore.Ignored, expected)
+  Assert.Equal(Ignore.Ignored, decide [| readRules "*.o\r\nbuild/\r\n" |] "main.o" false)
+  // 改行で終わらない最終行も規則として扱う。
+  Assert.Equal(Ignore.Ignored, decide [| readRules "*.o" |] "main.o" false)
+
+[<Fact>]
+let ``無視ファイルの読取はバイト数の上限で打ち切る`` () =
+  // 規則数の上限だけでは、コメントばかりの巨大ファイルを止められない。
+  let padding = String.replicate 64 "#"
+  let line = padding + "\n"
+  let repeats = (Ignore.MaxFileBytes / line.Length) + 64
+  let rules = readRules (String.replicate repeats line)
+  Assert.Equal(ValueSome Ignore.ByteLimitExceeded, rules.Truncation)
+
+[<Fact>]
+let ``無視ファイルの読取は一行の長さの上限で打ち切る`` () =
+  let rules = readRules (String.replicate (Ignore.MaxLineBytes + 16) "a" + "\n*.o\n")
+  Assert.Equal(ValueSome Ignore.LineLengthExceeded, rules.Truncation)
+  // 打ち切った以降の規則は適用しない。読めた範囲だけを使う。
+  Assert.Equal(Ignore.NotMatched, decide [| rules |] "main.o" false)
+
+[<Fact>]
+let ``無視ファイルの読取は規則数の上限で打ち切る`` () =
+  let content =
+    String.concat "" [ for index in 0 .. Ignore.MaxRulesPerFile + 16 -> $"pattern{index}/*.o\n" ]
+
+  Assert.Equal(ValueSome Ignore.RuleCountExceeded, (readRules content).Truncation)
+
+[<Fact>]
+let ``取り消し済みのトークンでは無視ファイルを読まない`` () =
+  use stream = new IO.MemoryStream(Text.Encoding.UTF8.GetBytes "*.o\n")
+  use cancellation = new Threading.CancellationTokenSource()
+  cancellation.Cancel()
+
+  Assert.ThrowsAny<OperationCanceledException>(fun () -> Ignore.read 0 stream cancellation.Token |> ignore)
+  |> ignore

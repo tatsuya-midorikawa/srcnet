@@ -70,8 +70,11 @@ $ srcnet verify [<path>] [--out <dir>] [--deterministic] [--json]
 ```
 
 `index` はリポジトリを走査して `Repository` / `Directory` / `File` ノードと `CONTAINS` エッジを
-`<repo>/.srcnet/` へ書き出します。`verify --deterministic` は同じ入力から二度生成し、成果物が
-バイト単位で一致することを確認します。オプションの一覧は `srcnet --help` にあります。
+`<repo>/.srcnet/` へ書き出します。`verify --deterministic` は同じ入力から二度生成し、`manifest.json`
+を含む全ファイルがバイト単位で一致することを確認します。オプションの一覧は `srcnet --help` にあります。
+
+セグメントは `segments/<generation>/` へ世代ごとに書かれ、`manifest.json` の原子的な置換だけが
+公開の切替点になります。再索引中に `stats` や `verify` を実行しても、欠損や世代の混在は起きません。
 
 ```console
 $ srcnet index .
@@ -92,7 +95,7 @@ $ srcnet index .
 | プロジェクト | 内容 |
 | --- | --- |
 | `src/Srcnet.Text` | Unicode 正規化、東アジア文字幅、符号化判定、出力の無害化、語分割 |
-| `src/Srcnet.Core` | BLAKE3、ノード ID、論理パス、グラフの領域モデル、診断 |
+| `src/Srcnet.Core` | 内容ハッシュ、ノード ID、論理パス、グラフの領域モデル、診断 |
 | `src/Srcnet.Discovery` | 走査、`.gitignore` 照合、言語分類、読取と内容ハッシュ |
 | `src/Srcnet.Extraction` | tree-sitter による構文解析（相互運用の境界検証を含む） |
 | `src/Srcnet.Storage` | 列指向セグメント、CSR、マニフェスト、mmap 読み取り、検証 |
