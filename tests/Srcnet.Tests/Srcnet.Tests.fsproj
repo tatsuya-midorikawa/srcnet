@@ -28,6 +28,7 @@
         <Compile Include="DecodingTests.fs" />
         <Compile Include="GoldenTests.fs" />
         <Compile Include="RobustnessTests.fs" />
+        <Compile Include="QueryTests.fs" />
         <Compile Include="PropertyTests.fs" />
     </ItemGroup>
 

@@ -50,6 +50,12 @@ type NodeId =
 
 module NodeId =
 
+  /// 16 進小文字 32 桁の表記。
+  ///
+  /// 構造体のメンバーを読み取り専用の位置から直接呼ぶと複製の警告が出るため、
+  /// 値を受け取る関数として用意する。
+  let toString (id: NodeId) = id.ToString()
+
   let ofBytes (bytes: ReadOnlySpan<byte>) =
     if bytes.Length < NodeIdLength then
       invalidArg (nameof bytes) "ノード ID には 16 バイト必要です"

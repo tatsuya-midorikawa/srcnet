@@ -12,6 +12,7 @@
         <Compile Include="Manifest.fs" />
         <Compile Include="Reader.fs" />
         <Compile Include="Stats.fs" />
+        <Compile Include="Query.fs" />
         <Compile Include="Verify.fs" />
     </ItemGroup>
 

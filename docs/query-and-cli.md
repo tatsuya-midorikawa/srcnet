@@ -34,17 +34,30 @@ srcnet index <path>
   --no-gitignore         .gitignore を無視
   --allow-partial        不完全な走査結果での上書きを許可
 
+srcnet search <text>
+  --root <path>          解析ルート（生成物の位置を決めるために使う）
+  --ignore-case          大文字小文字を畳んで検索する
+
 srcnet neighbors <node>
-  --edge <kind,...>      エッジ種別
+  --edge <kind,...>      エッジ種別（既定は成果物が持つすべて）
   --direction in|out|both
   --depth <n>
   --include-ambiguous    AMBIGUOUS なエッジも含める
 
+照会（search / show / neighbors / path / context）の共通:
+  --root <path>          解析ルート
+  --limit <n>            返すノード数の上限（既定 50、上限 10000）
+  --depth <n>            探索の深さ（既定 1、上限 16）
+
 共通:
   --json                 機械可読出力
-  --budget <tokens>      出力トークン予算
+  --budget <tokens>      出力トークン予算（既定 8000、上限 1000000）
   --repo <id>            複数リポジトリ時のスコープ
 ```
+
+`<node>` にはノード ID（16 進 32 桁）か、名前・修飾名の**完全一致**を渡す。一致が複数あるときは
+推測で 1 つに絞らず、候補を `stderr` へ並べて終了コード 1 で終わる。所属パスの一致では解決しない。
+ファイル名を渡したときに、そのファイルの全シンボルが候補になるのを避けるためである。
 
 ### 2.2 終了コード
 
@@ -114,6 +127,12 @@ srcnet neighbors <node>
 
 `schemaVersion` は独立して版管理し、破壊的変更時に増やす。
 
+`--json` を指定した場合、診断も封筒の中の `diagnostics` に入れる。機械が読む先を 1 つに保ち、
+`stdout` を JSON だけに保つためである。テキスト出力では結果を `stdout`、診断を `stderr` へ分ける。
+
+`tokenEstimate` は決定的な近似で、`tokenEstimateMethod` にその方法を明示する。現在の方法は
+`ascii/4 + cjk*1 + other/2` で、実際のトークナイザとは 2 割程度ずれ得る。
+
 ### 5.2 テキスト
 
 人間と AI の両方が読める簡潔な形式で出力する。端末幅に依存する整形は、東アジア文字幅を考慮する（[移植性と国際化](platform-and-i18n.md)）。
@@ -133,6 +152,41 @@ LLM を使わないため、`explain` は散文を生成せず、構造的事実
 「この関数の役割は〜です」という要約は生成しない。事実の提示に留め、解釈は呼び出し側の AI に委ねる。これが AI コストを移さずに削減する唯一の一貫した方法である。
 
 ## 7. エージェント連携
+
+### 7.1 AI エージェントからの最小の使い方
+
+CLI をシェルから呼ぶだけでよい。専用の SDK もネットワーク待ち受けも要らない。
+
+```sh
+# 1. 一度だけ索引を作る
+srcnet index /path/to/repo --tier 2
+
+# 2. 名前で当たりを付ける（既定で 50 件・8000 トークンに収まる）
+srcnet search Area --root /path/to/repo --json --limit 10
+
+# 3. 気になったノードの属性と定義位置を見る（ID か完全一致の名前で指定）
+srcnet show 8ac06571c1dd246a51a3bc985dbe8500 --root /path/to/repo --json
+
+# 4. 周囲の構造を辿る
+srcnet neighbors 8ac06571c1dd246a51a3bc985dbe8500 --root /path/to/repo \
+  --edge CONTAINS,DEFINES --direction out --depth 2 --json
+
+# 5. 複数の語から、予算に収めた文脈をまとめて取る
+srcnet context Area Point --root /path/to/repo --json --budget 4000
+```
+
+守るべき点は 3 つである。
+
+1. **出力は必ず有界である。** `--limit` と `--budget` に既定値があり、超えたぶんは
+   `truncated` と `omittedCount` で報告される。黙って捨てない
+2. **ソース本文は返らない。** 既定では定義位置（パスと行範囲）だけを返す。本文が要る場合は
+   その位置を使って通常のファイル読み取りを行う
+3. **推測しない。** 名前が一意でなければ候補を返す。`confidence` は解決の根拠を表し、
+   `AMBIGUOUS` を確定として扱わない
+
+MCP アダプターは同じ照会サービスの上の薄い層として後続で追加する。二重実装は行わない。
+
+### 7.2 実装状況
 
 CLI と JSON 出力を一次界面とする。MCP サーバー モードは、同じ照会サービスの上の薄いアダプターとして後続マイルストーンで追加する（[ロードマップ](roadmap.md)）。二重実装は行わない。
 

@@ -6,6 +6,7 @@ module Srcnet.Cli.Args
 
 open System
 open Srcnet.Core.Ids
+open Srcnet.Storage
 
 /// 生成物の既定の出力先。解析ルートからの相対。
 [<Literal>]
@@ -14,6 +15,29 @@ let DefaultOutputDirectoryName = ".srcnet"
 /// 抽出段階の既定値。docs/query-and-cli.md 2.1 の `--tier` に対応する。
 [<Literal>]
 let DefaultTier = 2
+
+/// 照会が返すノード数の既定上限。
+[<Literal>]
+let DefaultLimit = 50
+
+/// 返すノード数の絶対上限。利用者が指定しても、これを超える出力は作らない。
+[<Literal>]
+let MaxLimit = 10_000
+
+/// 出力トークン予算の既定値。AI エージェントの 1 回の読み取りに収まる大きさにする。
+[<Literal>]
+let DefaultBudget = 8_000
+
+[<Literal>]
+let MaxBudget = 1_000_000
+
+/// 近傍探索の既定の深さ。
+[<Literal>]
+let DefaultDepth = 1
+
+/// 深さの絶対上限。無制限の探索を許さない。
+[<Literal>]
+let MaxQueryDepth = 16
 
 type IndexArguments =
   { RootPath: string
@@ -29,6 +53,63 @@ type IndexArguments =
     RespectIgnoreFiles: bool
     FollowSymbolicLinks: bool
     AllowPartial: bool
+    Json: bool }
+
+/// 照会コマンドに共通する出力の制限。
+///
+/// 出力量は必ず有界にする。AI エージェントのコスト削減が目的である以上、予算制御は
+/// 中核機能であり任意機能ではない（docs/query-and-cli.md 4）。
+type QueryLimits =
+  { /// 返すノード数の上限。
+    Limit: int
+    /// 出力トークンの予算。0 は無制限ではなく既定値を使うことを表す。
+    Budget: int }
+
+type SearchArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    Text: string
+    /// 大文字小文字を畳んで比較する。
+    IgnoreCase: bool
+    Limits: QueryLimits
+    Json: bool }
+
+type ShowArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    /// ノード ID（16 進 32 桁）または名前。名前が一意でない場合は候補を返す。
+    Node: string
+    Limits: QueryLimits
+    Json: bool }
+
+type NeighborsArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    Node: string
+    /// エッジ種別。空なら成果物が持つすべての種別。
+    Edges: string[]
+    Direction: string
+    Depth: int
+    Limits: QueryLimits
+    Json: bool }
+
+type PathArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    From: string
+    To: string
+    Edges: string[]
+    Direction: string
+    Depth: int
+    Limits: QueryLimits
+    Json: bool }
+
+type ContextArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    Keywords: string[]
+    Depth: int
+    Limits: QueryLimits
     Json: bool }
 
 type StatsArguments =
@@ -47,6 +128,11 @@ type Command =
   | Index of IndexArguments
   | Stats of StatsArguments
   | Verify of VerifyArguments
+  | Search of SearchArguments
+  | Show of ShowArguments
+  | Neighbors of NeighborsArguments
+  | Path of PathArguments
+  | Context of ContextArguments
   | Help
   | Version
 
@@ -321,6 +407,123 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               FollowSymbolicLinks = followSymlinks
               AllowPartial = allowPartial
               Json = json })
+  | "search"
+  | "show"
+  | "neighbors"
+  | "path"
+  | "context" ->
+    let output = optionalValue "--out"
+    let root = optionalValue "--root"
+    let limit = optionalInt "--limit"
+    let budget = optionalInt "--budget"
+    let depth = optionalInt "--depth"
+    let direction = optionalValue "--direction"
+    let edges = optionalValue "--edge"
+    let ignoreCase = reader.Flag "--ignore-case"
+
+    let errorOf (value: Result<'T, ParseError> voption) =
+      match value with
+      | ValueSome(Error error) -> Some error
+      | ValueSome(Ok _)
+      | ValueNone -> None
+
+    // 上限は「指定がなければ既定、指定があれば絶対上限で頭打ち」にする。
+    // 利用者が大きな値を渡しても、出力量は有界のままになる。
+    let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
+      match value with
+      | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
+      | ValueSome(Ok _) -> fallback
+      | ValueSome(Error _)
+      | ValueNone -> fallback
+
+    let directionText =
+      match direction with
+      | ValueSome text -> text
+      | ValueNone -> "both"
+
+    let edgeKinds =
+      match edges with
+      | ValueNone -> Array.empty
+      | ValueSome text ->
+        text.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+
+    match List.tryPick id [ errorOf limit; errorOf budget; errorOf depth ] with
+    | Some error -> Error error
+    | None ->
+
+    let limits =
+      { Limit = clamp limit DefaultLimit MaxLimit
+        Budget = clamp budget DefaultBudget MaxBudget }
+
+    let resolvedDepth = clamp depth DefaultDepth MaxQueryDepth
+
+    let parsedDirection = Query.Direction.tryParse directionText
+
+    if parsedDirection.IsNone then
+      Error(InvalidValue("--direction", directionText))
+    else
+
+    match command with
+    | "search" ->
+      if positional.Count = 0 then Error(MissingArgument "<text>")
+      else
+        finish reader positional 1 (fun () ->
+          Search
+            { OutputDirectory = output
+              RootPath = root
+              Text = positional[0].Text
+              IgnoreCase = ignoreCase
+              Limits = limits
+              Json = json })
+    | "show" ->
+      if positional.Count = 0 then Error(MissingArgument "<node>")
+      else
+        finish reader positional 1 (fun () ->
+          Show
+            { OutputDirectory = output
+              RootPath = root
+              Node = positional[0].Text
+              Limits = limits
+              Json = json })
+    | "neighbors" ->
+      if positional.Count = 0 then Error(MissingArgument "<node>")
+      else
+        finish reader positional 1 (fun () ->
+          Neighbors
+            { OutputDirectory = output
+              RootPath = root
+              Node = positional[0].Text
+              Edges = edgeKinds
+              Direction = directionText
+              Depth = resolvedDepth
+              Limits = limits
+              Json = json })
+    | "path" ->
+      if positional.Count < 2 then Error(MissingArgument "<from> <to>")
+      else
+        finish reader positional 2 (fun () ->
+          Path
+            { OutputDirectory = output
+              RootPath = root
+              From = positional[0].Text
+              To = positional[1].Text
+              Edges = edgeKinds
+              Direction = directionText
+              Depth = max resolvedDepth 1
+              Limits = limits
+              Json = json })
+    | _ ->
+      if positional.Count = 0 then Error(MissingArgument "<keywords...>")
+      else
+        // `context` は語をいくつでも取る。位置引数の上限を実際の個数に合わせる。
+        finish reader positional positional.Count (fun () ->
+          Context
+            { OutputDirectory = output
+              RootPath = root
+              Keywords = positional |> Seq.map (fun item -> item.Text) |> Seq.toArray
+              Depth = resolvedDepth
+              Limits = limits
+              Json = json })
   | "stats" ->
     let output = optionalValue "--out"
 
@@ -361,9 +564,14 @@ let usage =
     [ "srcnet — ソースコードから AI を使わずにナレッジ グラフを生成する"
       ""
       "使い方:"
-      "  srcnet index <path> [オプション]   インデックスを生成する"
-      "  srcnet stats [<path>] [オプション]  生成物の統計を表示する"
-      "  srcnet verify [<path>] [オプション] 生成物の整合性を検証する"
+      "  srcnet index <path> [オプション]      インデックスを生成する"
+      "  srcnet search <text> [オプション]     名前・修飾名・パスを検索する"
+      "  srcnet show <node> [オプション]       ノードの属性と定義位置を表示する"
+      "  srcnet neighbors <node> [オプション]  近傍を辿る"
+      "  srcnet path <from> <to> [オプション]  2 ノード間の最短経路を求める"
+      "  srcnet context <keywords...>         予算内に収めた文脈をまとめる"
+      "  srcnet stats [<path>] [オプション]    生成物の統計を表示する"
+      "  srcnet verify [<path>] [オプション]   生成物の整合性を検証する"
       "  srcnet --version                   版を表示する"
       "  srcnet --help                      この説明を表示する"
       ""
@@ -381,6 +589,15 @@ let usage =
       ""
       "verify のオプション:"
       "  --deterministic        二度生成して成果物がバイト一致するか検証する"
+      ""
+      "照会 (search / show / neighbors / path / context) のオプション:"
+      "  --root <path>          解析ルート (生成物の位置を決めるために使う)"
+      "  --limit <n>            返すノード数の上限 (既定 50、上限 10000)"
+      "  --budget <tokens>      出力トークン予算 (既定 8000)"
+      "  --depth <n>            探索の深さ (既定 1、上限 16)"
+      "  --edge <kind,...>      辿るエッジ種別 (既定はすべて)"
+      "  --direction in|out|both 探索の向き (既定 both)"
+      "  --ignore-case          大文字小文字を畳んで検索する"
       ""
       "共通:"
       "  --out <dir>            生成物の位置"

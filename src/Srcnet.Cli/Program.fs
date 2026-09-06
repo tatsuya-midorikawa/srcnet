@@ -46,6 +46,11 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
     | Ok(Args.Index arguments) -> return! Commands.index arguments cancellation
     | Ok(Args.Stats arguments) -> return Commands.stats arguments
     | Ok(Args.Verify arguments) -> return! Commands.verify arguments cancellation
+    | Ok(Args.Search arguments) -> return QueryCommands.search arguments cancellation
+    | Ok(Args.Show arguments) -> return QueryCommands.show arguments cancellation
+    | Ok(Args.Neighbors arguments) -> return QueryCommands.neighbors arguments cancellation
+    | Ok(Args.Path arguments) -> return QueryCommands.path arguments cancellation
+    | Ok(Args.Context arguments) -> return QueryCommands.context arguments cancellation
   }
 
 [<EntryPoint>]

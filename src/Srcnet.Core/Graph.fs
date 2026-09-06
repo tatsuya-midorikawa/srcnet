@@ -128,6 +128,51 @@ module EdgeKind =
     | Explains -> 18uy
     | MemberOf -> 19uy
 
+  let ofCode code =
+    match code with
+    | 1uy -> ValueSome Contains
+    | 2uy -> ValueSome Includes
+    | 3uy -> ValueSome Imports
+    | 4uy -> ValueSome Declares
+    | 5uy -> ValueSome Defines
+    | 6uy -> ValueSome Calls
+    | 7uy -> ValueSome References
+    | 8uy -> ValueSome Inherits
+    | 9uy -> ValueSome Implements
+    | 10uy -> ValueSome Overrides
+    | 11uy -> ValueSome TypedAs
+    | 12uy -> ValueSome Tests
+    | 13uy -> ValueSome BuiltFrom
+    | 14uy -> ValueSome BuildDepends
+    | 15uy -> ValueSome GuardedBy
+    | 16uy -> ValueSome OwnedBy
+    | 17uy -> ValueSome CoChanged
+    | 18uy -> ValueSome Explains
+    | 19uy -> ValueSome MemberOf
+    | _ -> ValueNone
+
+  /// 定義順に並べた全種別。名前や符号からの検索と、種別ごとの走査に使う。
+  let all =
+    [| Contains
+       Includes
+       Imports
+       Declares
+       Defines
+       Calls
+       References
+       Inherits
+       Implements
+       Overrides
+       TypedAs
+       Tests
+       BuiltFrom
+       BuildDepends
+       GuardedBy
+       OwnedBy
+       CoChanged
+       Explains
+       MemberOf |]
+
   /// セグメント ファイル名に使う識別子。docs/storage.md 2 の `<id>.edges.<kind>` に対応する。
   let name kind =
     match kind with
@@ -167,6 +212,13 @@ module Confidence =
     | Extracted -> 1uy
     | Resolved -> 2uy
     | Ambiguous -> 3uy
+
+  let ofCode code =
+    match code with
+    | 1uy -> ValueSome Extracted
+    | 2uy -> ValueSome Resolved
+    | 3uy -> ValueSome Ambiguous
+    | _ -> ValueNone
 
   let name confidence =
     match confidence with
@@ -243,6 +295,46 @@ module Language =
     | Owners -> 27us
     | Tsx -> 28us
     | FSharpSignature -> 29us
+
+  /// 定義順に並べた全言語。符号からの復元と統計の集計に使う。
+  let all =
+    [| Unknown
+       PlainText
+       C
+       CHeader
+       Cpp
+       CppHeader
+       ObjectiveC
+       ObjectiveCpp
+       Rust
+       Python
+       JavaScript
+       TypeScript
+       Java
+       Go
+       CSharp
+       FSharp
+       Assembly
+       Shell
+       Makefile
+       CMake
+       GnBuild
+       Kconfig
+       Yaml
+       Json
+       Toml
+       Xml
+       Markdown
+       Owners
+       Tsx
+       FSharpSignature |]
+
+  /// 符号から言語を復元する。未知の符号は `Unknown` にする。
+  /// 成果物は外部入力であり、知らない符号で失敗させるより分類不能として扱うほうが安全である。
+  let ofCode (code: uint16) =
+    match all |> Array.tryFind (fun language -> toCode language = code) with
+    | Some language -> language
+    | None -> Unknown
 
   let name language =
     match language with

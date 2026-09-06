@@ -66,10 +66,18 @@
 
 - セグメント形式、CSR、文字列 blob、ID マップ
 - 名前索引と n-gram 索引（CJK 対応）
-- `search` / `show` / `neighbors` / `path` / `stats` / `verify`
+- `search` / `show` / `neighbors` / `path` / `context` / `stats` / `verify`
 - トークン予算と JSON 出力
 
 **完了条件:** 照会レイテンシが [性能](performance.md) の目標内。CJK 検索テストが通る。
+
+**未了:**
+
+- 名前索引と n-gram 索引。現在の `search` は文字列表とノード表を全走査する。
+  全走査へ黙って退行させず `usedIndex: false` と診断で明示しているが、
+  完全一致検索は目標の p95 ≤ 20 ms に対して 196 ms かかる（[性能](performance.md) 5.1）
+- プロセス起動が 65 ms を占め、「起動から結果出力まで」の目標を単独で超える。
+  配布形態（Native AOT / ReadyToRun）の決定（M7）と併せて解く
 
 ## M5 — 増分更新
 

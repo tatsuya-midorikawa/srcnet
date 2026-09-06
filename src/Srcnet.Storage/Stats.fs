@@ -84,11 +84,6 @@ let readReferenceStatistics
         if confidence = Confidence.toCode Extracted then bump extracted edgeCode
         elif confidence = Confidence.toCode Ambiguous then bump ambiguous edgeCode
 
-      let allEdgeKinds =
-        [| Contains; Includes; Imports; Declares; Defines; Calls; References; Inherits; Implements
-           Overrides; TypedAs; Tests; BuiltFrom; BuildDepends; GuardedBy; OwnedBy; CoChanged
-           Explains; MemberOf |]
-
       let lookup (table: Dictionary<byte, int>) key =
         match table.TryGetValue key with
         | true, value -> value
@@ -96,8 +91,8 @@ let readReferenceStatistics
 
       totals
       |> Seq.choose (fun entry ->
-        allEdgeKinds
-        |> Array.tryFind (fun kind -> EdgeKind.toCode kind = entry.Key)
+        EdgeKind.ofCode entry.Key
+        |> ValueOption.toOption
         |> Option.map (fun kind ->
           { Kind = kind
             Count = entry.Value
@@ -112,42 +107,7 @@ let readReferenceStatistics
       |> Seq.toArray
       |> Ok
 
-let private languageOfCode (code: uint16) =
-  let all =
-    [| Unknown
-       PlainText
-       C
-       CHeader
-       Cpp
-       CppHeader
-       ObjectiveC
-       ObjectiveCpp
-       Rust
-       Python
-       JavaScript
-       TypeScript
-       Java
-       Go
-       CSharp
-       FSharp
-       Assembly
-       Shell
-       Makefile
-       CMake
-       GnBuild
-       Kconfig
-       Yaml
-       Json
-       Toml
-       Xml
-       Markdown
-       Owners
-       Tsx
-       FSharpSignature |]
-
-  match all |> Array.tryFind (fun language -> Language.toCode language = code) with
-  | Some language -> language
-  | None -> Unknown
+let private languageOfCode (code: uint16) = Language.ofCode code
 
 let private encodingOfCode (code: uint16) =
   let all =

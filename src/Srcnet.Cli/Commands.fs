@@ -49,7 +49,7 @@ let SchemaVersion = 1
 let private jsonWriterOptions =
   JsonWriterOptions(Indented = true, IndentCharacter = ' ', IndentSize = 2, NewLine = Terminal.Newline)
 
-let private writeJson (build: Utf8JsonWriter -> unit) =
+let writeJson (build: Utf8JsonWriter -> unit) =
   use buffer = new MemoryStream()
   use writer = new Utf8JsonWriter(buffer, jsonWriterOptions)
   writer.WriteStartObject()
