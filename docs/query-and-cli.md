@@ -18,6 +18,7 @@ srcnet は自然言語を理解しない。クエリは **字句一致 + 構造�
 | `srcnet impact <files...>` | 変更の影響範囲 |
 | `srcnet explain <node>` | 構造的事実の定型出力 |
 | `srcnet context <keywords...>` | 予算内に収めた文脈パック |
+| `srcnet export html` | 監査・探索用の対話的な HTML グラフを出力する |
 | `srcnet stats` | グラフ統計 |
 | `srcnet verify` | 整合性・決定性の検証 |
 
@@ -133,7 +134,31 @@ srcnet neighbors <node>
 `tokenEstimate` は決定的な近似で、`tokenEstimateMethod` にその方法を明示する。現在の方法は
 `ascii/4 + cjk*1 + other/2` で、実際のトークナイザとは 2 割程度ずれ得る。
 
-### 5.2 テキスト
+### 5.2 HTML
+
+`srcnet export html` は単一の自己完結 HTML を出力する。**人間が抽出結果を監査・探索する**ための
+表示であり、AI の一次界面ではない。AI は 5.1 の JSON を使う。
+
+```sh
+# 起点なし: CONTAINS グラフをディレクトリ単位へ集約した概要
+srcnet export html --root /path/to/repo
+
+# 起点あり: 指定ノードの周辺
+srcnet export html --root /path/to/repo --query point_area --depth 2 --max-nodes 2000
+```
+
+- 外部 CDN、ネットワーク通信、テレメトリを使わない。CSS、JavaScript、部分グラフのデータを
+  1 ファイルへ含め、オフラインで開ける
+- 全体エクスポートは提供しない。`--max-nodes`（既定 800、上限 20000）を超える入力は
+  集約または明示的な打ち切りにし、打ち切り件数を画面に常時表示する
+- ソース本文は埋め込まない。成果物を共有したときに、意図せずコードを複製しないためである
+- データは `<script type="application/json">` へ入れ、`<` を含む文字をすべて `\uXXXX` へ
+  逃がす。リポジトリ由来の名前に `</script>` が含まれてもスクリプトとして解釈されない
+- 描画は Canvas で行う。ノード数だけ DOM を作ると、上限内でも表示が重くなる
+- 起点が決まらない場合や成果物が読めない場合は、不完全な HTML を成功扱いで残さず、
+  既存のファイルを保持したまま失敗する
+
+### 5.3 テキスト
 
 人間と AI の両方が読める簡潔な形式で出力する。端末幅に依存する整形は、東アジア文字幅を考慮する（[移植性と国際化](platform-and-i18n.md)）。
 

@@ -12,7 +12,16 @@
         <Compile Include="Args.fs" />
         <Compile Include="Commands.fs" />
         <Compile Include="QueryCommands.fs" />
+        <Compile Include="ExportCommands.fs" />
         <Compile Include="Program.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!--
+            対話的な HTML の雛形。外部 CDN を使わないため、CSS と JavaScript を含めて
+            埋め込み資源として持つ（backlog 029）。
+        -->
+        <EmbeddedResource Include="assets/graph.html" LogicalName="Srcnet.Cli.Assets.graph.html" />
     </ItemGroup>
 
     <ItemGroup>

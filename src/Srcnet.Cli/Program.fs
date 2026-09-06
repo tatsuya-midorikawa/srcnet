@@ -51,6 +51,7 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
     | Ok(Args.Neighbors arguments) -> return QueryCommands.neighbors arguments cancellation
     | Ok(Args.Path arguments) -> return QueryCommands.path arguments cancellation
     | Ok(Args.Context arguments) -> return QueryCommands.context arguments cancellation
+    | Ok(Args.ExportHtml arguments) -> return ExportCommands.exportHtml arguments cancellation
   }
 
 [<EntryPoint>]

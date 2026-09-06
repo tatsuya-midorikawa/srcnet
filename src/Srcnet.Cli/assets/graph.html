@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<!--
+  srcnet が生成した部分グラフの表示。
+  外部 CDN、ネットワーク通信、テレメトリを一切使わない。この 1 ファイルで完結する。
+  データは JSON として埋め込み、`JSON.parse` で読む。HTML へ直接展開しないため、
+  リポジトリ由来の名前がスクリプトとして解釈されることはない。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>srcnet graph</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #6a6a6a;
+        --line: #d0d0d0;
+        --panel: #f6f6f6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16181d;
+          --fg: #e6e6e6;
+          --muted: #9a9a9a;
+          --line: #333842;
+          --panel: #1e2128;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        /* CJK を含む名前が豆腐にならないよう、各 OS の既定 UI フォントを順に指す */
+        font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI",
+          "Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK KR",
+          "Microsoft YaHei", "Malgun Gothic", sans-serif;
+        font-size: 13px;
+        display: grid;
+        grid-template-columns: 1fr 340px;
+        grid-template-rows: auto 1fr;
+      }
+      header {
+        grid-column: 1 / -1;
+        border-bottom: 1px solid var(--line);
+        padding: 8px 12px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+      .notice { color: var(--muted); }
+      .warn { color: #b45309; font-weight: 600; }
+      main { position: relative; overflow: hidden; }
+      canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+      canvas.dragging { cursor: grabbing; }
+      aside {
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+        overflow-y: auto;
+        padding: 10px 12px;
+      }
+      aside h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; }
+      aside h2:first-child { margin-top: 0; }
+      input[type="search"] { width: 100%; padding: 5px 7px; font: inherit; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li { padding: 2px 0; }
+      label { display: flex; gap: 6px; align-items: center; }
+      .path { color: var(--muted); word-break: break-all; }
+      .badge {
+        display: inline-block;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 0 4px;
+        margin-right: 4px;
+        color: var(--muted);
+      }
+      button { font: inherit; padding: 3px 8px; }
+      .hit { cursor: pointer; }
+      .hit:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 id="title">srcnet</h1>
+      <span class="notice" id="counts"></span>
+      <span class="warn" id="truncation"></span>
+      <button id="reset" type="button">表示をリセット</button>
+    </header>
+    <main>
+      <canvas id="view"></canvas>
+    </main>
+    <aside>
+      <h2>検索</h2>
+      <input id="filter" type="search" placeholder="名前・修飾名・パス" autocomplete="off" />
+      <ul id="hits"></ul>
+      <h2>ノード種別</h2>
+      <ul id="kinds"></ul>
+      <h2>エッジ種別</h2>
+      <ul id="edgeKinds"></ul>
+      <h2>選択</h2>
+      <div id="selection" class="notice">ノードを選ぶと属性を表示します。</div>
+      <h2>診断</h2>
+      <ul id="diagnostics"></ul>
+    </aside>
+    <script id="srcnet-data" type="application/json">{{DATA}}</script>
+    <script>
+      "use strict";
+      const data = JSON.parse(document.getElementById("srcnet-data").textContent);
+
+      // 描画は Canvas で行う。ノード数だけ DOM を作ると、上限内でも表示が重くなる。
+      const canvas = document.getElementById("view");
+      const context = canvas.getContext("2d");
+
+      // 種別ごとの色。決定的な並びから割り当てるため、実行のたびに色が変わらない。
+      const palette = [
+        "#2563eb", "#16a34a", "#dc2626", "#9333ea", "#c2410c",
+        "#0891b2", "#ca8a04", "#be185d", "#4d7c0f", "#475569"
+      ];
+      const kinds = [...new Set(data.nodes.map((n) => n.kind))].sort();
+      const kindColor = new Map(kinds.map((kind, index) => [kind, palette[index % palette.length]]));
+      const edgeKinds = [...new Set(data.edges.map((e) => e.kind))].sort();
+
+      const visibleKinds = new Set(kinds);
+      const visibleEdgeKinds = new Set(edgeKinds);
+      let selected = -1;
+      let highlighted = new Set();
+      let foreground = getComputedStyle(document.body).color;
+
+      // レイアウトは索引の順序だけで決まる。乱数も入力順への依存も使わない。
+      // 起点からの距離ごとに同心円へ並べ、同じ距離の中は配列の順序で置く。
+      const positions = data.nodes.map(() => ({ x: 0, y: 0 }));
+      function layout() {
+        const byDistance = new Map();
+        data.nodes.forEach((node, index) => {
+          const ring = node.distance === undefined ? 0 : node.distance;
+          if (!byDistance.has(ring)) byDistance.set(ring, []);
+          byDistance.get(ring).push(index);
+        });
+        for (const ring of [...byDistance.keys()].sort((a, b) => a - b)) {
+          const members = byDistance.get(ring);
+          if (ring === 0 && members.length === 1) {
+            positions[members[0]] = { x: 0, y: 0 };
+            continue;
+          }
+          const radius = ring === 0 ? 110 : 150 + (ring - 1) * 170;
+          members.forEach((index, position) => {
+            const angle = (2 * Math.PI * position) / members.length;
+            positions[index] = { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+          });
+        }
+      }
+      layout();
+
+      let scale = 1;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      function resize() {
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
+        canvas.height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        draw();
+      }
+
+      function nodeVisible(index) {
+        return visibleKinds.has(data.nodes[index].kind);
+      }
+
+      function toScreen(point) {
+        return {
+          x: point.x * scale + offsetX + canvas.clientWidth / 2,
+          y: point.y * scale + offsetY + canvas.clientHeight / 2
+        };
+      }
+
+      function draw() {
+        context.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+        context.lineWidth = 1;
+
+        for (const edge of data.edges) {
+          if (!visibleEdgeKinds.has(edge.kind)) continue;
+          if (!nodeVisible(edge.from) || !nodeVisible(edge.to)) continue;
+          const a = toScreen(positions[edge.from]);
+          const b = toScreen(positions[edge.to]);
+          const active = highlighted.has(edge.from) || highlighted.has(edge.to);
+          context.strokeStyle = active
+            ? kindColor.get(data.nodes[edge.from].kind)
+            : "rgba(128,128,128,0.3)";
+          context.beginPath();
+          context.moveTo(a.x, a.y);
+          context.lineTo(b.x, b.y);
+          context.stroke();
+        }
+
+        const withLabels = scale > 0.7 && data.nodes.length <= 1500;
+        context.font = "11px sans-serif";
+
+        for (let index = 0; index < data.nodes.length; index += 1) {
+          if (!nodeVisible(index)) continue;
+          const node = data.nodes[index];
+          const point = toScreen(positions[index]);
+          const weight = node.weight === undefined ? 1 : node.weight;
+          const radius = Math.max(3, Math.min(12, 3 + Math.log2(1 + weight) * 2));
+          context.fillStyle = kindColor.get(node.kind);
+          context.globalAlpha = highlighted.size === 0 || highlighted.has(index) ? 1 : 0.25;
+          context.beginPath();
+          context.arc(point.x, point.y, radius, 0, 2 * Math.PI);
+          context.fill();
+
+          if (index === selected) {
+            context.strokeStyle = foreground;
+            context.lineWidth = 2;
+            context.stroke();
+            context.lineWidth = 1;
+          }
+
+          context.globalAlpha = 1;
+
+          // 縮小時に全ラベルを描くと読めないうえ遅い。拡大したときだけ出す。
+          if (withLabels) {
+            context.fillStyle = foreground;
+            context.fillText(node.name, point.x + radius + 3, point.y + 3);
+          }
+        }
+      }
+
+      function pick(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        let best = -1;
+        let bestDistance = Infinity;
+        for (let index = 0; index < data.nodes.length; index += 1) {
+          if (!nodeVisible(index)) continue;
+          const point = toScreen(positions[index]);
+          const distance = (point.x - x) * (point.x - x) + (point.y - y) * (point.y - y);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = index;
+          }
+        }
+        return bestDistance <= 18 * 18 ? best : -1;
+      }
+
+      // 生成した DOM へは常に textContent で入れる。HTML として解釈させない。
+      function text(value) {
+        return document.createTextNode(String(value));
+      }
+
+      function select(index) {
+        selected = index;
+        highlighted = new Set();
+        const panel = document.getElementById("selection");
+        panel.textContent = "";
+
+        if (index < 0) {
+          panel.textContent = "ノードを選ぶと属性を表示します。";
+          draw();
+          return;
+        }
+
+        highlighted.add(index);
+        const node = data.nodes[index];
+        const rows = [
+          ["種別", node.kind],
+          ["名前", node.name],
+          ["修飾名", node.qualifiedName],
+          ["パス", node.path || "(なし)"],
+          ["行", node.lines ? node.lines.join("-") : "-"],
+          ["言語", node.language || "-"],
+          ["属性", (node.flags || []).join(", ") || "-"],
+          ["ID", node.id]
+        ];
+
+        for (const row of rows) {
+          const line = document.createElement("div");
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.appendChild(text(row[0]));
+          line.appendChild(badge);
+          const span = document.createElement("span");
+          if (row[0] === "パス" || row[0] === "ID") span.className = "path";
+          span.appendChild(text(row[1]));
+          line.appendChild(span);
+          panel.appendChild(line);
+        }
+
+        const outgoing = [];
+        const incoming = [];
+
+        for (const edge of data.edges) {
+          if (edge.from === index) {
+            outgoing.push(edge);
+            highlighted.add(edge.to);
+          }
+          if (edge.to === index) {
+            incoming.push(edge);
+            highlighted.add(edge.from);
+          }
+        }
+
+        for (const group of [["出", outgoing, "to"], ["入", incoming, "from"]]) {
+          if (group[1].length === 0) continue;
+          const heading = document.createElement("h2");
+          heading.appendChild(text(group[0] + "エッジ (" + group[1].length + ")"));
+          panel.appendChild(heading);
+          const items = document.createElement("ul");
+
+          for (const edge of group[1].slice(0, 100)) {
+            const other = edge[group[2]];
+            const item = document.createElement("li");
+            item.className = "hit";
+            const badge = document.createElement("span");
+            badge.className = "badge";
+            badge.appendChild(text(edge.kind));
+            item.appendChild(badge);
+            item.appendChild(text(data.nodes[other].qualifiedName));
+            item.addEventListener("click", function () {
+              select(other);
+            });
+            items.appendChild(item);
+          }
+
+          panel.appendChild(items);
+        }
+
+        draw();
+      }
+
+      function buildToggles(containerId, values, set) {
+        const container = document.getElementById(containerId);
+        container.textContent = "";
+
+        for (const value of values) {
+          const item = document.createElement("li");
+          const label = document.createElement("label");
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = true;
+          box.addEventListener("change", function () {
+            if (box.checked) set.add(value);
+            else set.delete(value);
+            draw();
+          });
+          label.appendChild(box);
+          const swatch = document.createElement("span");
+          swatch.className = "badge";
+          if (kindColor.has(value)) swatch.style.borderColor = kindColor.get(value);
+          swatch.appendChild(text(value));
+          label.appendChild(swatch);
+          item.appendChild(label);
+          container.appendChild(item);
+        }
+      }
+
+      function runFilter() {
+        const needle = document.getElementById("filter").value.trim().toLowerCase();
+        const hits = document.getElementById("hits");
+        hits.textContent = "";
+        if (needle.length === 0) return;
+        let shown = 0;
+
+        for (let index = 0; index < data.nodes.length && shown < 40; index += 1) {
+          const node = data.nodes[index];
+          const haystack = (node.name + " " + node.qualifiedName + " " + (node.path || "")).toLowerCase();
+          if (haystack.indexOf(needle) < 0) continue;
+          shown += 1;
+          const item = document.createElement("li");
+          item.className = "hit";
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.appendChild(text(node.kind));
+          item.appendChild(badge);
+          item.appendChild(text(node.qualifiedName));
+          item.addEventListener("click", function () {
+            select(index);
+          });
+          hits.appendChild(item);
+        }
+      }
+
+      document.getElementById("title").textContent = "srcnet — " + data.repository;
+
+      const countParts = [
+        "表示 " + data.nodes.length + " ノード / " + data.edges.length + " エッジ",
+        "成果物全体 " + data.totalNodes + " ノード"
+      ];
+      if (data.aggregated) countParts.push("ディレクトリ単位に集約");
+      document.getElementById("counts").textContent = countParts.join(" · ");
+
+      if (data.truncated) {
+        document.getElementById("truncation").textContent =
+          "打ち切り: " + data.omittedCount + " ノードを省略しました";
+      }
+
+      const diagnostics = document.getElementById("diagnostics");
+      if (data.diagnostics.length === 0) {
+        const item = document.createElement("li");
+        item.className = "notice";
+        item.appendChild(text("なし"));
+        diagnostics.appendChild(item);
+      } else {
+        for (const diagnostic of data.diagnostics) {
+          const item = document.createElement("li");
+          item.appendChild(text(diagnostic));
+          diagnostics.appendChild(item);
+        }
+      }
+
+      buildToggles("kinds", kinds, visibleKinds);
+      buildToggles("edgeKinds", edgeKinds, visibleEdgeKinds);
+      document.getElementById("filter").addEventListener("input", runFilter);
+      document.getElementById("reset").addEventListener("click", function () {
+        scale = 1;
+        offsetX = 0;
+        offsetY = 0;
+        select(-1);
+      });
+
+      let dragging = false;
+      let lastX = 0;
+      let lastY = 0;
+      let moved = false;
+
+      canvas.addEventListener("pointerdown", function (event) {
+        dragging = true;
+        moved = false;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        canvas.classList.add("dragging");
+        canvas.setPointerCapture(event.pointerId);
+      });
+
+      canvas.addEventListener("pointermove", function (event) {
+        if (!dragging) return;
+        offsetX += event.clientX - lastX;
+        offsetY += event.clientY - lastY;
+        if (Math.abs(event.clientX - lastX) + Math.abs(event.clientY - lastY) > 2) moved = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        draw();
+      });
+
+      canvas.addEventListener("pointerup", function (event) {
+        dragging = false;
+        canvas.classList.remove("dragging");
+        canvas.releasePointerCapture(event.pointerId);
+        if (!moved) select(pick(event.clientX, event.clientY));
+      });
+
+      canvas.addEventListener(
+        "wheel",
+        function (event) {
+          event.preventDefault();
+          scale = Math.min(6, Math.max(0.05, scale * Math.exp(-event.deltaY / 400)));
+          draw();
+        },
+        { passive: false }
+      );
+
+      window.addEventListener("resize", resize);
+      resize();
+      if (data.nodes.length > 0 && data.seedIndex >= 0) select(data.seedIndex);
+    </script>
+  </body>
+</html>

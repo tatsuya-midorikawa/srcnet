@@ -39,6 +39,15 @@ let DefaultDepth = 1
 [<Literal>]
 let MaxQueryDepth = 16
 
+/// HTML へ載せるノード数の既定値。
+[<Literal>]
+let DefaultMaxNodes = 800
+
+/// HTML へ載せるノード数の絶対上限。
+/// 全体エクスポートは提供しない。上限を超える入力は集約または打ち切りにする。
+[<Literal>]
+let MaxExportNodes = 20_000
+
 type IndexArguments =
   { RootPath: string
     OutputDirectory: string voption
@@ -112,6 +121,20 @@ type ContextArguments =
     Limits: QueryLimits
     Json: bool }
 
+type ExportArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    /// 出力先のファイル。指定がなければ `<out>/graph.html`。
+    File: string voption
+    /// 起点を検索で決める。空なら使わない。
+    Query: string
+    /// 起点をノード ID または完全一致の名前で決める。空なら使わない。
+    Node: string
+    Depth: int
+    /// 表示するノード数の上限。ブラウザーをフリーズさせないための安全弁である。
+    MaxNodes: int
+    Json: bool }
+
 type StatsArguments =
   { OutputDirectory: string voption
     RootPath: string voption
@@ -133,6 +156,7 @@ type Command =
   | Neighbors of NeighborsArguments
   | Path of PathArguments
   | Context of ContextArguments
+  | ExportHtml of ExportArguments
   | Help
   | Version
 
@@ -524,6 +548,52 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               Depth = resolvedDepth
               Limits = limits
               Json = json })
+  | "export" ->
+    let output = optionalValue "--out"
+    let root = optionalValue "--root"
+    let file = optionalValue "--file"
+    let queryText = optionalValue "--query"
+    let node = optionalValue "--node"
+    let depth = optionalInt "--depth"
+    let maxNodes = optionalInt "--max-nodes"
+
+    let errorOf (value: Result<'T, ParseError> voption) =
+      match value with
+      | ValueSome(Error error) -> Some error
+      | ValueSome(Ok _)
+      | ValueNone -> None
+
+    let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
+      match value with
+      | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
+      | ValueSome(Ok _) -> fallback
+      | ValueSome(Error _)
+      | ValueNone -> fallback
+
+    match List.tryPick id [ errorOf depth; errorOf maxNodes ] with
+    | Some error -> Error error
+    | None ->
+
+    if positional.Count = 0 then Error(MissingArgument "<format>")
+    elif positional[0].Text <> "html" then
+      Error(UnsupportedValue("export", positional[0].Text, "対応しているのは html だけです"))
+    else
+      finish reader positional 1 (fun () ->
+        ExportHtml
+          { OutputDirectory = output
+            RootPath = root
+            File = file
+            Query =
+              match queryText with
+              | ValueSome text -> text
+              | ValueNone -> ""
+            Node =
+              match node with
+              | ValueSome text -> text
+              | ValueNone -> ""
+            Depth = clamp depth DefaultDepth MaxQueryDepth
+            MaxNodes = clamp maxNodes DefaultMaxNodes MaxExportNodes
+            Json = json })
   | "stats" ->
     let output = optionalValue "--out"
 
@@ -570,6 +640,7 @@ let usage =
       "  srcnet neighbors <node> [オプション]  近傍を辿る"
       "  srcnet path <from> <to> [オプション]  2 ノード間の最短経路を求める"
       "  srcnet context <keywords...>         予算内に収めた文脈をまとめる"
+      "  srcnet export html [オプション]       対話的な HTML グラフを出力する"
       "  srcnet stats [<path>] [オプション]    生成物の統計を表示する"
       "  srcnet verify [<path>] [オプション]   生成物の整合性を検証する"
       "  srcnet --version                   版を表示する"
@@ -598,6 +669,13 @@ let usage =
       "  --edge <kind,...>      辿るエッジ種別 (既定はすべて)"
       "  --direction in|out|both 探索の向き (既定 both)"
       "  --ignore-case          大文字小文字を畳んで検索する"
+      ""
+      "export html のオプション:"
+      "  --file <path>          出力先 (既定 <out>/graph.html)"
+      "  --query <text>         起点を検索で決める"
+      "  --node <id|name>       起点をノード ID または完全一致の名前で決める"
+      "  --depth <n>            起点からの深さ (既定 1、上限 16)"
+      "  --max-nodes <n>        表示するノード数の上限 (既定 800、上限 20000)"
       ""
       "共通:"
       "  --out <dir>            生成物の位置"

@@ -68,6 +68,7 @@
 - 名前索引と n-gram 索引（CJK 対応）
 - `search` / `show` / `neighbors` / `path` / `context` / `stats` / `verify`
 - トークン予算と JSON 出力
+- 監査・探索用の対話的な HTML 出力（`export html`）
 
 **完了条件:** 照会レイテンシが [性能](performance.md) の目標内。CJK 検索テストが通る。
 

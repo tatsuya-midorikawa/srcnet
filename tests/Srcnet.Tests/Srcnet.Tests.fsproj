@@ -29,6 +29,7 @@
         <Compile Include="GoldenTests.fs" />
         <Compile Include="RobustnessTests.fs" />
         <Compile Include="QueryTests.fs" />
+        <Compile Include="ExportTests.fs" />
         <Compile Include="PropertyTests.fs" />
     </ItemGroup>
 

@@ -7,6 +7,7 @@ module Srcnet.Cli.Commands
 open System
 open System.IO
 open System.Runtime.ExceptionServices
+open System.Text
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
@@ -46,8 +47,22 @@ module ExitCode =
 [<Literal>]
 let SchemaVersion = 1
 
+/// JSON 出力の符号化。
+///
+/// 既定のエンコーダーは非 ASCII をすべて `\uXXXX` へ逃がす。CJK では 1 文字が 6 バイトになり、
+/// トークン削減という目的に反する。`UnicodeRanges.All` を許可すると CJK はそのまま出るが、
+/// `<`、`>`、`&`、`'`、`"`、`+` は依然として逃がされるため、HTML へ埋め込んでも安全である。
+let internal jsonEncoder =
+  Encodings.Web.JavaScriptEncoder.Create Unicode.UnicodeRanges.All
+
 let private jsonWriterOptions =
-  JsonWriterOptions(Indented = true, IndentCharacter = ' ', IndentSize = 2, NewLine = Terminal.Newline)
+  JsonWriterOptions(
+    Indented = true,
+    IndentCharacter = ' ',
+    IndentSize = 2,
+    NewLine = Terminal.Newline,
+    Encoder = jsonEncoder
+  )
 
 let writeJson (build: Utf8JsonWriter -> unit) =
   use buffer = new MemoryStream()

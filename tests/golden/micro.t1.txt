@@ -12,6 +12,8 @@ E EXPLAINS NOTE: minimal build description -> obj-y conf=EXTRACTED stage=2 line=
 ## generated_table.c lang=c tier=T1
 ## handwritten.c lang=c tier=T1
 E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## injection.c lang=c tier=T1
+N Note TODO | TODO: </script><script>globalThis.__srcnet_injected = true;</script> and "quotes" & <tags> ord=0 lines=4-4 parent=- flags=- doc=84B
 ## shapes.c lang=c tier=T1
 N Note TODO | TODO: memoize the result ord=0 lines=5-5 parent=- flags=- doc=21B
 E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1

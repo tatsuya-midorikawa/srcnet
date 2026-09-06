@@ -14,6 +14,10 @@ N Function generated_value | generated_value ord=0 lines=2-2 parent=- flags=defi
 ## handwritten.c lang=c tier=T2
 N Function handwritten_value | handwritten_value ord=0 lines=36-39 parent=- flags=definition doc=394B
 E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## injection.c lang=c tier=T2
+N Note TODO | TODO: </script><script>globalThis.__srcnet_injected = true;</script> and "quotes" & <tags> ord=0 lines=4-4 parent=- flags=- doc=84B
+N Function injection_target | injection_target ord=0 lines=5-5 parent=- flags=definition doc=93B
+E EXPLAINS TODO: </script><script>globalThis.__srcnet_injected = true;</script> and "quotes" & <tags> -> injection_target conf=EXTRACTED stage=2 line=4
 ## shapes.c lang=c tier=T2
 N Variable call_count | shapes.c::call_count ord=0 lines=3-3 parent=- flags=definition,internal-linkage
 N Note TODO | TODO: memoize the result ord=0 lines=5-5 parent=- flags=- doc=21B
