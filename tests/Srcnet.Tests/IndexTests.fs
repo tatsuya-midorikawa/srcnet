@@ -553,7 +553,7 @@ let ``空のリポジトリでも成果物を生成できる`` () =
   | Error error -> failwith (Manifest.ManifestError.describe error)
   | Ok report -> Assert.True report.IsValid
 
-// --- 無視ファイルの信頼境界と完全性（backlogs/003, 004, 005） ---
+// --- 無視ファイルの信頼境界と完全性（backlogs/completed/003, 004, 005） ---
 
 let private trySymbolicLink (link: string) (target: string) =
   try
@@ -639,7 +639,7 @@ let ``曖昧な符号化は診断として記録し、候補を保持する`` ()
     Assert.True(hasFlag NodeFlags.AmbiguousEncoding file.Flags)
   | None -> failwith "曖昧な符号化のファイルが見つかりません"
 
-// --- 世代単位の公開（backlogs/002） ---
+// --- 世代単位の公開（backlogs/completed/002） ---
 
 let private generationsIn (output: string) =
   let root = Path.Combine(output, Artifact.SegmentDirectory)
@@ -720,7 +720,7 @@ let ``公開後のマニフェストとセグメントは常に同じ世代を�
         Assert.True(File.Exists path, $"{segment.Name} がありません")
         Assert.Equal(segment.ByteLength, FileInfo(path).Length)
 
-// --- マニフェストの検証（backlogs/006, 007） ---
+// --- マニフェストの検証（backlogs/completed/006, 007） ---
 
 let private tamperManifest (output: string) (edit: string -> string) =
   let path = Path.Combine(output, Manifest.FileName)
@@ -777,7 +777,7 @@ let ``型や範囲が不正なマニフェストは内部エラーにならな�
   File.WriteAllText(Path.Combine(output.Path, Manifest.FileName), original)
   Assert.True(Manifest.read output.Path |> Result.isOk)
 
-// --- 書き出し中の取り消し（backlogs/012） ---
+// --- 書き出し中の取り消し（backlogs/completed/012） ---
 
 [<Fact>]
 let ``書き出し中の取り消しは成果物を残さない`` () =

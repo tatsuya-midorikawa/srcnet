@@ -108,7 +108,7 @@ let ``符号化コードは往復する`` () =
   let codes = all |> List.map Encodings.toCode
   Assert.Equal(codes.Length, List.distinct codes |> List.length)
 
-// --- 打ち切られた prefix 末尾の扱い（backlogs/009） ---
+// --- 打ち切られた prefix 末尾の扱い（backlogs/completed/009） ---
 
 /// 元ファイルが prefix より長いことを検出器へ伝える。
 let private detectTruncated (bytes: byte[]) =

@@ -176,7 +176,7 @@ let ``tsx と fsi は文法が異なるため別の言語として分類する``
   // シグネチャ ファイルは本体と区別して記録する。
   Assert.Equal(FSharpSignature, language "src/Program.fsi")
 
-// --- 無視ファイル読取の上限とキャンセル（backlogs/004） ---
+// --- 無視ファイル読取の上限とキャンセル（backlogs/completed/004） ---
 
 let private readRules (content: string) =
   use stream = new IO.MemoryStream(Text.Encoding.UTF8.GetBytes content)
