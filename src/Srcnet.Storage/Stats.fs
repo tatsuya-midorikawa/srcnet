@@ -30,6 +30,88 @@ type FileStatistics =
     TotalBytes: int64
     TotalLines: int64 }
 
+/// 未解決の参照候補の内訳。エッジ種別ごとの件数を返す。
+type ReferenceCount =
+  { Kind: EdgeKind
+    Count: int
+    /// 解決前は `EXTRACTED`。`RESOLVED` / `AMBIGUOUS` へ変わるのは M3。
+    Extracted: int
+    Ambiguous: int }
+
+/// `.refs` セグメントを走査してエッジ種別ごとの件数を求める。
+///
+/// マニフェストは総数しか持たない。内訳は M3 の解決の入力量を見積もるために要る。
+let readReferenceStatistics
+  (outputDirectory: string)
+  (manifest: Manifest.Manifest)
+  : Result<ReferenceCount[], Reader.OpenError> =
+  match
+    manifest.Segments
+    |> Array.tryFind (fun segment -> segment.Name.EndsWith(".refs", StringComparison.Ordinal))
+  with
+  | None -> Error(Reader.SegmentNotFound "refs")
+  | Some descriptor ->
+    match Artifact.tryResolveSegment outputDirectory descriptor.Name with
+    | Error error -> Error(Reader.OpenFailed(descriptor.Name, Artifact.PathError.describe error))
+    | Ok path ->
+
+    match Reader.MappedSegment.Open path with
+    | Error error -> Error error
+    | Ok segment ->
+      use segment = segment
+
+      if segment.Header.Kind <> Format.References then
+        Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
+      else
+
+      let payload = segment.Payload
+      let count = int segment.Header.PrimaryCount
+      let totals = Dictionary<byte, int>()
+      let extracted = Dictionary<byte, int>()
+      let ambiguous = Dictionary<byte, int>()
+
+      let bump (table: Dictionary<byte, int>) key =
+        match table.TryGetValue key with
+        | true, existing -> table[key] <- existing + 1
+        | false, _ -> table[key] <- 1
+
+      for index in 0 .. count - 1 do
+        let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
+        let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
+        let confidence = record[Format.ReferenceRecord.ConfidenceOffset]
+        bump totals edgeCode
+
+        if confidence = Confidence.toCode Extracted then bump extracted edgeCode
+        elif confidence = Confidence.toCode Ambiguous then bump ambiguous edgeCode
+
+      let allEdgeKinds =
+        [| Contains; Includes; Imports; Declares; Defines; Calls; References; Inherits; Implements
+           Overrides; TypedAs; Tests; BuiltFrom; BuildDepends; GuardedBy; OwnedBy; CoChanged
+           Explains; MemberOf |]
+
+      let lookup (table: Dictionary<byte, int>) key =
+        match table.TryGetValue key with
+        | true, value -> value
+        | false, _ -> 0
+
+      totals
+      |> Seq.choose (fun entry ->
+        allEdgeKinds
+        |> Array.tryFind (fun kind -> EdgeKind.toCode kind = entry.Key)
+        |> Option.map (fun kind ->
+          { Kind = kind
+            Count = entry.Value
+            Extracted = lookup extracted entry.Key
+            Ambiguous = lookup ambiguous entry.Key }))
+      // 件数の降順。同数は種別コード順で一意に定まる。
+      |> Seq.sortWith (fun left right ->
+        let byCount = compare right.Count left.Count
+
+        if byCount <> 0 then byCount
+        else compare (EdgeKind.toCode left.Kind) (EdgeKind.toCode right.Kind))
+      |> Seq.toArray
+      |> Ok
+
 let private languageOfCode (code: uint16) =
   let all =
     [| Unknown

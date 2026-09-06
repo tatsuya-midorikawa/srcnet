@@ -201,3 +201,124 @@ let ``ノード ID の 16 進表記は往復する`` () =
       let id = { High = high; Low = low }
       NodeId.tryParse (id.ToString()) = ValueSome id)
   )
+
+[<Fact>]
+let ``参照候補の書き出しと読み取りは往復で一致する`` () =
+  // backlog 016 の完了条件。固定長レコードと文字列 blob 参照の往復が、
+  // 件数・種別・確度・根拠段階のいずれでも情報を落とさないことを確かめる。
+  let edgeKinds =
+    [| Includes; Imports; Calls; References; Inherits; Implements; TypedAs; Tests; GuardedBy; Explains |]
+
+  let confidences = [| Extracted; Resolved; Ambiguous |]
+
+  let referenceGen =
+    gen {
+      let! kindIndex = Gen.choose (0, edgeKinds.Length - 1)
+      let! confidenceIndex = Gen.choose (0, confidences.Length - 1)
+      let! target = Gen.choose (0, 32)
+      let! qualifier = Gen.choose (0, 8)
+      let! line = Gen.choose (1, 100_000)
+      let! startByte = Gen.choose (0, 1_000_000)
+      let! length = Gen.choose (0, 4_096)
+      let! stage = Gen.choose (0, 6)
+
+      // `Writer` には同名のフィールドを持つレコードが複数あるため、型を明示して選ぶ。
+      let reference: Writer.ReferenceInput =
+        { Source = -1
+          Kind = edgeKinds[kindIndex]
+          // 対象は生テキストである。CJK と記号を含めて、文字列表の往復も同時に確かめる。
+          Target = $"対象_{target}::name"
+          Qualifier = (if qualifier = 0 then "" else $"scope{qualifier}")
+          Language = C
+          StartByte = startByte
+          EndByte = startByte + length
+          Line = line
+          Stage = byte stage
+          Confidence = confidences[confidenceIndex] }
+
+      return reference
+    }
+
+  check (
+    Prop.forAll (Arb.fromGen (Gen.listOf referenceGen |> Gen.map List.toArray)) (fun references ->
+      let directory =
+        IO.Path.Combine(IO.Path.GetTempPath(), "srcnet-refs-" + Guid.NewGuid().ToString "N")
+
+      IO.Directory.CreateDirectory directory |> ignore
+
+      try
+        let repository =
+          match RepositoryId.tryCreate "roundtrip" with
+          | Ok value -> value
+          | Error error -> failwith (RepositoryId.describe error)
+
+        let path =
+          match tryCreate "a.c" with
+          | Ok value -> value
+          | Error error -> failwith (PathError.describe error)
+
+        let input: Writer.IndexInput =
+          { Repository = repository
+            Directories = Array.empty
+            Files =
+              [| ({ Path = path
+                    SizeBytes = 0L
+                    Language = C
+                    EncodingCode = Encodings.toCode Encodings.Utf8
+                    Flags = NodeFlags.None
+                    LineCount = 0
+                    ContentHash = Array.zeroCreate Hashing.HashLength
+                    Symbols = Array.empty
+                    References = references }
+                 : Writer.FileInput) |] }
+
+        let diagnostics = Diagnostics.DiagnosticSink()
+        let written = Writer.write directory input diagnostics Threading.CancellationToken.None
+        Assert.Equal(references.Length, written.ReferenceCount)
+
+        let descriptor =
+          written.Segments
+          |> Array.find (fun segment -> segment.Name.EndsWith(".refs", StringComparison.Ordinal))
+
+        use segment =
+          match Reader.MappedSegment.Open(IO.Path.Combine(directory, descriptor.Name)) with
+          | Ok value -> value
+          | Error error -> failwith (Reader.OpenError.describe error)
+
+        let payload = segment.Payload
+        Assert.Equal(int64 references.Length, int64 segment.Header.PrimaryCount)
+        let mutable ok = true
+
+        for index in 0 .. references.Length - 1 do
+          let expected = references[index]
+          let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
+
+          // span は closure へ渡せないため、読み出しはその場で行う。
+          let line = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.LineOffset, 4))
+          let source = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4))
+          let target = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4))
+          let qualifierRef = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4))
+          let startByte = Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.ReferenceRecord.StartByteOffset, 8))
+          let endByte = Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.ReferenceRecord.EndByteOffset, 8))
+
+          if record[Format.ReferenceRecord.EdgeKindOffset] <> EdgeKind.toCode expected.Kind then ok <- false
+          if record[Format.ReferenceRecord.StageOffset] <> expected.Stage then ok <- false
+
+          if record[Format.ReferenceRecord.ConfidenceOffset] <> Confidence.toCode expected.Confidence then
+            ok <- false
+
+          if line <> uint32 expected.Line then ok <- false
+          if startByte <> int64 expected.StartByte then ok <- false
+          if endByte <> int64 expected.EndByte then ok <- false
+
+          // 発生元はファイル ノード（密インデックス 1）へ写る。
+          if source <> 1u then ok <- false
+
+          // 文字列参照は表の範囲に収まる。
+          if target >= uint32 written.StringCount then ok <- false
+          if qualifierRef >= uint32 written.StringCount then ok <- false
+
+        ok
+      finally
+        if IO.Directory.Exists directory then IO.Directory.Delete(directory, true))
+  )

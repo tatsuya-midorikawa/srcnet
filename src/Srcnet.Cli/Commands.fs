@@ -457,16 +457,19 @@ let stats (arguments: Args.StatsArguments) : int =
   // 旧世代の件数と新世代の集計を混ぜた結果を正常終了で返してしまう。
   let observed =
     Manifest.readStable outputDirectory (fun manifest ->
-      struct (manifest, Stats.readFileStatistics outputDirectory manifest))
+      struct (manifest, Stats.readFileStatistics outputDirectory manifest, Stats.readReferenceStatistics outputDirectory manifest))
 
   match observed with
   | Error error ->
     Terminal.errLine (Manifest.ManifestError.describe error)
     ExitCode.MissingArtifact
-  | Ok(struct (_, Error error)) ->
+  | Ok(struct (_, Error error, _)) ->
     Terminal.errLine (Reader.OpenError.describe error)
     ExitCode.MissingArtifact
-  | Ok(struct (manifest, Ok statistics)) ->
+  | Ok(struct (_, _, Error error)) ->
+    Terminal.errLine (Reader.OpenError.describe error)
+    ExitCode.MissingArtifact
+  | Ok(struct (manifest, Ok statistics, Ok references)) ->
       if arguments.Json then
         writeJson (fun writer ->
           writer.WriteString("command", "stats")
@@ -475,6 +478,8 @@ let stats (arguments: Args.StatsArguments) : int =
           writer.WriteNumber("edges", manifest.Counts.Edges)
           writer.WriteNumber("directories", manifest.Counts.Directories)
           writer.WriteNumber("files", manifest.Counts.Files)
+          writer.WriteNumber("symbols", manifest.Counts.Symbols)
+          writer.WriteNumber("referenceCandidates", manifest.Counts.ReferenceCandidates)
           writer.WriteNumber("totalBytes", statistics.TotalBytes)
           writer.WriteNumber("totalLines", statistics.TotalLines)
           writer.WriteStartArray "languages"
@@ -498,10 +503,21 @@ let stats (arguments: Args.StatsArguments) : int =
             writer.WriteNumber("ambiguous", entry.Ambiguous)
             writer.WriteEndObject()
 
+          writer.WriteEndArray()
+          writer.WriteStartArray "referenceKinds"
+
+          for entry in references do
+            writer.WriteStartObject()
+            writer.WriteString("kind", EdgeKind.name entry.Kind)
+            writer.WriteNumber("count", entry.Count)
+            writer.WriteNumber("extracted", entry.Extracted)
+            writer.WriteNumber("ambiguous", entry.Ambiguous)
+            writer.WriteEndObject()
+
           writer.WriteEndArray())
       else
         Terminal.resultLine $"リポジトリ: {manifest.RepositoryId}"
-        Terminal.outLine $"ノード: {manifest.Counts.Nodes} / エッジ: {manifest.Counts.Edges}"
+        Terminal.outLine $"ノード: {manifest.Counts.Nodes} (うちシンボル {manifest.Counts.Symbols}) / エッジ: {manifest.Counts.Edges}"
         Terminal.outLine $"ディレクトリ: {manifest.Counts.Directories} / ファイル: {manifest.Counts.Files}"
         Terminal.outLine $"総バイト数: {statistics.TotalBytes} / 総行数: {statistics.TotalLines}"
         Terminal.outLine ""
@@ -519,6 +535,15 @@ let stats (arguments: Args.StatsArguments) : int =
           else
             Terminal.outLine
               $"  {Encodings.name entry.Encoding}: {entry.Files} ファイル (うち {entry.Ambiguous} 件は候補が複数で未確定)"
+
+        Terminal.outLine ""
+        Terminal.outLine $"参照候補: {manifest.Counts.ReferenceCandidates}"
+
+        for entry in references do
+          if entry.Ambiguous = 0 then
+            Terminal.outLine $"  {EdgeKind.name entry.Kind}: {entry.Count}"
+          else
+            Terminal.outLine $"  {EdgeKind.name entry.Kind}: {entry.Count} (うち {entry.Ambiguous} 件は AMBIGUOUS)"
 
       if manifest.Counts.Files = 0 then ExitCode.NoResults else ExitCode.Success
 
