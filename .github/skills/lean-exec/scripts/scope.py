@@ -518,7 +518,7 @@ def main() -> int:
     ap.add_argument("--optimize", choices=("cost", "latency"), default="cost",
                     help="cost は最小人数、latency は独立スレッドを並列化")
     ap.add_argument("--parent-model", default=None,
-                    help="親のモデル (例 gpt-5.6-sol:max)。単価差を投影に反映する")
+                    help="親のモデル (例 gpt-6-astra:max)。単価差を投影に反映する")
     ap.add_argument("--agent-model", default=None,
                     help="委譲先のモデル (例 claude-haiku-4.5)。既定は親と同じ単価")
     ap.add_argument("--no-hidden", action="store_true",

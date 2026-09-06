@@ -77,7 +77,7 @@ prefix が前回と一致している間はキャッシュが効き、再送分�
 `scope.py` に `--parent-model` と `--agent-model` を渡すとこの重み付けが入る。境界 `15k` も同じ比率で縮む。
 
 ```bash
-scope.py --turns 25 --parent-model gpt-5.6-sol:max --agent-model claude-haiku-4.5 src/
+scope.py --turns 25 --parent-model gpt-6-astra:max --agent-model claude-haiku-4.5 src/
 # price: ratio=0.044 → 委譲の損益分岐が 22.5 倍ゆるむ
 ```
 
@@ -236,7 +236,7 @@ route.py --role orchestrator --prompt "$NEXT_TASK" --turn <N> --current-model <�
 浪費の一覧は症状ベースなので、効果は測らないと分からない。過去タスクを JSONL にして `route.py --eval` に渡すと、モデル選択の側を数値で確かめられる。
 
 ```jsonl
-{"prompt": "...", "role": "analyst", "resolved_by": ["gpt-5.6-sol", "claude-opus-5"]}
+{"prompt": "...", "role": "analyst", "resolved_by": ["gpt-6-astra", "claude-opus-5"]}
 ```
 
 ```bash

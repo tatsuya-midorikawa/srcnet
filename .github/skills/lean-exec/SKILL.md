@@ -48,7 +48,7 @@ python3 .github/skills/lean-exec/scripts/route.py --role analyst --prompt "$PROM
 ```
 req: reasoning=0.90 code_gen=0.19 debugging=0.45 tool_use=0.25 gamma=0.90 tier=T3
 role=analyst tau=0.060 pool=16 surface=cli gates=config
-model=gpt-5.6-sol effort=medium cost=9.00 shortfall=0.028 basis=cheapest_eligible
+model=gpt-6-astra effort=medium cost=9.00 shortfall=0.028 basis=cheapest_eligible
 ```
 
 4 次元 (`reasoning` / `code_gen` / `debugging` / `tool_use`) を独立に見るのが要点になる。**ある次元の余剰は別の次元の不足を埋めない。** 1 本のスコアに潰すと、片方の次元だけ強い中位モデルを使えなくなる。
@@ -62,7 +62,7 @@ model=gpt-5.6-sol effort=medium cost=9.00 shortfall=0.028 basis=cheapest_eligibl
 ```bash
 python3 .github/skills/lean-exec/scripts/scope.py \
   --grep 'PATTERN' --ext .cc,.h --threads 3 --turns 20 \
-  --parent-model gpt-5.6-sol:max --agent-model claude-haiku-4.5 src/
+  --parent-model gpt-6-astra:max --agent-model claude-haiku-4.5 src/
 ```
 
 `--parent-model` と `--agent-model` を渡すと単価差が投影に入る。**損益分岐が `S ≥ 3F` から `S ≥ 3F × (子の単価 ÷ 親の単価)` に変わり、`15k` の境界も同じ比率で縮む。** 親が高いほど、小さい資料でも委譲が正当化される。式の導出は `references/budget.md` §2.5。

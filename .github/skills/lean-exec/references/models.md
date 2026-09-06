@@ -96,7 +96,7 @@ task(agent_type="explore", model="claude-haiku-4.5", ...)
 | `gpt-5.6-luna` | 2.5 | Haiku では不足するが Sonnet までは要らない、日常的な分析・実装・ツール操作 |
 | `claude-sonnet-5` | 5.0 | コード生成とデバッグを含む実装 |
 | `gpt-5.6-terra` | 6.0 | Sonnet より reasoning / code generation / tool use を要求する一方、Sol ほど深いデバッグを要しない作業 |
-| `gpt-5.6-sol` | 9.0 | 深い推論・デバッグ・設計判断 |
+| `gpt-6-astra` | 9.0 | 深い推論・デバッグ・設計判断 |
 | `claude-opus-5` | 22.0 | 他候補の shortfall が大きい高要求タスクと独立検証 |
 
 各モデルは `(モデル × effort)` で候補化される。このため Luna / Terra も固定用途ではなく、要件ベクトル、`tau`、effort 込みのコストを比較した結果として選ばれる。`test_route.py` は、全 `enabled` モデルに少なくとも 1 つ選択可能な動作点があることを検査する。
@@ -192,7 +192,7 @@ shortfall を計算する前に候補を削る条件がある。能力で足り�
 4. **結果つきの履歴を作る。** 過去タスクを JSONL にする
 
 ```jsonl
-{"prompt": "...", "role": "analyst", "resolved_by": ["gpt-5.6-sol", "claude-opus-5"]}
+{"prompt": "...", "role": "analyst", "resolved_by": ["gpt-6-astra", "claude-opus-5"]}
 ```
 
 5. **3 指標で測る。**

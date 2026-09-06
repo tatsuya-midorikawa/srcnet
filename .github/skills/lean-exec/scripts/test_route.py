@@ -161,7 +161,7 @@ class PoolNormalizationTest(unittest.TestCase):
     def test_higher_effort_costs_more_and_covers_more(self):
         _, _, _, pool, _, _ = load_all()
         variants = sorted(
-            (e for e in pool if e.model == "gpt-5.6-sol"), key=lambda e: e.cost,
+            (e for e in pool if e.model == "gpt-6-astra"), key=lambda e: e.cost,
         )
         for lower, higher in zip(variants, variants[1:]):
             self.assertLess(lower.cost, higher.cost)
@@ -531,7 +531,7 @@ class CostCeilingTest(unittest.TestCase):
         )
         models = {entry.model for entry in survivors}
         self.assertIn("claude-sonnet-5", models)
-        self.assertNotIn("gpt-5.6-sol", models, "上位階層のモデルが残ってはいけない")
+        self.assertNotIn("gpt-6-astra", models, "上位階層のモデルが残ってはいけない")
         self.assertNotIn("claude-opus-5", models)
         self.assertTrue(any(gate.startswith("tier<=") for gate in gates))
 
@@ -619,7 +619,7 @@ class DelegationEconomicsTest(unittest.TestCase):
             )
             aware = subprocess.run(
                 [sys.executable, str(scope), "--turns", "25", "--json",
-                 "--parent-model", "gpt-5.6-sol:max", "--agent-model", "claude-haiku-4.5",
+                 "--parent-model", "gpt-6-astra:max", "--agent-model", "claude-haiku-4.5",
                  str(target)],
                 capture_output=True, text=True,
             )
@@ -690,7 +690,7 @@ class EvaluationTest(unittest.TestCase):
         records = [{
             "prompt": "parse_config の呼び出し元を一覧で出して",
             "role": "retriever",
-            "resolved_by": ["claude-haiku-4.5", "gpt-5.6-sol", "claude-opus-5"],
+            "resolved_by": ["claude-haiku-4.5", "gpt-6-astra", "claude-opus-5"],
         }]
         result = self.metrics(records)
         self.assertEqual(result["quality_retention"], 100.0)
@@ -797,9 +797,9 @@ class CliTest(unittest.TestCase):
     def test_eval_reports_all_three_metrics(self):
         records = [
             {"prompt": "parse_config の呼び出し元を一覧で出して", "role": "retriever",
-             "resolved_by": ["claude-haiku-4.5", "gpt-5.6-sol"]},
+             "resolved_by": ["claude-haiku-4.5", "gpt-6-astra"]},
             {"prompt": "起動時にクラッシュする。原因を特定して直して", "role": "analyst",
-             "resolved_by": ["gpt-5.6-sol"]},
+             "resolved_by": ["gpt-6-astra"]},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "history.jsonl"
@@ -821,9 +821,9 @@ class CliTest(unittest.TestCase):
         """tau を緩めるとコスト削減は増える方向にしか動かない。"""
         records = [
             {"prompt": "認証方式のトレードオフを整理して方針を示して", "role": "analyst",
-             "resolved_by": ["gpt-5.6-sol"]},
+             "resolved_by": ["gpt-6-astra"]},
             {"prompt": "クラッシュの原因を特定して直して", "role": "analyst",
-             "resolved_by": ["gpt-5.6-sol"]},
+             "resolved_by": ["gpt-6-astra"]},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "history.jsonl"
