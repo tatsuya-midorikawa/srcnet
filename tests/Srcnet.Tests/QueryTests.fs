@@ -136,6 +136,67 @@ let ``検索キーは NFC 正規化される`` () =
   let decomposed = searchNames view ("日本語".Normalize NormalizationForm.FormD)
   Assert.Equal(composed.Length, decomposed.Length)
 
+[<Theory>]
+[<InlineData("micro", false)>]
+[<InlineData("micro", true)>]
+[<InlineData("cjk", false)>]
+[<InlineData("cjk", true)>]
+let ``一致対象は強さを優先し同点なら名前と修飾名とパスの順で選ぶ`` corpus ignoreCase =
+  use indexed = new Indexed(corpus, ValueSome Srcnet.Text.Encodings.EucJp)
+  use view = indexed.View
+
+  let fields =
+    Array.init view.NodeCount (fun index ->
+      let node = view.Node index
+
+      [| Query.Name, view.String node.NameRef
+         Query.QualifiedName, view.String node.QualifiedNameRef
+         Query.Path, view.String(view.FilePathRef node.FileIndex) |])
+
+  let needles =
+    fields
+    |> Array.collect (Array.map snd)
+    |> Array.filter (fun text -> text.Length > 0)
+    |> Array.collect (fun text ->
+      [| text
+         text.Substring(0, max 1 (text.Length / 2))
+         text.Substring(text.Length / 2)
+         text.ToUpperInvariant() |])
+    |> Array.append [| "no-such-name" |]
+    |> Array.distinct
+
+  let normalize text =
+    if ignoreCase then Srcnet.Text.Unicode.caseFold text
+    else Srcnet.Text.Unicode.normalize text
+
+  for needle in needles do
+    let key = normalize needle
+
+    let expected =
+      fields
+      |> Array.mapi (fun index values ->
+        values
+        |> Array.choose (fun (target, value) ->
+          let text = normalize value
+
+          let strength =
+            if text = key then Some Query.Exact
+            elif text.StartsWith(key, StringComparison.Ordinal) then Some Query.Prefix
+            elif text.Contains(key, StringComparison.Ordinal) then Some Query.Substring
+            else None
+
+          strength |> Option.map (fun matched -> struct (index, matched, target)))
+        |> Array.sortBy (fun (struct (_, strength, target)) ->
+          Query.MatchStrength.rank strength, Query.MatchTarget.rank target)
+        |> Array.tryHead)
+      |> Array.choose id
+
+    let actual =
+      (Query.search view needle ignoreCase CancellationToken.None).Hits
+      |> Array.map (fun hit -> struct (hit.Node, hit.Strength, hit.Target))
+
+    Assert.Equal<struct (int * Query.MatchStrength * Query.MatchTarget)>(expected, actual)
+
 [<Fact>]
 let ``ノード ID から密インデックスを引ける`` () =
   use indexed = new Indexed("micro")
@@ -356,6 +417,32 @@ let ``照会の終了コードは仕様どおりになる`` () =
   let missing = Path.Combine(Path.GetTempPath(), "srcnet-missing-" + Guid.NewGuid().ToString "N")
   let struct (missingArtifact, _, _) = runCli [ "search"; "Area"; "--out"; missing ]
   Assert.Equal(Srcnet.Cli.Commands.ExitCode.MissingArtifact, missingArtifact)
+
+[<Fact>]
+let ``ノード指定は曖昧な名前を拒否しファイル自身と ID を解決する`` () =
+  use indexed = new Indexed("micro")
+
+  let struct (ambiguous, _, diagnostics) =
+    runCli [ "show"; "Area"; "--out"; indexed.Output; "--json" ]
+
+  Assert.Equal(Srcnet.Cli.Commands.ExitCode.NoResults, ambiguous)
+  Assert.Contains("一意に決まりません", diagnostics)
+
+  let struct (fileCode, payload, _) =
+    runCli [ "show"; "shapes.c"; "--out"; indexed.Output; "--json" ]
+
+  Assert.Equal(Srcnet.Cli.Commands.ExitCode.Success, fileCode)
+  use document = JsonDocument.Parse payload
+  let file = document.RootElement.GetProperty("nodes")[0]
+  Assert.Equal("File", file.GetProperty("kind").GetString())
+  let id = file.GetProperty("id").GetString()
+  Assert.NotNull id
+
+  let struct (idCode, byId, _) = runCli [ "show"; id; "--out"; indexed.Output; "--json" ]
+  Assert.Equal(Srcnet.Cli.Commands.ExitCode.Success, idCode)
+  use resolved = JsonDocument.Parse byId
+  let resolvedNode = resolved.RootElement.GetProperty("nodes")[0]
+  Assert.Equal(id, resolvedNode.GetProperty("id").GetString())
 
 [<Fact>]
 let ``結果は stdout、診断は stderr へ出る`` () =

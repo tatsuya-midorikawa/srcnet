@@ -16,6 +16,7 @@ open System.Text.RegularExpressions
 open System.Threading
 open Xunit
 open Srcnet.Cli
+open Srcnet.Storage
 
 /// テストごとに使い捨てる出力先。
 type private Workspace() =
@@ -113,6 +114,54 @@ let ``起点を指定するとその周辺を出す`` () =
   Assert.True(root.GetProperty("nodes").GetArrayLength() > 1)
   // 起点は必ず結果に含まれる。
   Assert.True(root.GetProperty("seedIndex").GetInt32() >= 0)
+
+[<Fact>]
+let ``曖昧なノード名では順位が最上位の候補を起点とし診断を残す`` () =
+  use workspace = new Workspace()
+  indexCorpus "micro" workspace.Path
+
+  use view =
+    match Query.GraphView.Open workspace.Path with
+    | Ok view -> view
+    | Error error -> failwith (Query.QueryError.describe error)
+
+  let candidates =
+    (Query.search view "Area" false CancellationToken.None).Hits
+    |> Array.filter (fun hit ->
+      hit.Strength = Query.Exact && (hit.Target = Query.Name || hit.Target = Query.QualifiedName))
+
+  Assert.True(candidates.Length > 1)
+  Array.sortInPlaceWith (Query.compareHits view) candidates
+  let expectedNode = view.Node candidates[0].Node
+  let expected = Srcnet.Core.Ids.NodeId.toString expectedNode.Id
+  let file = workspace.File "ambiguous.html"
+
+  Assert.Equal(
+    Commands.ExitCode.Success,
+    ExportCommands.exportHtml { exportArguments workspace.Path file with Node = "Area" } CancellationToken.None
+  )
+
+  use document = JsonDocument.Parse(dataBlock (File.ReadAllText file))
+  let root = document.RootElement
+  let seed = root.GetProperty("nodes")[root.GetProperty("seedIndex").GetInt32()]
+  Assert.Equal(expected, seed.GetProperty("id").GetString())
+
+  let diagnostics =
+    root.GetProperty("diagnostics").EnumerateArray()
+    |> Seq.map (fun item -> item.GetString())
+    |> Seq.toArray
+
+  Assert.Contains(diagnostics, fun text -> text <> null && text.Contains "最上位")
+
+  let byId = workspace.File "by-id.html"
+
+  Assert.Equal(
+    Commands.ExitCode.Success,
+    ExportCommands.exportHtml { exportArguments workspace.Path byId with Node = expected } CancellationToken.None
+  )
+
+  use resolved = JsonDocument.Parse(dataBlock (File.ReadAllText byId))
+  Assert.Equal(0, resolved.RootElement.GetProperty("diagnostics").GetArrayLength())
 
 [<Fact>]
 let ``同じ引数からはバイト単位に同じ HTML が出る`` () =

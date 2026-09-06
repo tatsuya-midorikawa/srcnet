@@ -348,21 +348,31 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
 
   let optionalValue name = reader.Value name
 
-  let optionalInt name =
+  let optionalParsed parseValue name =
     match reader.Value name with
     | ValueNone -> ValueNone
     | ValueSome text ->
-      match tryParseInt text with
+      match parseValue text with
       | ValueSome value -> ValueSome(Ok value)
       | ValueNone -> ValueSome(Error(InvalidValue(name, text)))
 
-  let optionalSize name =
-    match reader.Value name with
-    | ValueNone -> ValueNone
-    | ValueSome text ->
-      match tryParseSize text with
-      | ValueSome value -> ValueSome(Ok value)
-      | ValueNone -> ValueSome(Error(InvalidValue(name, text)))
+  let optionalInt name = optionalParsed tryParseInt name
+  let optionalSize name = optionalParsed tryParseSize name
+
+  let errorOf (value: Result<'T, ParseError> voption) =
+    match value with
+    | ValueSome(Error error) -> Some error
+    | ValueSome(Ok _)
+    | ValueNone -> None
+
+  // 上限は「指定がなければ既定、指定があれば絶対上限で頭打ち」にする。
+  // 利用者が大きな値を渡しても、出力量は有界のままになる。
+  let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
+    match value with
+    | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
+    | ValueSome(Ok _) -> fallback
+    | ValueSome(Error _)
+    | ValueNone -> fallback
 
   match command with
   | "index" ->
@@ -396,12 +406,6 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
         | ValueSome value when value >= 0 && value <= 2 -> ValueSome(Ok value)
         | ValueSome _
         | ValueNone -> ValueSome(Error(InvalidValue("--tier", text)))
-
-    let errorOf (value: Result<'T, ParseError> voption) =
-      match value with
-      | ValueSome(Error error) -> Some error
-      | ValueSome(Ok _)
-      | ValueNone -> None
 
     match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize; errorOf tier ] with
     | Some error -> Error error
@@ -444,21 +448,6 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     let direction = optionalValue "--direction"
     let edges = optionalValue "--edge"
     let ignoreCase = reader.Flag "--ignore-case"
-
-    let errorOf (value: Result<'T, ParseError> voption) =
-      match value with
-      | ValueSome(Error error) -> Some error
-      | ValueSome(Ok _)
-      | ValueNone -> None
-
-    // 上限は「指定がなければ既定、指定があれば絶対上限で頭打ち」にする。
-    // 利用者が大きな値を渡しても、出力量は有界のままになる。
-    let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
-      match value with
-      | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
-      | ValueSome(Ok _) -> fallback
-      | ValueSome(Error _)
-      | ValueNone -> fallback
 
     let directionText =
       match direction with
@@ -556,19 +545,6 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     let node = optionalValue "--node"
     let depth = optionalInt "--depth"
     let maxNodes = optionalInt "--max-nodes"
-
-    let errorOf (value: Result<'T, ParseError> voption) =
-      match value with
-      | ValueSome(Error error) -> Some error
-      | ValueSome(Ok _)
-      | ValueNone -> None
-
-    let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
-      match value with
-      | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
-      | ValueSome(Ok _) -> fallback
-      | ValueSome(Error _)
-      | ValueNone -> fallback
 
     match List.tryPick id [ errorOf depth; errorOf maxNodes ] with
     | Some error -> Error error

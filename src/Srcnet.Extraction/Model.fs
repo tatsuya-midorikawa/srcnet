@@ -104,6 +104,15 @@ module Limits =
   [<Literal>]
   let GeneratedMarkerScanBytes = 8_192
 
+/// 名前として受け入れる文字列へ整える。NFC 正規化し、上限で切り詰める。
+let internal normalizeName (raw: string) =
+  if raw.Length = 0 then ""
+  else
+    let normalized = Srcnet.Text.Unicode.normalize raw
+
+    if normalized.Length <= Limits.MaxNameLength then normalized
+    else normalized.Substring(0, Limits.MaxNameLength)
+
 /// 原文中のバイト範囲。`Start = End` は「範囲なし」を表す。
 [<Struct; StructuralEquality; StructuralComparison>]
 type ByteRange =

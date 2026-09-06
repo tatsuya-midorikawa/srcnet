@@ -11,7 +11,6 @@ open System
 open System.Collections.Generic
 open System.Text
 open Srcnet.Core.Graph
-open Srcnet.Text
 open Srcnet.Extraction.Model
 
 /// 抽出結果。
@@ -42,14 +41,6 @@ let private testMacros =
 
 let private isTestMacro (name: string) =
   Array.exists (fun (macro: string) -> String.Equals(macro, name, StringComparison.Ordinal)) testMacros
-
-let private normalizeName (raw: string) =
-  if raw.Length = 0 then ""
-  else
-    let normalized = Unicode.normalize raw
-
-    if normalized.Length <= Limits.MaxNameLength then normalized
-    else normalized.Substring(0, Limits.MaxNameLength)
 
 /// 条件式の原文を、空白を畳んだ 1 行の文字列にする。評価はしない。
 let private conditionText (source: byte[]) (node: SyntaxTree.Node) =
@@ -333,6 +324,11 @@ let run
         pending.Push(Visit(children[index], depth + 1))
     else truncated <- true
 
+  let enterScope node depth symbolIndex prefix =
+    pending.Push LeaveScope
+    pushChildren node depth
+    scopes.Push { SymbolIndex = symbolIndex; Prefix = prefix }
+
   /// 新しい条件の枝へ入る。`negatePrevious` は `#else` / `#elif` のための指定。
   let enterCondition (own: string) (negatePrevious: bool) =
     if conditions.Count >= Limits.MaxConditionDepth || conditionCount >= Limits.MaxConditionsPerFile then
@@ -486,9 +482,7 @@ let run
         let scope = currentScope ()
         let index = addSymbol Module name node NodeFlags.Definition doc
         let prefix = if scope.Prefix = "" then name else scope.Prefix + "::" + name
-        pending.Push LeaveScope
-        pushChildren node depth
-        scopes.Push { SymbolIndex = index; Prefix = prefix }
+        enterScope node depth index prefix
 
     | "class_specifier"
     | "struct_specifier"
@@ -517,9 +511,7 @@ let run
                   addReference index Inherits (baseNode.Text source) scope.Prefix baseNode Extracted
 
           let prefix = if scope.Prefix = "" then name else scope.Prefix + "::" + name
-          pending.Push LeaveScope
-          pushChildren node depth
-          scopes.Push { SymbolIndex = index; Prefix = prefix }
+          enterScope node depth index prefix
 
     | "enum_specifier" ->
       match node.ChildByFieldUtf8 fieldName with
@@ -530,9 +522,7 @@ let run
         let scope = currentScope ()
         let index = addSymbol Type name node NodeFlags.Definition doc
         let prefix = if scope.Prefix = "" then name else scope.Prefix + "::" + name
-        pending.Push LeaveScope
-        pushChildren node depth
-        scopes.Push { SymbolIndex = index; Prefix = prefix }
+        enterScope node depth index prefix
 
     | "enumerator" ->
       match node.ChildByFieldUtf8 fieldName with
@@ -626,9 +616,7 @@ let run
               let suite = (caseName.Split '.')[0]
               addReference index Tests suite scope.Prefix node Ambiguous
 
-            pending.Push LeaveScope
-            pushChildren node depth
-            scopes.Push { SymbolIndex = index; Prefix = qualified }
+            enterScope node depth index qualified
           else
             let linkage =
               if hasStaticStorage source node then NodeFlags.InternalLinkage
@@ -657,9 +645,7 @@ let run
                 doc
 
             let prefix = if scope.Prefix = "" then raw else scope.Prefix + "::" + raw
-            pending.Push LeaveScope
-            pushChildren node depth
-            scopes.Push { SymbolIndex = index; Prefix = prefix }
+            enterScope node depth index prefix
 
     | "field_declaration" ->
       match node.ChildByFieldUtf8 fieldDeclarator with

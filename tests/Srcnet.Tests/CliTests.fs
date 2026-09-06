@@ -86,6 +86,45 @@ let ``stats と verify も位置引数を保つ`` () =
     Assert.True parsed.Deterministic
   | other -> failwith $"verify として解析できませんでした: {other}"
 
+[<Fact>]
+let ``数値オプションの検証順と値の消費をコマンド間で保つ`` () =
+  let cases =
+    [ [ "index"; "repo"; "--max-depth=bad"; "--jobs=bad" ], Args.InvalidValue("--jobs", "bad")
+      [ "index"; "repo"; "--max-file-size=bad" ], Args.InvalidValue("--max-file-size", "bad")
+      [ "search"; "name"; "--budget=bad"; "--limit=bad" ], Args.InvalidValue("--limit", "bad")
+      [ "export"; "html"; "--max-nodes=bad"; "--depth=bad" ], Args.InvalidValue("--depth", "bad")
+      [ "search"; "name"; "--depth" ], Args.MissingValue "--depth"
+      [ "export"; "html"; "--max-nodes" ], Args.MissingValue "--max-nodes" ]
+
+  for arguments, expected in cases do
+    Assert.Equal(Error expected, parse arguments)
+
+  let indexed = indexArguments [ "index"; "4"; "--jobs=bad"; "--jobs"; "4"; "--max-file-size=64KiB" ]
+  Assert.Equal("4", indexed.RootPath)
+  Assert.Equal(ValueSome 4, indexed.Jobs)
+  Assert.Equal(ValueSome 65_536L, indexed.MaxFileSizeBytes)
+
+[<Theory>]
+[<InlineData(0, 1, 50, 8000, 800)>]
+[<InlineData(1, 1, 1, 1, 1)>]
+[<InlineData(2147483647, 16, 10000, 1000000, 20000)>]
+let ``照会と HTML 出力の上限は既定値と絶対上限を保つ`` (value: int) depth limit budget maxNodes =
+  match parse [ "search"; "name"; $"--depth={value}"; $"--limit={value}"; $"--budget={value}" ] with
+  | Ok(Args.Search arguments) ->
+    Assert.Equal(limit, arguments.Limits.Limit)
+    Assert.Equal(budget, arguments.Limits.Budget)
+  | other -> failwith $"search として解析できませんでした: {other}"
+
+  match parse [ "neighbors"; "name"; $"--depth={value}" ] with
+  | Ok(Args.Neighbors arguments) -> Assert.Equal(depth, arguments.Depth)
+  | other -> failwith $"neighbors として解析できませんでした: {other}"
+
+  match parse [ "export"; "html"; $"--depth={value}"; $"--max-nodes={value}" ] with
+  | Ok(Args.ExportHtml arguments) ->
+    Assert.Equal(depth, arguments.Depth)
+    Assert.Equal(maxNodes, arguments.MaxNodes)
+  | other -> failwith $"export として解析できませんでした: {other}"
+
 // --- コマンドの通し検証 ---
 
 open System
@@ -144,6 +183,88 @@ let private runVerify (root: string) (deterministic: bool) =
       Json = false }
 
   (Commands.verify arguments CancellationToken.None).Result
+
+[<Fact>]
+let ``全コマンドは同じ成果物パスを使い明示した出力先を優先する`` () =
+  use repository = new Sandbox()
+  repository.Write("日本語.c", "int value;\n")
+  Assert.Equal(Commands.ExitCode.Success, runIndex repository.Path)
+
+  let output = Path.Combine(repository.Path, Args.DefaultOutputDirectoryName)
+  let limits: Args.QueryLimits = { Limit = Args.DefaultLimit; Budget = Args.DefaultBudget }
+
+  for explicitOutput, rootPath in
+    [ ValueNone, ValueSome(repository.Path + string Path.DirectorySeparatorChar)
+      ValueSome output, ValueSome(repository.Path + "-missing") ] do
+    let search: Args.SearchArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        Text = "日本語.c"
+        IgnoreCase = false
+        Limits = limits
+        Json = true }
+
+    let show: Args.ShowArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        Node = "日本語.c"
+        Limits = limits
+        Json = true }
+
+    let neighbors: Args.NeighborsArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        Node = "日本語.c"
+        Edges = Array.empty
+        Direction = "both"
+        Depth = 1
+        Limits = limits
+        Json = true }
+
+    let path: Args.PathArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        From = "日本語.c"
+        To = "日本語.c"
+        Edges = Array.empty
+        Direction = "both"
+        Depth = 1
+        Limits = limits
+        Json = true }
+
+    let context: Args.ContextArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        Keywords = [| "日本語.c" |]
+        Depth = 1
+        Limits = limits
+        Json = true }
+
+    let export: Args.ExportArguments =
+      { OutputDirectory = explicitOutput
+        RootPath = rootPath
+        File = ValueNone
+        Query = ""
+        Node = "日本語.c"
+        Depth = 1
+        MaxNodes = Args.DefaultMaxNodes
+        Json = true }
+
+    Assert.Equal(Commands.ExitCode.Success, Commands.stats { OutputDirectory = explicitOutput; RootPath = rootPath; Json = true })
+
+    let verified =
+      Commands.verify
+        { OutputDirectory = explicitOutput; RootPath = rootPath; Deterministic = false; Json = true }
+        CancellationToken.None
+
+    Assert.Equal(Commands.ExitCode.Success, verified.GetAwaiter().GetResult())
+    Assert.Equal(Commands.ExitCode.Success, QueryCommands.search search CancellationToken.None)
+    Assert.Equal(Commands.ExitCode.Success, QueryCommands.show show CancellationToken.None)
+    Assert.Equal(Commands.ExitCode.Success, QueryCommands.neighbors neighbors CancellationToken.None)
+    Assert.Equal(Commands.ExitCode.Success, QueryCommands.path path CancellationToken.None)
+    Assert.Equal(Commands.ExitCode.Success, QueryCommands.context context CancellationToken.None)
+    Assert.Equal(Commands.ExitCode.Success, ExportCommands.exportHtml export CancellationToken.None)
+    Assert.True(File.Exists(Path.Combine(output, ExportCommands.DefaultFileName)))
 
 [<Fact>]
 let ``deterministic verify は manifest.json だけの差も検出する`` () =

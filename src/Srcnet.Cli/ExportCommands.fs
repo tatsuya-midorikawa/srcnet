@@ -63,26 +63,6 @@ type private ExportNode =
     /// 集約したノードがまとめている件数。集約していない場合は 1。
     Weight: int }
 
-let private flagTable =
-  [| NodeFlags.Definition, "definition"
-     NodeFlags.DeclarationOnly, "declaration"
-     NodeFlags.Test, "test"
-     NodeFlags.Generated, "generated"
-     NodeFlags.Vendored, "vendored"
-     NodeFlags.Conditional, "conditional"
-     NodeFlags.Binary, "binary"
-     NodeFlags.UndeterminedEncoding, "undetermined-encoding"
-     NodeFlags.Skipped, "skipped"
-     NodeFlags.SymbolicLink, "symlink"
-     NodeFlags.AmbiguousEncoding, "ambiguous-encoding"
-     NodeFlags.InternalLinkage, "internal-linkage"
-     NodeFlags.ExtractionTruncated, "extraction-truncated" |]
-
-let private flagNames (flags: NodeFlags) =
-  flagTable
-  |> Array.filter (fun (flag, _) -> flags.HasFlag flag)
-  |> Array.map snd
-
 let private toExport (view: Query.GraphView) (index: int) (distance: int) (weight: int) =
   let node = view.Node index
 
@@ -228,7 +208,7 @@ let private renderData
     writer.WriteNumber("weight", node.Weight)
     writer.WriteStartArray "flags"
 
-    for name in flagNames node.Flags do
+    for name in Commands.flagNames node.Flags do
       writer.WriteStringValue name
 
     writer.WriteEndArray()
@@ -289,20 +269,6 @@ let private writeAtomically (destination: string) (payload: string) =
     (try File.Delete temporary with :? IOException -> ())
     Error "書き込む権限がありません"
 
-let private openView (explicitOutput: string voption) (rootPath: string voption) =
-  let outputDirectory =
-    match explicitOutput with
-    | ValueSome directory -> Path.GetFullPath directory
-    | ValueNone ->
-      let root =
-        match rootPath with
-        | ValueSome path -> Path.GetFullPath path
-        | ValueNone -> Directory.GetCurrentDirectory()
-
-      Path.Combine(Path.TrimEndingDirectorySeparator root, Args.DefaultOutputDirectoryName)
-
-  struct (outputDirectory, Query.GraphView.Open outputDirectory)
-
 /// `srcnet export html` の本体。
 let exportHtml (arguments: Args.ExportArguments) (cancellation: CancellationToken) : int =
   match template.Value with
@@ -311,9 +277,9 @@ let exportHtml (arguments: Args.ExportArguments) (cancellation: CancellationToke
     Commands.ExitCode.InternalError
   | ValueSome page ->
 
-  let struct (outputDirectory, opened) = openView arguments.OutputDirectory arguments.RootPath
+  let outputDirectory = Commands.locateArtifact arguments.OutputDirectory arguments.RootPath
 
-  match opened with
+  match Query.GraphView.Open outputDirectory with
   | Error error ->
     Terminal.errLine (Query.QueryError.describe error)
     Commands.ExitCode.MissingArtifact
@@ -325,29 +291,13 @@ let exportHtml (arguments: Args.ExportArguments) (cancellation: CancellationToke
   // 起点の決定。`--node` は ID か完全一致の名前、`--query` は検索の最上位。
   let seed =
     if arguments.Node <> "" then
-      match NodeId.tryParse arguments.Node with
-      | ValueSome id ->
-        match view.TryResolve id with
-        | ValueSome index -> Ok(ValueSome index)
-        | ValueNone -> Error $"ノードが見つかりません: {Sanitize.forTerminal arguments.Node}"
-      | ValueNone ->
-        let outcome = Query.search view arguments.Node false cancellation
-
-        let exact =
-          outcome.Hits
-          |> Array.filter (fun hit ->
-            hit.Strength = Query.Exact && (hit.Target = Query.Name || hit.Target = Query.QualifiedName))
-
-        match exact with
-        | [||] -> Error $"ノードが見つかりません: {Sanitize.forTerminal arguments.Node}"
-        | many ->
-          let ordered = Array.copy many
-          Array.sortInPlaceWith (Query.compareHits view) ordered
-
-          if ordered.Length > 1 then
-            diagnostics.Add $"`{arguments.Node}` は {ordered.Length} 件に一致しました。最上位を起点にしています"
-
-          Ok(ValueSome ordered[0].Node)
+      match QueryCommands.resolveNode view arguments.Node cancellation with
+      | QueryCommands.MissingNode ->
+        Error $"ノードが見つかりません: {Sanitize.forTerminal arguments.Node}"
+      | QueryCommands.ResolvedNode index -> Ok(ValueSome index)
+      | QueryCommands.AmbiguousNode candidates ->
+        diagnostics.Add $"`{arguments.Node}` は {candidates.Length} 件に一致しました。最上位を起点にしています"
+        Ok(ValueSome candidates[0])
     elif arguments.Query <> "" then
       let outcome = Query.search view arguments.Query false cancellation
       let ordered = Array.copy outcome.Hits

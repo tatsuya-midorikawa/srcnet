@@ -84,7 +84,85 @@ let ``失敗の説明はすべての場合に用意されている`` () =
   for failure in failures do
     Assert.False(String.IsNullOrWhiteSpace(Parsing.ParseFailure.describe failure))
 
+[<Theory>]
+[<InlineData(1024)>]
+[<InlineData(1025)>]
+let ``T1 と T2 は名前を NFC 正規化してから同じ上限で切り詰める`` length =
+  let raw = "e\u0301" + String('x', length - 1)
+  let expected = ("\u00E9" + String('x', length - 1)).Substring(0, min length Model.Limits.MaxNameLength)
+
+  for tier, language, text in
+    [ Model.LineOriented, Language.Python, $"def {raw}():\n    pass\n"
+      Model.Syntax, Language.C, $"int {raw}(void) {{ return 0; }}\n" ] do
+    if tier = Model.LineOriented || Extractor.supportsSyntax language then
+      let extractor = Extractor.Extractor { Extractor.ExtractionOptions.defaults with Tier = tier }
+      let source = utf8 text
+      let extracted = extractor.Extract(language, "names.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+      let symbol = Assert.Single(extracted.Symbols |> Array.filter (fun item -> item.Kind = Function))
+      Assert.Equal(expected, symbol.Name)
+      Assert.Equal(expected, symbol.QualifiedName)
+
 // --- 解析器が同梱されているときだけ実行する検証 ---
+
+[<Fact>]
+let ``入れ子スコープから戻ると親と呼び出しの修飾を復元する`` () =
+  if Parsing.supports Language.Cpp then
+    let source =
+      utf8
+        """
+namespace outer {
+  namespace inner {
+    struct Holder {
+      enum State { First };
+      int run() { return helper(); }
+    };
+    int sibling() { return helper(); }
+  }
+  int tail() { return helper(); }
+}
+static int local() { return helper(); }
+TEST_F(Suite, Case) { helper(); }
+int after_test() { return helper(); }
+"""
+
+    match Parsing.parseDefault Language.Cpp source CancellationToken.None with
+    | Error failure -> failwith (Parsing.ParseFailure.describe failure)
+    | Ok tree ->
+      use tree = tree
+      let extracted = CSyntax.run Language.Cpp "scope.cc" source tree NodeFlags.None
+
+      let find qualified =
+        extracted.Symbols
+        |> Array.indexed
+        |> Array.filter (fun (_, symbol) -> symbol.QualifiedName = qualified)
+        |> Assert.Single
+
+      for child, parent in
+        [ "outer::inner", "outer"
+          "outer::inner::Holder", "outer::inner"
+          "outer::inner::Holder::State", "outer::inner::Holder"
+          "outer::inner::Holder::State::First", "outer::inner::Holder::State"
+          "outer::inner::Holder::run", "outer::inner::Holder"
+          "outer::inner::sibling", "outer::inner"
+          "outer::tail", "outer" ] do
+        let _, symbol = find child
+        let parentIndex, _ = find parent
+        Assert.Equal(parentIndex, symbol.Parent)
+
+      for qualified, prefix in
+        [ "outer::inner::Holder::run", "outer::inner::Holder::run"
+          "outer::inner::sibling", "outer::inner::sibling"
+          "outer::tail", "outer::tail"
+          "scope.cc::local", "local"
+          "Suite.Case", "Suite.Case"
+          "after_test", "after_test" ] do
+        let index, symbol = find qualified
+        if not (qualified.StartsWith("outer::", StringComparison.Ordinal)) then Assert.Equal(-1, symbol.Parent)
+
+        Assert.Contains(
+          extracted.References,
+          fun reference -> reference.Source = index && reference.Kind = Calls && reference.Target = "helper" && reference.Qualifier = prefix
+        )
 
 [<Fact>]
 let ``C のソースから定義を抽出できる`` () =

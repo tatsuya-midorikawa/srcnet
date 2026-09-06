@@ -75,6 +75,26 @@ let writeJson (build: Utf8JsonWriter -> unit) =
   Terminal.out (Text.Encoding.UTF8.GetString(buffer.ToArray()))
   Terminal.out Terminal.Newline
 
+let private flagTable =
+  [| NodeFlags.Definition, "definition"
+     NodeFlags.DeclarationOnly, "declaration"
+     NodeFlags.Test, "test"
+     NodeFlags.Generated, "generated"
+     NodeFlags.Vendored, "vendored"
+     NodeFlags.Conditional, "conditional"
+     NodeFlags.Binary, "binary"
+     NodeFlags.UndeterminedEncoding, "undetermined-encoding"
+     NodeFlags.Skipped, "skipped"
+     NodeFlags.SymbolicLink, "symlink"
+     NodeFlags.AmbiguousEncoding, "ambiguous-encoding"
+     NodeFlags.InternalLinkage, "internal-linkage"
+     NodeFlags.ExtractionTruncated, "extraction-truncated" |]
+
+let internal flagNames (flags: NodeFlags) =
+  flagTable
+  |> Array.filter (fun (flag, _) -> flags.HasFlag flag)
+  |> Array.map snd
+
 let private reportDiagnostics (diagnostics: DiagnosticSink) =
   let counts = diagnostics.Counts()
 
@@ -104,10 +124,16 @@ let private reraise' (ex: exn) : 'T =
   ExceptionDispatchInfo.Capture(ex).Throw()
   Unchecked.defaultof<'T>
 
-let private resolveOutputDirectory (explicit: string voption) (rootFullPath: string) =
-  match explicit with
+let internal locateArtifact (explicitOutput: string voption) (rootPath: string voption) =
+  match explicitOutput with
   | ValueSome directory -> Path.GetFullPath directory
-  | ValueNone -> Path.Combine(rootFullPath, Args.DefaultOutputDirectoryName)
+  | ValueNone ->
+    let root =
+      match rootPath with
+      | ValueSome path -> Path.GetFullPath path
+      | ValueNone -> Directory.GetCurrentDirectory()
+
+    Path.Combine(Path.TrimEndingDirectorySeparator root, Args.DefaultOutputDirectoryName)
 
 /// 出力先が解析ルート配下にある場合、その論理パスを走査から除外する。
 /// 生成物を自分で索引してしまうのを防ぐ。
@@ -443,7 +469,7 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
       return ExitCode.UserError
     | Ok repository ->
 
-    let outputDirectory = resolveOutputDirectory arguments.OutputDirectory rootFullPath
+    let outputDirectory = locateArtifact arguments.OutputDirectory (ValueSome rootFullPath)
     let excluded = excludedOutputPath rootFullPath outputDirectory
     let options = walkOptions arguments excluded
     let diagnostics = DiagnosticSink()
@@ -453,17 +479,6 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
 
     return reportIndex arguments diagnostics outcome
   }
-
-let private locateArtifact (explicitOutput: string voption) (rootPath: string voption) =
-  match explicitOutput with
-  | ValueSome directory -> Path.GetFullPath directory
-  | ValueNone ->
-    let root =
-      match rootPath with
-      | ValueSome path -> Path.GetFullPath path
-      | ValueNone -> Directory.GetCurrentDirectory()
-
-    Path.Combine(Path.TrimEndingDirectorySeparator root, Args.DefaultOutputDirectoryName)
 
 let stats (arguments: Args.StatsArguments) : int =
   let outputDirectory = locateArtifact arguments.OutputDirectory arguments.RootPath

@@ -9,7 +9,6 @@ module Srcnet.Cli.QueryCommands
 
 open System
 open System.Collections.Generic
-open System.IO
 open System.Text.Json
 open System.Threading
 open Srcnet.Core.Graph
@@ -76,26 +75,6 @@ type NodeOutput =
     Match: string
     MatchedOn: string }
 
-let private flagTable =
-  [| NodeFlags.Definition, "definition"
-     NodeFlags.DeclarationOnly, "declaration"
-     NodeFlags.Test, "test"
-     NodeFlags.Generated, "generated"
-     NodeFlags.Vendored, "vendored"
-     NodeFlags.Conditional, "conditional"
-     NodeFlags.Binary, "binary"
-     NodeFlags.UndeterminedEncoding, "undetermined-encoding"
-     NodeFlags.Skipped, "skipped"
-     NodeFlags.SymbolicLink, "symlink"
-     NodeFlags.AmbiguousEncoding, "ambiguous-encoding"
-     NodeFlags.InternalLinkage, "internal-linkage"
-     NodeFlags.ExtractionTruncated, "extraction-truncated" |]
-
-let private flagNames (flags: NodeFlags) =
-  flagTable
-  |> Array.filter (fun (flag, _) -> flags.HasFlag flag)
-  |> Array.map snd
-
 let private describe (view: Query.GraphView) (index: int) (distance: int) =
   let node = view.Node index
 
@@ -133,7 +112,7 @@ let private writeNode (writer: Utf8JsonWriter) (output: NodeOutput) (includeDist
   writer.WriteNumber("ordinal", node.Ordinal)
   writer.WriteStartArray "flags"
 
-  for name in flagNames node.Flags do
+  for name in Commands.flagNames node.Flags do
     writer.WriteStringValue name
 
   writer.WriteEndArray()
@@ -153,7 +132,7 @@ let private writeTextNode (output: NodeOutput) (includeDistance: bool) =
     else $" {output.Path}"
 
   let flags =
-    match flagNames node.Flags with
+    match Commands.flagNames node.Flags with
     | [||] -> ""
     | names -> " [" + String.Join(",", names) + "]"
 
@@ -171,18 +150,7 @@ let private reportTruncation (budget: Budget) =
 
 /// 成果物の位置を決めて開く。
 let private openView (explicitOutput: string voption) (rootPath: string voption) =
-  let outputDirectory =
-    match explicitOutput with
-    | ValueSome directory -> Path.GetFullPath directory
-    | ValueNone ->
-      let root =
-        match rootPath with
-        | ValueSome path -> Path.GetFullPath path
-        | ValueNone -> Directory.GetCurrentDirectory()
-
-      Path.Combine(Path.TrimEndingDirectorySeparator root, Args.DefaultOutputDirectoryName)
-
-  Query.GraphView.Open outputDirectory
+  Query.GraphView.Open(Commands.locateArtifact explicitOutput rootPath)
 
 /// 辿るエッジ種別を決める。指定がなければ成果物が持つすべての種別を使う。
 let private resolveEdgeKinds (view: Query.GraphView) (requested: string[]) =
@@ -211,7 +179,7 @@ type Resolution =
   | AmbiguousNode of candidates: int[]
   | MissingNode
 
-let private resolveNode (view: Query.GraphView) (text: string) (cancellation: CancellationToken) =
+let internal resolveNode (view: Query.GraphView) (text: string) (cancellation: CancellationToken) =
   match NodeId.tryParse text with
   | ValueSome id ->
     match view.TryResolve id with
@@ -295,11 +263,6 @@ let private writeEdges (view: Query.GraphView) (writer: Utf8JsonWriter) (edges: 
 
   writer.WriteEndArray()
 
-let private diagnosticsExit (diagnostics: string[]) (empty: bool) =
-  if empty then Commands.ExitCode.NoResults
-  elif diagnostics.Length > 0 then Commands.ExitCode.Success
-  else Commands.ExitCode.Success
-
 // --- search ------------------------------------------------------------------
 
 let search (arguments: Args.SearchArguments) (cancellation: CancellationToken) : int =
@@ -354,7 +317,7 @@ let search (arguments: Args.SearchArguments) (cancellation: CancellationToken) :
 
     reportTruncation budget
 
-  diagnosticsExit diagnostics (ordered.Length = 0)
+  if ordered.Length = 0 then Commands.ExitCode.NoResults else Commands.ExitCode.Success
 
 // --- show --------------------------------------------------------------------
 

@@ -51,15 +51,6 @@ let private textOf (source: ReadOnlySpan<byte>) (start: int) (finish: int) =
   let until = min finish source.Length
   if until <= from then "" else Encoding.UTF8.GetString(source.Slice(from, until - from))
 
-/// 名前として受け入れる文字列へ整える。NFC 正規化し、上限で切り詰める。
-let private toName (raw: string) =
-  if raw.Length = 0 then ""
-  else
-    let normalized = Unicode.normalize raw
-
-    if normalized.Length <= Limits.MaxNameLength then normalized
-    else normalized.Substring(0, Limits.MaxNameLength)
-
 let private skipBlanks (line: ReadOnlySpan<byte>) (start: int) =
   let mutable index = max 0 start
 
@@ -563,7 +554,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
           symbols.Add
             { Kind = Note
               Name = tag
-              QualifiedName = toName qualified
+              QualifiedName = normalizeName qualified
               Parent = -1
               Ordinal = 0u
               StartLine = lineNumber
@@ -612,7 +603,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
               if references.Count >= Limits.MaxReferencesPerFile then truncated <- true
               else
                 let raw = textOf source (lineStart + spellStart) (lineStart + spellEnd)
-                let target = toName raw
+                let target = normalizeName raw
 
                 if target <> "" then
                   references.Add
@@ -646,8 +637,8 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
 
               symbols.Add
                 { Kind = (if isFunctionLike then Macro else Constant)
-                  Name = toName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
-                  QualifiedName = toName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
+                  Name = normalizeName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
+                  QualifiedName = normalizeName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
                   Parent = -1
                   Ordinal = 0u
                   StartLine = lineNumber
@@ -678,7 +669,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
               if nameEnd > nameStart then
                 if symbols.Count >= Limits.MaxSymbolsPerFile then truncated <- true
                 else
-                  let name = toName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
+                  let name = normalizeName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
 
                   symbols.Add
                     { Kind = definitionRule.Kind
@@ -721,7 +712,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
           if nameEnd > nameStart then
             if symbols.Count >= Limits.MaxSymbolsPerFile then truncated <- true
             else
-              let name = toName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
+              let name = normalizeName (textOf source (lineStart + nameStart) (lineStart + nameEnd))
 
               symbols.Add
                 { Kind = ConfigSymbol
@@ -765,7 +756,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
             | ValueSome nodeKind ->
               if symbols.Count >= Limits.MaxSymbolsPerFile then truncated <- true
               else
-                let name = toName (textOf source lineStart (lineStart + nameEnd))
+                let name = normalizeName (textOf source lineStart (lineStart + nameEnd))
 
                 symbols.Add
                   { Kind = nodeKind
@@ -788,7 +779,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
           if nameEnd > 0 && nameEnd < codeEnd && code[nameEnd] = ':'B then
             if symbols.Count >= Limits.MaxSymbolsPerFile then truncated <- true
             else
-              let name = toName (textOf source lineStart (lineStart + nameEnd))
+              let name = normalizeName (textOf source lineStart (lineStart + nameEnd))
 
               symbols.Add
                 { Kind = Function

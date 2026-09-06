@@ -523,27 +523,19 @@ let search (view: GraphView) (needle: string) (ignoreCase: bool) (cancellation: 
     let pathRef = view.FilePathRef node.FileIndex
     let pathStrength = if pathRef >= 0 && pathRef < strengths.Length then strengths[pathRef] else 0uy
 
-    let best =
-      // 対象の優先度が同じなら強さで選ぶ。強さが同じなら対象の優先度で選ぶ。
-      [| Name, nameStrength; QualifiedName, qualifiedStrength; Path, pathStrength |]
-      |> Array.filter (fun (_, strength) -> strength > 0uy)
-      |> Array.sortWith (fun (leftTarget, leftStrength) (rightTarget, rightStrength) ->
-        let byStrength = compare rightStrength leftStrength
+    // 強さを先に比較し、同点では名前 → 修飾名 → パスの順を保つ。
+    let struct (target, strength) =
+      if nameStrength >= qualifiedStrength && nameStrength >= pathStrength then struct (Name, nameStrength)
+      elif qualifiedStrength >= pathStrength then struct (QualifiedName, qualifiedStrength)
+      else struct (Path, pathStrength)
 
-        if byStrength <> 0 then byStrength
-        else compare (MatchTarget.rank leftTarget) (MatchTarget.rank rightTarget))
-      |> Array.tryHead
-
-    match best with
-    | None -> ()
-    | Some(target, strength) ->
-      match strengthOf strength with
-      | ValueNone -> ()
-      | ValueSome value ->
-        hits.Add
-          { Node = index
-            Strength = value
-            Target = target }
+    match strengthOf strength with
+    | ValueNone -> ()
+    | ValueSome value ->
+      hits.Add
+        { Node = index
+          Strength = value
+          Target = target }
 
   { Hits = hits.ToArray()
     Truncated = view.NodeCount > limit
