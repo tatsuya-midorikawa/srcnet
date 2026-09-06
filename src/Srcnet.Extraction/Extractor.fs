@@ -180,9 +180,15 @@ type Extractor(options: ExtractionOptions) =
     // T2 が成功したファイルでは、T1 の定義候補を捨てて二重定義を防ぐ。
     // 根拠コメント（`Note`）は構文木からは得られないため、常に T1 のものを使う。
     let lineSymbols =
-      match syntax with
-      | ValueSome _ -> lineResult.Symbols |> Array.filter (fun symbol -> symbol.Kind = Note)
-      | ValueNone -> lineResult.Symbols
+      let kept =
+        match syntax with
+        | ValueSome _ -> lineResult.Symbols |> Array.filter (fun symbol -> symbol.Kind = Note)
+        | ValueNone -> lineResult.Symbols
+
+      // 生成物マーカーは走査の途中で見つかるため、行指向の抽出器はファイル全体の
+      // 属性を最初から知らない。判明した属性をここで全シンボルへ配る（backlog 023）。
+      if generatedFlag = NodeFlags.None then kept
+      else kept |> Array.map (fun symbol -> { symbol with Flags = symbol.Flags ||| generatedFlag })
 
     let syntaxSymbols =
       match syntax with

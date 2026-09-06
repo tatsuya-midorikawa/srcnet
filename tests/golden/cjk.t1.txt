@@ -1,0 +1,23 @@
+# corpus=cjk tier=T1
+## big5.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## euc_jp.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## euc_kr.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## gb18030.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## shift_jis.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## utf16be.c lang=c tier=T1
+N Note NOTE | NOTE: UTF-16 の日本語コメント ord=0 lines=2-2 parent=- flags=- doc=34B
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+## utf16le.c lang=c tier=T1
+N Note NOTE | NOTE: UTF-16 の日本語コメント ord=0 lines=2-2 parent=- flags=- doc=34B
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+## 日本語.c lang=c tier=T1
+N Type 座標 | 座標 ord=0 lines=4-4 parent=- flags=definition
+N Note TODO | TODO: 単位の扱いを見直す ord=0 lines=9-9 parent=- flags=- doc=27B
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+## 简体中文.c lang=c tier=T1
+N Type 坐标 | 坐标 ord=0 lines=2-2 parent=- flags=definition
+## 繁體中文.cc lang=cpp tier=T1
+N Module 圖形 | 圖形 ord=0 lines=1-1 parent=- flags=definition
+N Type 方塊 | 方塊 ord=0 lines=2-2 parent=- flags=definition
+## 한국어.c lang=c tier=T1
+N Type 좌표 | 좌표 ord=0 lines=2-2 parent=- flags=definition

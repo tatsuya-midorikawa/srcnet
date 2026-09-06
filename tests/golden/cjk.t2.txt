@@ -1,0 +1,46 @@
+# corpus=cjk tier=T2
+## big5.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## euc_jp.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## euc_kr.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## gb18030.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## shift_jis.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## utf16be.c lang=c tier=T2
+N Note NOTE | NOTE: UTF-16 の日本語コメント ord=0 lines=2-2 parent=- flags=- doc=34B
+N Function 幅 | 幅 ord=0 lines=3-3 parent=- flags=definition doc=43B
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+E EXPLAINS NOTE: UTF-16 の日本語コメント -> 幅 conf=EXTRACTED stage=2 line=2
+## utf16le.c lang=c tier=T2
+N Note NOTE | NOTE: UTF-16 の日本語コメント ord=0 lines=2-2 parent=- flags=- doc=34B
+N Function 幅 | 幅 ord=0 lines=3-3 parent=- flags=definition doc=43B
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+E EXPLAINS NOTE: UTF-16 の日本語コメント -> 幅 conf=EXTRACTED stage=2 line=2
+## 日本語.c lang=c tier=T2
+N Type 座標 | 座標 ord=0 lines=4-7 parent=- flags=definition doc=37B
+N Field 横 | 座標::横 ord=0 lines=5-5 parent=座標 flags=definition
+N Field 縦 | 座標::縦 ord=0 lines=6-6 parent=座標 flags=definition
+N Note TODO | TODO: 単位の扱いを見直す ord=0 lines=9-9 parent=- flags=- doc=27B
+N Function 面積 | 日本語.c::面積 ord=0 lines=10-10 parent=- flags=definition,internal-linkage doc=36B
+N Function 合計面積 | 合計面積 ord=0 lines=12-12 parent=- flags=definition
+E INCLUDES (file) -> 共通.h conf=EXTRACTED stage=0 line=1
+E EXPLAINS TODO: 単位の扱いを見直す -> 日本語.c::面積 conf=EXTRACTED stage=2 line=9
+E REFERENCES 日本語.c::面積 -> 座標 conf=EXTRACTED stage=0 line=10 in=面積
+E CALLS 合計面積 -> 面積 conf=EXTRACTED stage=0 line=12 in=合計面積
+E REFERENCES 合計面積 -> 座標 conf=EXTRACTED stage=0 line=12 in=合計面積
+## 简体中文.c lang=c tier=T2
+N Type 坐标 | 坐标 ord=0 lines=2-2 parent=- flags=definition doc=18B
+N Field 横 | 坐标::横 ord=0 lines=2-2 parent=坐标 flags=definition
+N Field 纵 | 坐标::纵 ord=0 lines=2-2 parent=坐标 flags=definition
+N Function 面积 | 面积 ord=0 lines=3-3 parent=- flags=definition
+E REFERENCES 面积 -> 坐标 conf=EXTRACTED stage=0 line=3 in=面积
+## 繁體中文.cc lang=cpp tier=T2
+N Module 圖形 | 圖形 ord=0 lines=1-8 parent=- flags=definition
+N Type 方塊 | 圖形::方塊 ord=0 lines=2-6 parent=圖形 flags=definition
+N Function 面積 | 圖形::方塊::面積 ord=0 lines=4-4 parent=圖形::方塊 flags=declaration
+N Field 邊長_ | 圖形::方塊::邊長_ ord=0 lines=5-5 parent=圖形::方塊 flags=definition
+N Function 面積 | 圖形::方塊::面積 ord=1 lines=7-7 parent=圖形 flags=definition
+## 한국어.c lang=c tier=T2
+N Type 좌표 | 좌표 ord=0 lines=2-2 parent=- flags=definition doc=19B
+N Field 가로 | 좌표::가로 ord=0 lines=2-2 parent=좌표 flags=definition
+N Field 세로 | 좌표::세로 ord=0 lines=2-2 parent=좌표 flags=definition
+N Function 넓이 | 넓이 ord=0 lines=3-3 parent=- flags=definition
+E REFERENCES 넓이 -> 좌표 conf=EXTRACTED stage=0 line=3 in=넓이

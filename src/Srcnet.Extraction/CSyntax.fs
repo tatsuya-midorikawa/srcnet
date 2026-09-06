@@ -143,10 +143,12 @@ let private shortNameOf (qualified: string) =
 
 /// 直下に `static` の記憶域クラス指定子を持つか。
 let private hasStaticStorage (source: byte[]) (node: SyntaxTree.Node) =
+  // 記憶域クラス指定子は宣言の先頭に現れる。先頭の数個だけを見れば足りる。
   let mutable found = false
   let mutable index = 0
+  let limit = min node.NamedChildCount 4
 
-  while not found && index < node.NamedChildCount do
+  while not found && index < limit do
     match node.NamedChild index with
     | ValueSome child when child.Kind = "storage_class_specifier" ->
       if child.StartsWith(ReadOnlySpan source, ReadOnlySpan staticKeyword) then found <- true
@@ -325,10 +327,10 @@ let run
   /// 子を原文の出現順に処理するため、逆順に積む。
   let pushChildren (node: SyntaxTree.Node) (depth: int) =
     if depth < SyntaxTree.MaxWalkDepth then
-      for index in node.NamedChildCount - 1 .. -1 .. 0 do
-        match node.NamedChild index with
-        | ValueSome child -> pending.Push(Visit(child, depth + 1))
-        | ValueNone -> ()
+      let children = node.NamedChildren()
+
+      for index in children.Length - 1 .. -1 .. 0 do
+        pending.Push(Visit(children[index], depth + 1))
     else truncated <- true
 
   /// 新しい条件の枝へ入る。`negatePrevious` は `#else` / `#elif` のための指定。
@@ -410,15 +412,34 @@ let run
     | "preproc_ifdef" ->
       let negated = node.StartsWith(ReadOnlySpan source, ReadOnlySpan ifndefDirective)
 
-      let own =
+      let guardName =
         match node.ChildByFieldUtf8 fieldName with
-        | ValueSome name ->
-          let identifier = name.Text source
-          if negated then $"!defined({identifier})" else $"defined({identifier})"
+        | ValueSome name -> name.Text source
         | ValueNone -> ""
 
-      enterCondition own false
-      pushChildren node depth
+      // インクルード ガードは構成条件ではない。`#ifndef X` の直後に `#define X` が
+      // 続く形を条件として扱うと、ヘッダー内のすべてのシンボルが `Conditional` になり、
+      // 実体のない `ConfigSymbol` と `GUARDED_BY` がヘッダーの数だけ増える。
+      let isIncludeGuard =
+        negated
+        && guardName <> ""
+        && (match node.NamedChild 1 with
+            | ValueSome following when following.Kind = "preproc_def" ->
+              match following.ChildByFieldUtf8 fieldName with
+              | ValueSome definedName -> String.Equals(definedName.Text source, guardName, StringComparison.Ordinal)
+              | ValueNone -> false
+            | ValueSome _
+            | ValueNone -> false)
+
+      if isIncludeGuard then pushChildren node depth
+      else
+        let own =
+          if guardName = "" then ""
+          elif negated then $"!defined({guardName})"
+          else $"defined({guardName})"
+
+        enterCondition own false
+        pushChildren node depth
 
     | "preproc_if" ->
       let own =
@@ -489,19 +510,11 @@ let run
           let scope = currentScope ()
           let index = addSymbol Type name node NodeFlags.Definition doc
 
-          for childIndex in 0 .. node.NamedChildCount - 1 do
-            match node.NamedChild childIndex with
-            | ValueSome child when child.Kind = "base_class_clause" ->
-              for baseIndex in 0 .. child.NamedChildCount - 1 do
-                match child.NamedChild baseIndex with
-                | ValueSome baseNode when
-                  baseNode.Kind = "type_identifier" || baseNode.Kind = "qualified_identifier"
-                  ->
+          for child in node.NamedChildren() do
+            if child.Kind = "base_class_clause" then
+              for baseNode in child.NamedChildren() do
+                if baseNode.Kind = "type_identifier" || baseNode.Kind = "qualified_identifier" then
                   addReference index Inherits (baseNode.Text source) scope.Prefix baseNode Extracted
-                | ValueSome _
-                | ValueNone -> ()
-            | ValueSome _
-            | ValueNone -> ()
 
           let prefix = if scope.Prefix = "" then name else scope.Prefix + "::" + name
           pending.Push LeaveScope
@@ -534,35 +547,27 @@ let run
 
       // `typedef struct Point { ... } Point;` では内側の指定子が同じ名前で定義済みになる。
       // 二重に登録すると、同じ型が序数違いで 2 つ現れる。
+      let children = node.NamedChildren()
       let mutable inner = ""
-      let mutable childIndex = 0
 
-      while childIndex < node.NamedChildCount do
-        match node.NamedChild childIndex with
-        | ValueSome child when
-          child.Kind = "struct_specifier" || child.Kind = "union_specifier" || child.Kind = "enum_specifier"
-          ->
+      for child in children do
+        if child.Kind = "struct_specifier" || child.Kind = "union_specifier" || child.Kind = "enum_specifier" then
           match child.ChildByFieldUtf8 fieldName with
           | ValueSome innerName -> inner <- innerName.Text source
           | ValueNone -> ()
-        | ValueSome _
-        | ValueNone -> ()
 
-        childIndex <- childIndex + 1
-
-      let mutable index = node.NamedChildCount - 1
+      let mutable index = children.Length - 1
       let mutable named = false
 
       while not named && index >= 0 do
-        match node.NamedChild index with
-        | ValueSome child when child.Kind = "type_identifier" ->
+        let child = children[index]
+
+        if child.Kind = "type_identifier" then
           let name = child.Text source
           named <- true
 
           if not (String.Equals(name, inner, StringComparison.Ordinal)) then
             addSymbol Type name node NodeFlags.Definition doc |> ignore
-        | ValueSome _
-        | ValueNone -> ()
 
         index <- index - 1
 
@@ -685,18 +690,15 @@ let run
       let doc = takeDoc node
       let scope = currentScope ()
       let isStatic = hasStaticStorage source node
-      let mutable childIndex = 0
-
-      while childIndex < node.NamedChildCount do
-        match node.NamedChild childIndex with
-        | ValueSome child when
+      for child in node.NamedChildren() do
+        if
           child.Kind = "init_declarator"
           || child.Kind = "function_declarator"
           || child.Kind = "pointer_declarator"
           || child.Kind = "array_declarator"
           || child.Kind = "reference_declarator"
           || child.Kind = "identifier"
-          ->
+        then
           let isFunction = isFunctionDeclarator child DeclaratorBudget
 
           match innermostDeclarator child DeclaratorBudget with
@@ -711,10 +713,6 @@ let run
               // ファイル直下の宣言だけを大域変数として扱う。関数本体の局所変数は載せない。
               addSymbol Variable raw node (NodeFlags.Definition ||| linkage) doc |> ignore
           | ValueNone -> ()
-        | ValueSome _
-        | ValueNone -> ()
-
-        childIndex <- childIndex + 1
 
       pushChildren node depth
 

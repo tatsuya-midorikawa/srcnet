@@ -528,7 +528,12 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
 
     // --- 生成物マーカー ---
     // 探索範囲を先頭に限る。本文にだけ `DO NOT EDIT` を含むファイルを生成扱いにしない。
-    if not generated && lineStart < Limits.GeneratedMarkerScanBytes && layout.CommentStart >= 0 then
+    if
+      not generated
+      && lineNumber <= Limits.GeneratedMarkerScanLines
+      && lineStart < Limits.GeneratedMarkerScanBytes
+      && layout.CommentStart >= 0
+    then
       let folded =
         Unicode.caseFold (textOf source (lineStart + layout.CommentStart) (lineStart + layout.CommentEnd))
 

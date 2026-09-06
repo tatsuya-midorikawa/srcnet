@@ -105,6 +105,34 @@ extern TSNode ts_node_named_child(TSNode node, uint32 index)
 [<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
 extern TSNode ts_node_child_by_field_name(TSNode node, nativeint name, uint32 nameLength)
 
+/// 木を走査するカーソル。
+///
+/// `ts_node_named_child(node, i)` は先頭から数えるため索引に比例した費用がかかり、
+/// 子が非常に多いノードを索引で舐めると全体が二乗になる。カーソルは
+/// 「最初の子 → 次の兄弟」の連鎖で 1 回の走査を線形に保つ。
+[<Struct; StructLayout(LayoutKind.Sequential)>]
+type TSTreeCursor =
+  val Tree: nativeint
+  val Id: nativeint
+  val Context0: uint32
+  val Context1: uint32
+  val Context2: uint32
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern TSTreeCursor ts_tree_cursor_new(TSNode node)
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern void ts_tree_cursor_delete(TSTreeCursor& cursor)
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern TSNode ts_tree_cursor_current_node(TSTreeCursor& cursor)
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern byte ts_tree_cursor_goto_first_child(TSTreeCursor& cursor)
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern byte ts_tree_cursor_goto_next_sibling(TSTreeCursor& cursor)
+
 let inline toBool (value: byte) = value <> 0uy
 
 /// tree-sitter が返す文字列は文法が所有する静的領域であり、解放してはならない。

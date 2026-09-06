@@ -24,6 +24,9 @@
         <Compile Include="IndexTests.fs" />
         <Compile Include="CliTests.fs" />
         <Compile Include="ExtractionTests.fs" />
+        <Compile Include="Corpus.fs" />
+        <Compile Include="GoldenTests.fs" />
+        <Compile Include="RobustnessTests.fs" />
         <Compile Include="PropertyTests.fs" />
     </ItemGroup>
 

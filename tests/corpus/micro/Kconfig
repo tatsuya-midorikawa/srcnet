@@ -1,0 +1,4 @@
+config MICRO_EXTRA
+	bool "Extra micro helpers"
+
+source "micro/Kconfig.debug"

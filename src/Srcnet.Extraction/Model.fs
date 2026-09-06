@@ -94,10 +94,15 @@ module Limits =
   [<Literal>]
   let MaxNoteTextLength = 256
 
-  /// 生成物マーカーを探すファイル先頭の範囲（バイト）。
+  /// 生成物マーカーを探すファイル先頭の行数。
   /// 全体を対象にすると、本文に `DO NOT EDIT` を含むだけのファイルまで生成扱いになる。
   [<Literal>]
-  let GeneratedMarkerScanBytes = 4_096
+  let GeneratedMarkerScanLines = 32
+
+  /// 生成物マーカーを探すファイル先頭の範囲（バイト）。行数の上限と併せて使い、
+  /// 極端に長い行が並ぶファイルでも走査量を有界に保つ。
+  [<Literal>]
+  let GeneratedMarkerScanBytes = 8_192
 
 /// 原文中のバイト範囲。`Start = End` は「範囲なし」を表す。
 [<Struct; StructuralEquality; StructuralComparison>]

@@ -1,0 +1,35 @@
+# corpus=micro tier=T1
+## Kconfig lang=kconfig tier=T1
+N ConfigSymbol MICRO_EXTRA | MICRO_EXTRA ord=0 lines=1-1 parent=- flags=definition
+E IMPORTS (file) -> micro/Kconfig.debug conf=EXTRACTED stage=0 line=4
+## Makefile lang=makefile tier=T1
+N Note NOTE | NOTE: minimal build description ord=0 lines=1-1 parent=- flags=- doc=25B
+N Variable obj-y | obj-y ord=0 lines=2-2 parent=- flags=definition
+N Variable CFLAGS | CFLAGS ord=0 lines=3-3 parent=- flags=definition
+N BuildTarget all | all ord=0 lines=5-5 parent=- flags=definition
+E IMPORTS (file) -> scripts/Kbuild.include conf=EXTRACTED stage=0 line=8
+E EXPLAINS NOTE: minimal build description -> obj-y conf=EXTRACTED stage=2 line=1
+## generated_table.c lang=c tier=T1
+## handwritten.c lang=c tier=T1
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## shapes.c lang=c tier=T1
+N Note TODO | TODO: memoize the result ord=0 lines=5-5 parent=- flags=- doc=21B
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## shapes.cc lang=cpp tier=T1
+N Module micro | micro ord=0 lines=3-3 parent=- flags=definition
+N Type Shape | Shape ord=0 lines=6-6 parent=- flags=definition
+N Type Square | Square ord=0 lines=12-12 parent=- flags=definition
+N Type class | class ord=0 lines=27-27 parent=- flags=definition
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## shapes.h lang=c-header tier=T1
+N Constant MICRO_SHAPES_H | MICRO_SHAPES_H ord=0 lines=2-2 parent=- flags=definition
+N Constant MICRO_MAX | MICRO_MAX ord=0 lines=7-7 parent=- flags=definition
+N Macro MICRO_ADD | MICRO_ADD ord=0 lines=8-8 parent=- flags=definition
+N Type Point | Point ord=0 lines=11-11 parent=- flags=definition
+N Type Color | Color ord=0 lines=16-16 parent=- flags=definition
+E INCLUDES (file) -> stddef.h conf=EXTRACTED stage=0 line=4
+E INCLUDES (file) -> common.h conf=EXTRACTED stage=0 line=5
+## tests/shapes_test.cc lang=cpp tier=T1
+E INCLUDES (file) -> ../shapes.h conf=EXTRACTED stage=0 line=1
+## third_party/vendor.c lang=c tier=T1
+N Type VendorHandle | VendorHandle ord=0 lines=2-2 parent=- flags=definition,vendored

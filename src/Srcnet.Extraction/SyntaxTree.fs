@@ -126,6 +126,37 @@ type Node =
     finish - start >= prefix.Length
     && source.Slice(start, prefix.Length).SequenceEqual prefix
 
+  /// 名前付きの子を出現順に取り出す。
+  ///
+  /// 索引での取得（`NamedChild`）は tree-sitter では索引に比例した費用がかかるため、
+  /// 子をすべて舐める用途では全体が二乗になる。子が数十万に達するファイル
+  /// （コメント行だけが延々と続くなど）はこの差で実用にならない。
+  /// カーソルによる「最初の子 → 次の兄弟」の連鎖は 1 回の走査を線形に保つ。
+  member this.NamedChildren() : Node[] =
+    let count = this.NamedChildCount
+
+    if count = 0 then Array.empty
+    else
+      let owner = this.Owner
+      let children = Collections.Generic.List<Node> count
+      let mutable cursor = Native.ts_tree_cursor_new this.Checked
+
+      try
+        if Native.toBool(Native.ts_tree_cursor_goto_first_child &cursor) then
+          let mutable more = true
+
+          while more do
+            let current = Native.ts_tree_cursor_current_node &cursor
+
+            if Native.toBool(Native.ts_node_is_named current) then
+              children.Add { Owner = owner; Handle = current }
+
+            more <- Native.toBool(Native.ts_tree_cursor_goto_next_sibling &cursor)
+
+        children.ToArray()
+      finally
+        Native.ts_tree_cursor_delete &cursor
+
   /// ソースからこのノードに対応するバイト列を切り出す。
   /// 範囲は検証済みなので、呼び出し側で再度の境界検査は要らない。
   member this.Slice(source: ReadOnlySpan<byte>) =
@@ -157,8 +188,8 @@ let descendants (start: Node) =
 
       if depth < MaxWalkDepth then
         // 逆順に積むことで、取り出す順序が原文の出現順に一致する。
-        for index in node.NamedChildCount - 1 .. -1 .. 0 do
-          match node.NamedChild index with
-          | ValueSome child -> pending.Push(struct (child, depth + 1))
-          | ValueNone -> ()
+        let children = node.NamedChildren()
+
+        for index in children.Length - 1 .. -1 .. 0 do
+          pending.Push(struct (children[index], depth + 1))
   }

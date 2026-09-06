@@ -1,0 +1,79 @@
+# corpus=micro tier=T2
+## Kconfig lang=kconfig tier=T1
+N ConfigSymbol MICRO_EXTRA | MICRO_EXTRA ord=0 lines=1-1 parent=- flags=definition
+E IMPORTS (file) -> micro/Kconfig.debug conf=EXTRACTED stage=0 line=4
+## Makefile lang=makefile tier=T1
+N Note NOTE | NOTE: minimal build description ord=0 lines=1-1 parent=- flags=- doc=25B
+N Variable obj-y | obj-y ord=0 lines=2-2 parent=- flags=definition
+N Variable CFLAGS | CFLAGS ord=0 lines=3-3 parent=- flags=definition
+N BuildTarget all | all ord=0 lines=5-5 parent=- flags=definition
+E IMPORTS (file) -> scripts/Kbuild.include conf=EXTRACTED stage=0 line=8
+E EXPLAINS NOTE: minimal build description -> obj-y conf=EXTRACTED stage=2 line=1
+## generated_table.c lang=c tier=T2
+N Function generated_value | generated_value ord=0 lines=2-2 parent=- flags=definition,generated doc=57B
+## handwritten.c lang=c tier=T2
+N Function handwritten_value | handwritten_value ord=0 lines=36-39 parent=- flags=definition doc=394B
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+## shapes.c lang=c tier=T2
+N Variable call_count | shapes.c::call_count ord=0 lines=3-3 parent=- flags=definition,internal-linkage
+N Note TODO | TODO: memoize the result ord=0 lines=5-5 parent=- flags=- doc=21B
+N Function square | shapes.c::square ord=0 lines=6-6 parent=- flags=definition,internal-linkage doc=30B
+N Function point_area | point_area ord=0 lines=8-11 parent=- flags=definition
+N Function point_extra | point_extra ord=0 lines=14-14 parent=- flags=definition,conditional cond=defined(CONFIG_MICRO_EXTRA)
+N Function point_extra | point_extra ord=1 lines=16-16 parent=- flags=definition,conditional cond=!(defined(CONFIG_MICRO_EXTRA))
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+E EXPLAINS TODO: memoize the result -> shapes.c::square conf=EXTRACTED stage=2 line=5
+E CALLS point_area -> MICRO_ADD conf=EXTRACTED stage=0 line=9 in=point_area
+E CALLS point_area -> square conf=EXTRACTED stage=0 line=10 in=point_area
+E CALLS point_area -> square conf=EXTRACTED stage=0 line=10 in=point_area
+E CALLS point_extra -> point_area conf=EXTRACTED stage=0 line=14 in=point_extra
+E GUARDED_BY point_extra -> CONFIG_MICRO_EXTRA conf=EXTRACTED stage=0 line=14
+E GUARDED_BY point_extra -> CONFIG_MICRO_EXTRA conf=EXTRACTED stage=0 line=16
+## shapes.cc lang=cpp tier=T2
+N Module micro | micro ord=0 lines=3-31 parent=- flags=definition
+N Type Shape | micro::Shape ord=0 lines=6-10 parent=micro flags=definition doc=15B
+N Function Area | micro::Shape::Area ord=0 lines=8-8 parent=micro::Shape flags=declaration
+N Field id_ | micro::Shape::id_ ord=0 lines=9-9 parent=micro::Shape flags=definition
+N Type Square | micro::Square ord=0 lines=12-19 parent=micro flags=definition
+N Function Area | micro::Square::Area ord=0 lines=14-14 parent=micro::Square flags=declaration
+N Function Square | micro::Square::Square ord=0 lines=15-15 parent=micro::Square flags=declaration
+N Field side_ | micro::Square::side_ ord=0 lines=18-18 parent=micro::Square flags=definition
+N Function Area | micro::Shape::Area ord=1 lines=21-21 parent=micro flags=definition
+N Function Area | micro::Square::Area ord=1 lines=23-23 parent=micro flags=definition
+N Function Square | micro::Square::Square ord=1 lines=25-25 parent=micro flags=definition
+N Type Kind | micro::Kind ord=0 lines=27-27 parent=micro flags=definition
+N Constant kShape | micro::Kind::kShape ord=0 lines=27-27 parent=micro::Kind flags=definition
+N Constant kSquare | micro::Kind::kSquare ord=0 lines=27-27 parent=micro::Kind flags=definition
+N Type Alias | micro::Alias ord=0 lines=29-29 parent=micro flags=definition
+N Function AreaIsSquared | ShapeTest.AreaIsSquared ord=0 lines=33-33 parent=- flags=definition,test doc=18B
+E INCLUDES (file) -> shapes.h conf=EXTRACTED stage=0 line=1
+E INHERITS micro::Square -> Shape conf=EXTRACTED stage=0 line=12 in=micro
+E CALLS ShapeTest.AreaIsSquared -> EXPECT_EQ conf=EXTRACTED stage=0 line=33 in=ShapeTest.AreaIsSquared
+E TESTS ShapeTest.AreaIsSquared -> ShapeTest conf=AMBIGUOUS stage=0 line=33
+## shapes.h lang=c-header tier=T2
+N Constant MICRO_SHAPES_H | MICRO_SHAPES_H ord=0 lines=2-3 parent=- flags=definition
+N Constant MICRO_MAX | MICRO_MAX ord=0 lines=7-8 parent=- flags=definition
+N Macro MICRO_ADD | MICRO_ADD ord=0 lines=8-9 parent=- flags=definition
+N Type Point | Point ord=0 lines=11-14 parent=- flags=definition
+N Field x | Point::x ord=0 lines=12-12 parent=Point flags=definition
+N Field y | Point::y ord=0 lines=13-13 parent=Point flags=definition
+N Type Color | Color ord=0 lines=16-16 parent=- flags=definition
+N Constant COLOR_RED | Color::COLOR_RED ord=0 lines=16-16 parent=Color flags=definition
+N Constant COLOR_GREEN | Color::COLOR_GREEN ord=0 lines=16-16 parent=Color flags=definition
+N Function point_area | point_area ord=0 lines=18-18 parent=- flags=declaration
+N Function point_extra | point_extra ord=0 lines=21-21 parent=- flags=declaration,conditional cond=defined(CONFIG_MICRO_EXTRA)
+E INCLUDES (file) -> stddef.h conf=EXTRACTED stage=0 line=4
+E INCLUDES (file) -> common.h conf=EXTRACTED stage=0 line=5
+E GUARDED_BY point_extra -> CONFIG_MICRO_EXTRA conf=EXTRACTED stage=0 line=21
+## tests/shapes_test.cc lang=cpp tier=T2
+N Function ComputesArea | ShapeSuite.ComputesArea ord=0 lines=3-3 parent=- flags=definition,test
+N Function HandlesZero | ShapeFixture.HandlesZero ord=0 lines=5-5 parent=- flags=definition,test
+E INCLUDES (file) -> ../shapes.h conf=EXTRACTED stage=0 line=1
+E CALLS ShapeSuite.ComputesArea -> EXPECT_EQ conf=EXTRACTED stage=0 line=3 in=ShapeSuite.ComputesArea
+E TESTS ShapeSuite.ComputesArea -> ShapeSuite conf=AMBIGUOUS stage=0 line=3
+E CALLS ShapeFixture.HandlesZero -> EXPECT_EQ conf=EXTRACTED stage=0 line=5 in=ShapeFixture.HandlesZero
+E TESTS ShapeFixture.HandlesZero -> ShapeFixture conf=AMBIGUOUS stage=0 line=5
+## third_party/vendor.c lang=c tier=T2
+N Type VendorHandle | VendorHandle ord=0 lines=2-2 parent=- flags=definition,vendored doc=81B
+N Field fd | VendorHandle::fd ord=0 lines=2-2 parent=VendorHandle flags=definition,vendored
+N Function vendor_open | vendor_open ord=0 lines=4-4 parent=- flags=definition,vendored

@@ -38,6 +38,8 @@ jobs:
               run: dotnet build srcnet.slnx -c Release --no-restore
 
             - name: Test
+              # 構文解析器を構築しないジョブ。解析器が無い環境で T1 のゴールデンが通り、
+              # T2 の項目が省略として明示されることを確かめる（backlog 025）。
               run: dotnet test srcnet.slnx -c Release --no-build
 
     parser:
@@ -65,7 +67,16 @@ jobs:
             - name: Build parser
               run: python tools/build_native.py --languages c cpp python go typescript tsx fsharp
 
+            - name: Check generated grammar versions
+              # 成果物へ記録する文法の版は native/sources.json を唯一の出典とする。
+              # 生成物が出典とずれたまま埋め込まれないようにする（backlog 020）。
+              run: python tools/generate_grammar_versions.py --check
+
             - name: Test with parser available
+              # SRCNET_REQUIRE_PARSER=1 により、解析器が無いことを理由に T2 のゴールデンを
+              # 省略した場合は失敗させる。「解析器が無いから通った」状態を成功にしない。
+              env:
+                  SRCNET_REQUIRE_PARSER: '1'
               run: dotnet test srcnet.slnx -c Release
 
     determinism:
