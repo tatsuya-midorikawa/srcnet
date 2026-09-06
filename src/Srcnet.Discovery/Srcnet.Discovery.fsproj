@@ -13,6 +13,11 @@
 
     <ItemGroup>
         <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
+        <!--
+            走査の 1 回読みの中で抽出（段 4）まで行う。後段に置くとファイルを二度開くため、
+            走査時間がほぼ倍になる（backlog 014）。
+        -->
+        <ProjectReference Include="../Srcnet.Extraction/Srcnet.Extraction.fsproj" />
         <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
     </ItemGroup>
 

@@ -17,6 +17,8 @@
 
     <ItemGroup>
         <ProjectReference Include="../Srcnet.Core/Srcnet.Core.fsproj" />
+        <!-- 文法の版はコンパイル時に埋め込んだ固定値を使う。実行時に native/ は読まない -->
+        <ProjectReference Include="../Srcnet.Extraction/Srcnet.Extraction.fsproj" />
         <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
     </ItemGroup>
 

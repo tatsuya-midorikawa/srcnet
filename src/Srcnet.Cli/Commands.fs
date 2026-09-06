@@ -15,6 +15,7 @@ open Srcnet.Core.Graph
 open Srcnet.Core.Ids
 open Srcnet.Core.Paths
 open Srcnet.Discovery
+open Srcnet.Extraction
 open Srcnet.Storage
 open Srcnet.Text
 
@@ -106,8 +107,26 @@ let private excludedOutputPath (rootFullPath: string) (outputDirectory: string) 
     | Ok path -> [| value path |]
     | Error _ -> Array.empty
 
+/// 成果物へ記録する文法の版。コンパイル時に埋め込んだ固定値だけを使い、
+/// 実行時に `native/` を読む経路は作らない（docs/security.md C-1、backlog 020）。
+let private grammarRecords: Manifest.GrammarRecord[] =
+  GrammarVersions.all
+  |> Array.map (fun entry ->
+    { Manifest.Language = entry.Language
+      Manifest.Version = entry.Version
+      Manifest.Sha256 = entry.Sha256 })
+
+/// 段階の番号から抽出段階を決める。`Args` が範囲を検証済みなので、既定へ落ちることはない。
+let private tierOf (value: int) =
+  match Model.Tier.ofCode (byte (max 0 (min 3 value))) with
+  | ValueSome tier -> tier
+  | ValueNone -> Model.Syntax
+
 let private walkOptions (arguments: Args.IndexArguments) (excluded: string[]) =
   { Walk.WalkOptions.defaults with
+      Extraction =
+        { Extractor.ExtractionOptions.defaults with
+            Tier = tierOf arguments.Tier }
       FollowSymbolicLinks = arguments.FollowSymbolicLinks
       RespectIgnoreFiles = arguments.RespectIgnoreFiles
       MaxDepth =
@@ -141,6 +160,30 @@ let private writeStaged
     Manifest.discardStaging outputDirectory
     reraise' ex
 
+let private toSymbolInput (symbol: Model.ExtractedSymbol) : Writer.SymbolInput =
+  { Kind = symbol.Kind
+    Name = symbol.Name
+    QualifiedName = symbol.QualifiedName
+    Parent = symbol.Parent
+    Ordinal = symbol.Ordinal
+    StartLine = symbol.StartLine
+    EndLine = symbol.EndLine
+    StartByte = symbol.StartByte
+    EndByte = symbol.EndByte
+    Flags = symbol.Flags }
+
+let private toReferenceInput (reference: Model.ExtractedReference) : Writer.ReferenceInput =
+  { Source = reference.Source
+    Kind = reference.Kind
+    Target = reference.Target
+    Qualifier = reference.Qualifier
+    Language = reference.Language
+    StartByte = reference.StartByte
+    EndByte = reference.EndByte
+    Line = reference.Line
+    Stage = reference.Stage
+    Confidence = reference.Confidence }
+
 let private toFileInput (file: Walk.DiscoveredFile) : Writer.FileInput =
   { Path = file.Path
     SizeBytes = file.SizeBytes
@@ -148,7 +191,9 @@ let private toFileInput (file: Walk.DiscoveredFile) : Writer.FileInput =
     EncodingCode = Encodings.toCode file.Encoding
     Flags = file.Flags
     LineCount = file.LineCount
-    ContentHash = file.Hash }
+    ContentHash = file.Hash
+    Symbols = file.Extraction.Symbols |> Array.map toSymbolInput
+    References = file.Extraction.References |> Array.map toReferenceInput }
 
 /// インデックス生成が成果物を残さずに終わる理由。
 /// 終了コードを分けるため、利用者の入力に起因するものと走査結果に起因するものを区別する。
@@ -157,6 +202,8 @@ type private IndexFailure =
   | PartialRefused of message: string
   /// 出力先が信頼できず、書き込みを行わなかった。
   | OutputRejected of message: string
+  /// ノード ID が衝突した。推測で片方を捨てず、公開せずに失敗させる。
+  | IdCollision of message: string
 
 module private IndexFailure =
 
@@ -164,6 +211,7 @@ module private IndexFailure =
     match failure with
     | PartialRefused text -> text
     | OutputRejected text -> text
+    | IdCollision text -> text
 
 /// 走査結果からセグメントを書き、成果物を公開する。
 ///
@@ -200,6 +248,16 @@ let private publishIndex
   // 切替の直前で必ず確認する。docs/query-and-cli.md 2.2 の終了コード 5 に対応する。
   cancellation.ThrowIfCancellationRequested()
 
+  // ID の衝突は推測で片方を捨てず、公開せずに失敗させる（docs/graph-model.md 4.2）。
+  if result.IdCollisions > 0 then
+    Manifest.discardStaging trustedOutput
+
+    Error(
+      IdCollision
+        $"ノード ID が {result.IdCollisions} 件衝突したため、成果物を公開しませんでした"
+    )
+  else
+
   let generation = Manifest.generationOf result.Segments
 
   let manifest: Manifest.Manifest =
@@ -212,14 +270,21 @@ let private publishIndex
         { FollowSymbolicLinks = options.FollowSymbolicLinks
           RespectIgnoreFiles = options.RespectIgnoreFiles
           MaxDepth = options.MaxDepth
-          MaxFileSizeBytes = options.MaxFileSizeBytes }
+          MaxFileSizeBytes = options.MaxFileSizeBytes
+          Tier = int (Model.Tier.toCode walk.AppliedTier)
+          ParserAvailable = walk.ParserAvailable
+          Grammars = grammarRecords }
       Counts =
         { Nodes = result.NodeCount
           Edges = result.EdgeCount
           Strings = result.StringCount
           StringBytes = result.StringBytes
           Directories = walk.Directories.Length
-          Files = walk.Files.Length }
+          Files = walk.Files.Length
+          Symbols = result.SymbolCount
+          ReferenceCandidates = result.ReferenceCount
+          NodeKinds = result.NodeKinds
+          EdgeKinds = result.EdgeKinds }
       Segments = Manifest.qualify generation result.Segments
       Diagnostics = diagnosticCounts diagnostics }
 
@@ -238,7 +303,7 @@ let private buildIndex
   (allowPartial: bool)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
-  : Task<Result<Manifest.Manifest, IndexFailure>> =
+  : Task<Result<struct (Manifest.Manifest * Walk.TierCounts), IndexFailure>> =
   task {
     let! walk = Walk.run rootFullPath options diagnostics cancellation
 
@@ -249,8 +314,96 @@ let private buildIndex
             "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください"
         )
     else
-      return publishIndex outputDirectory repository options walk diagnostics cancellation
+      return
+        publishIndex outputDirectory repository options walk diagnostics cancellation
+        |> Result.map (fun manifest -> struct (manifest, walk.Tiers))
   }
+
+/// 生成結果を報告し、終了コードを決める。
+///
+/// `task { }` の中で分岐と `return` が増えるとステート マシンを静的にコンパイルできず、
+/// 遅い動的実装へ落ちる。同期処理としてここへ分離する。
+let private reportIndex
+  (arguments: Args.IndexArguments)
+  (diagnostics: DiagnosticSink)
+  (outcome: Result<struct (Manifest.Manifest * Walk.TierCounts), IndexFailure>)
+  : int =
+  reportDiagnostics diagnostics
+
+  match outcome with
+  | Error failure ->
+    Terminal.errLine (IndexFailure.message failure)
+
+    match failure with
+    | OutputRejected _ -> ExitCode.UserError
+    | IdCollision _ -> ExitCode.InternalError
+    | PartialRefused _ -> ExitCode.CompletedWithDiagnostics
+  | Ok(struct (manifest, tiers)) ->
+    let appliedTier = manifest.Options.Tier
+
+    if arguments.Json then
+      writeJson (fun writer ->
+        writer.WriteString("command", "index")
+        writer.WriteString("repositoryId", manifest.RepositoryId)
+        writer.WriteBoolean("complete", manifest.Complete)
+        writer.WriteNumber("tier", appliedTier)
+        writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
+        writer.WriteNumber("nodes", manifest.Counts.Nodes)
+        writer.WriteNumber("edges", manifest.Counts.Edges)
+        writer.WriteNumber("directories", manifest.Counts.Directories)
+        writer.WriteNumber("files", manifest.Counts.Files)
+        writer.WriteNumber("symbols", manifest.Counts.Symbols)
+        writer.WriteNumber("referenceCandidates", manifest.Counts.ReferenceCandidates)
+        writer.WriteNumber("strings", manifest.Counts.Strings)
+        writer.WriteStartObject "extractedFiles"
+        writer.WriteNumber("tier2", tiers.Syntax)
+        writer.WriteNumber("tier1", tiers.LineOriented)
+        writer.WriteNumber("notExtracted", tiers.NotExtracted)
+        writer.WriteEndObject()
+        writer.WriteStartArray "nodeKinds"
+
+        for entry in manifest.Counts.NodeKinds do
+          writer.WriteStartObject()
+          writer.WriteString("kind", entry.Kind)
+          writer.WriteNumber("count", entry.Count)
+          writer.WriteEndObject()
+
+        writer.WriteEndArray()
+        writer.WriteStartArray "edgeKinds"
+
+        for entry in manifest.Counts.EdgeKinds do
+          writer.WriteStartObject()
+          writer.WriteString("kind", entry.Kind)
+          writer.WriteNumber("count", entry.Count)
+          writer.WriteEndObject()
+
+        writer.WriteEndArray()
+        writer.WriteNumber("diagnostics", diagnostics.Total))
+    else
+      Terminal.resultLine $"リポジトリ: {manifest.RepositoryId}"
+      Terminal.outLine $"抽出段階: T{appliedTier}"
+      Terminal.outLine $"ディレクトリ: {manifest.Counts.Directories}"
+      Terminal.outLine $"ファイル: {manifest.Counts.Files}"
+
+      Terminal.outLine
+        $"  T2 まで: {tiers.Syntax} / T1 まで: {tiers.LineOriented} / 抽出なし: {tiers.NotExtracted}"
+
+      Terminal.outLine $"ノード: {manifest.Counts.Nodes} (うちシンボル {manifest.Counts.Symbols})"
+
+      for entry in manifest.Counts.NodeKinds do
+        Terminal.outLine $"  {entry.Kind}: {entry.Count}"
+
+      Terminal.outLine $"エッジ: {manifest.Counts.Edges}"
+
+      for entry in manifest.Counts.EdgeKinds do
+        Terminal.outLine $"  {entry.Kind}: {entry.Count}"
+
+      Terminal.outLine $"参照候補: {manifest.Counts.ReferenceCandidates}"
+      Terminal.outLine $"文字列: {manifest.Counts.Strings} ({manifest.Counts.StringBytes} バイト)"
+      let completeText = if manifest.Complete then "はい" else "いいえ"
+      Terminal.outLine $"完全な走査: {completeText}"
+
+    if diagnostics.HasAny then ExitCode.CompletedWithDiagnostics else ExitCode.Success
 
 let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : Task<int> =
   task {
@@ -272,42 +425,10 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
     let options = walkOptions arguments excluded
     let diagnostics = DiagnosticSink()
 
-    match! buildIndex rootFullPath outputDirectory repository options arguments.AllowPartial diagnostics cancellation with
-    | Error failure ->
-      reportDiagnostics diagnostics
-      Terminal.errLine (IndexFailure.message failure)
+    let! outcome =
+      buildIndex rootFullPath outputDirectory repository options arguments.AllowPartial diagnostics cancellation
 
-      return
-        match failure with
-        | OutputRejected _ -> ExitCode.UserError
-        | PartialRefused _ -> ExitCode.CompletedWithDiagnostics
-    | Ok manifest ->
-      reportDiagnostics diagnostics
-
-      if arguments.Json then
-        writeJson (fun writer ->
-          writer.WriteString("command", "index")
-          writer.WriteString("repositoryId", manifest.RepositoryId)
-          writer.WriteBoolean("complete", manifest.Complete)
-          writer.WriteNumber("nodes", manifest.Counts.Nodes)
-          writer.WriteNumber("edges", manifest.Counts.Edges)
-          writer.WriteNumber("directories", manifest.Counts.Directories)
-          writer.WriteNumber("files", manifest.Counts.Files)
-          writer.WriteNumber("strings", manifest.Counts.Strings)
-          writer.WriteNumber("diagnostics", diagnostics.Total))
-      else
-        Terminal.resultLine $"リポジトリ: {manifest.RepositoryId}"
-        Terminal.outLine $"ディレクトリ: {manifest.Counts.Directories}"
-        Terminal.outLine $"ファイル: {manifest.Counts.Files}"
-        Terminal.outLine $"ノード: {manifest.Counts.Nodes}"
-        Terminal.outLine $"エッジ (CONTAINS): {manifest.Counts.Edges}"
-        Terminal.outLine $"文字列: {manifest.Counts.Strings} ({manifest.Counts.StringBytes} バイト)"
-        let completeText = if manifest.Complete then "はい" else "いいえ"
-        Terminal.outLine $"完全な走査: {completeText}"
-
-      return
-        if diagnostics.HasAny then ExitCode.CompletedWithDiagnostics
-        else ExitCode.Success
+    return reportIndex arguments diagnostics outcome
   }
 
 let private locateArtifact (explicitOutput: string voption) (rootPath: string voption) =
@@ -477,6 +598,11 @@ let private checkDeterminism
             RespectIgnoreFiles = manifest.Options.RespectIgnoreFiles
             MaxDepth = manifest.Options.MaxDepth
             MaxFileSizeBytes = manifest.Options.MaxFileSizeBytes
+            // 抽出段階も生成条件の一部である。段階が違えば成果物は当然変わるため、
+            // 記録された段階で再生成しなければ決定性を検証したことにならない。
+            Extraction =
+              { Extractor.ExtractionOptions.defaults with
+                  Tier = tierOf manifest.Options.Tier }
             // 並列度は所要時間だけを変え、出力を変えないことをここで検証する。
             Jobs = 1
             // 既存の成果物が解析ルート配下にある場合、初回と同じ条件になるよう除外する。
@@ -486,7 +612,7 @@ let private checkDeterminism
 
       match! buildIndex rootFullPath temporary repository options true diagnostics cancellation with
       | Error failure -> return Error(IndexFailure.message failure)
-      | Ok rebuilt ->
+      | Ok(struct (rebuilt, _)) ->
         return
           Ok(
             compareArtifacts

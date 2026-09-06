@@ -13,8 +13,9 @@ open Srcnet.Core
 /// 版が異なる成果物は読まずに拒否する。docs/requirements.md NFR-14 を参照。
 ///
 /// 2: 内容ハッシュとノード ID のハッシュを SHA-256 へ変更（ADR-8 の見直し）。
+/// 3: シンボル ノード、エッジ種別ごとの CSR、未解決の参照候補（`.refs`）を追加（M2）。
 [<Literal>]
-let FormatVersion = 2u
+let FormatVersion = 3u
 
 /// ヘッダー長。ペイロードの先頭を 64 バイト境界に揃えるためにこの値を選ぶ。
 [<Literal>]
@@ -33,6 +34,8 @@ type SegmentKind =
   | StringOffsets
   | AdjacencyCsr
   | IdMap
+  /// 未解決の参照候補。抽出（M2）と解決（M3）の間を繋ぐ。docs/extraction.md 5 を参照。
+  | References
 
 module SegmentKind =
 
@@ -44,6 +47,7 @@ module SegmentKind =
     | StringOffsets -> 4u
     | AdjacencyCsr -> 5u
     | IdMap -> 6u
+    | References -> 7u
 
   let ofCode code =
     match code with
@@ -53,6 +57,7 @@ module SegmentKind =
     | 4u -> ValueSome StringOffsets
     | 5u -> ValueSome AdjacencyCsr
     | 6u -> ValueSome IdMap
+    | 7u -> ValueSome References
     | _ -> ValueNone
 
 /// セグメント ヘッダー。すべての整数はリトル エンディアン。
@@ -134,7 +139,8 @@ let private checkInvariants (kind: SegmentKind) (header: Header) =
 
   match kind with
   | Nodes
-  | Files -> expect (uint32 RecordLength) (header.PrimaryCount * uint64 RecordLength) (ValueSome 0UL)
+  | Files
+  | References -> expect (uint32 RecordLength) (header.PrimaryCount * uint64 RecordLength) (ValueSome 0UL)
   | Strings -> expect 0u header.SecondaryCount ValueNone
   | StringOffsets -> expect 8u ((header.PrimaryCount + 1UL) * 8UL) ValueNone
   | AdjacencyCsr -> expect 0u ((header.PrimaryCount + 1UL) * 8UL + header.SecondaryCount * 4UL) ValueNone
@@ -243,3 +249,43 @@ module FileRecord =
 
   [<Literal>]
   let ContentHashLength = 32
+
+/// 未解決の参照候補。固定長を保ち、可変長は文字列 blob への参照にする。
+///
+/// M3 は大域シンボル表を外部マージ ソートで構築する。参照候補も同じ方式で流せるよう、
+/// レコード長を他の表と揃える。docs/storage.md 3、backlog 016 を参照。
+module ReferenceRecord =
+
+  /// 発生元ノードの密インデックス。
+  [<Literal>]
+  let SourceOffset = 0
+
+  /// 対象の生テキストへの文字列参照。
+  [<Literal>]
+  let TargetOffset = 4
+
+  /// 修飾ヒントへの文字列参照。囲みスコープや名前空間。
+  [<Literal>]
+  let QualifierOffset = 8
+
+  [<Literal>]
+  let LineOffset = 12
+
+  [<Literal>]
+  let StartByteOffset = 16
+
+  [<Literal>]
+  let EndByteOffset = 24
+
+  [<Literal>]
+  let LanguageOffset = 32
+
+  [<Literal>]
+  let EdgeKindOffset = 34
+
+  /// 根拠段階（docs/extraction.md 5.2）。未解決は 0。
+  [<Literal>]
+  let StageOffset = 35
+
+  [<Literal>]
+  let ConfidenceOffset = 36

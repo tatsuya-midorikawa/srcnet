@@ -96,18 +96,35 @@ type Node =
       else ValueSome { Owner = this.Owner; Handle = child }
 
   /// 文法が定める役割名で子を取り出す（`name`、`declarator` など）。
-  member this.ChildByField(field: string) =
-    let bytes = Text.Encoding.UTF8.GetBytes field
-    let pinned = Runtime.InteropServices.GCHandle.Alloc(bytes, Runtime.InteropServices.GCHandleType.Pinned)
+  ///
+  /// 役割名は呼び出しごとに変わらないため、UTF-8 バイト列を事前に用意しておけば
+  /// 変換の割り当てを避けられる。熱い経路ではこちらを使う。
+  member this.ChildByFieldUtf8(field: byte[]) =
+    let pinned = Runtime.InteropServices.GCHandle.Alloc(field, Runtime.InteropServices.GCHandleType.Pinned)
 
     try
       let child =
-        Native.ts_node_child_by_field_name(this.Checked, pinned.AddrOfPinnedObject(), uint32 bytes.Length)
+        Native.ts_node_child_by_field_name(this.Checked, pinned.AddrOfPinnedObject(), uint32 field.Length)
 
       if Native.toBool(Native.ts_node_is_null child) then ValueNone
       else ValueSome { Owner = this.Owner; Handle = child }
     finally
       pinned.Free()
+
+  /// 文法が定める役割名で子を取り出す（`name`、`declarator` など）。
+  member this.ChildByField(field: string) =
+    this.ChildByFieldUtf8(Text.Encoding.UTF8.GetBytes field)
+
+  /// ソースの指定位置から始まるバイト列が `prefix` と一致するか。
+  ///
+  /// 部分木全体を文字列化せずに接頭辞だけを見るためにある。`static` の判定で
+  /// 関数本体を丸ごと文字列化すると、大きな関数で無視できない割り当てが生じる。
+  member this.StartsWith(source: ReadOnlySpan<byte>, prefix: ReadOnlySpan<byte>) =
+    let start = this.StartByte
+    let finish = min this.EndByte source.Length
+
+    finish - start >= prefix.Length
+    && source.Slice(start, prefix.Length).SequenceEqual prefix
 
   /// ソースからこのノードに対応するバイト列を切り出す。
   /// 範囲は検証済みなので、呼び出し側で再度の境界検査は要らない。

@@ -31,6 +31,10 @@ type DiagnosticKind =
   | NodeIdCollision
   | IgnoreFileUnreadable
   | EntryLimitExceeded
+  /// 抽出の上限に達して結果を切り捨てた。
+  | ExtractionTruncated
+  /// 要求した抽出段階へ届かず、下の段階で実行した。
+  | ExtractionDegraded
 
 module DiagnosticKind =
 
@@ -51,6 +55,8 @@ module DiagnosticKind =
     | NodeIdCollision -> 13us
     | IgnoreFileUnreadable -> 14us
     | EntryLimitExceeded -> 15us
+    | ExtractionTruncated -> 16us
+    | ExtractionDegraded -> 17us
 
   let name kind =
     match kind with
@@ -69,6 +75,8 @@ module DiagnosticKind =
     | NodeIdCollision -> "node-id-collision"
     | IgnoreFileUnreadable -> "ignore-file-unreadable"
     | EntryLimitExceeded -> "entry-limit-exceeded"
+    | ExtractionTruncated -> "extraction-truncated"
+    | ExtractionDegraded -> "extraction-degraded"
 
   /// 成果物を信用できなくする診断か。これが 1 件でもあれば完全な成果物とは呼べない。
   let severity kind =
@@ -88,6 +96,10 @@ module DiagnosticKind =
     | NodeIdCollision -> Severity.Error
     | IgnoreFileUnreadable -> Severity.Warning
     | EntryLimitExceeded -> Severity.Warning
+    // 抽出の打ち切りは、そのファイルの結果が不完全であるという事実である。
+    | ExtractionTruncated -> Severity.Warning
+    // 縮退は条件の違いであって破損ではない。走査自体は完全に成立している。
+    | ExtractionDegraded -> Severity.Info
 
 [<Struct>]
 type Diagnostic =

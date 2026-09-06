@@ -15,8 +15,34 @@ open Srcnet.Core.Graph
 open Srcnet.Core.Ids
 open Srcnet.Core.Paths
 open Srcnet.Discovery
+open Srcnet.Extraction
 open Srcnet.Storage
 open Srcnet.Text
+
+/// 抽出結果を書き出し用の入力へ写す。製品側の `Commands` と同じ対応を使う。
+let private toSymbolInput (symbol: Model.ExtractedSymbol) : Writer.SymbolInput =
+  { Kind = symbol.Kind
+    Name = symbol.Name
+    QualifiedName = symbol.QualifiedName
+    Parent = symbol.Parent
+    Ordinal = symbol.Ordinal
+    StartLine = symbol.StartLine
+    EndLine = symbol.EndLine
+    StartByte = symbol.StartByte
+    EndByte = symbol.EndByte
+    Flags = symbol.Flags }
+
+let private toReferenceInput (reference: Model.ExtractedReference) : Writer.ReferenceInput =
+  { Source = reference.Source
+    Kind = reference.Kind
+    Target = reference.Target
+    Qualifier = reference.Qualifier
+    Language = reference.Language
+    StartByte = reference.StartByte
+    EndByte = reference.EndByte
+    Line = reference.Line
+    Stage = reference.Stage
+    Confidence = reference.Confidence }
 
 /// テストごとに使い捨てる一時ディレクトリ。
 type private Workspace() =
@@ -391,13 +417,16 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
       Files =
         result.Files
         |> Array.map (fun file ->
-          { Writer.Path = file.Path
-            Writer.SizeBytes = file.SizeBytes
-            Writer.Language = file.Language
-            Writer.EncodingCode = Encodings.toCode file.Encoding
-            Writer.Flags = file.Flags
-            Writer.LineCount = file.LineCount
-            Writer.ContentHash = file.Hash }) }
+          ({ Path = file.Path
+             SizeBytes = file.SizeBytes
+             Language = file.Language
+             EncodingCode = Encodings.toCode file.Encoding
+             Flags = file.Flags
+             LineCount = file.LineCount
+             ContentHash = file.Hash
+             Symbols = file.Extraction.Symbols |> Array.map toSymbolInput
+             References = file.Extraction.References |> Array.map toReferenceInput }
+          : Writer.FileInput)) }
 
   let written =
     Writer.write (Manifest.stagedSegmentsPath output) input diagnostics CancellationToken.None
@@ -414,14 +443,21 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
         { FollowSymbolicLinks = options.FollowSymbolicLinks
           RespectIgnoreFiles = options.RespectIgnoreFiles
           MaxDepth = options.MaxDepth
-          MaxFileSizeBytes = options.MaxFileSizeBytes }
+          MaxFileSizeBytes = options.MaxFileSizeBytes
+          Tier = int (Model.Tier.toCode result.AppliedTier)
+          ParserAvailable = result.ParserAvailable
+          Grammars = Array.empty }
       Counts =
         { Nodes = written.NodeCount
           Edges = written.EdgeCount
           Strings = written.StringCount
           StringBytes = written.StringBytes
           Directories = result.Directories.Length
-          Files = result.Files.Length }
+          Files = result.Files.Length
+          Symbols = written.SymbolCount
+          ReferenceCandidates = written.ReferenceCount
+          NodeKinds = written.NodeKinds
+          EdgeKinds = written.EdgeKinds }
       Segments = Manifest.qualify generation written.Segments
       Diagnostics = Array.empty }
 
@@ -461,14 +497,18 @@ let ``生成した成果物は検証を通る`` () =
   use workspace = new Workspace()
   buildCorpus workspace
   use output = new Workspace()
-  indexInto workspace output.Path 4 |> ignore
+  let manifest = indexInto workspace output.Path 4
 
   match Verify.run output.Path CancellationToken.None with
   | Error error -> failwith (Manifest.ManifestError.describe error)
   | Ok report ->
     Assert.Empty(report.Issues |> Array.map Verify.Issue.describe)
     Assert.True report.IsValid
-    Assert.Equal(7, report.SegmentsChecked)
+
+    // 文字列・オフセット・ファイル・ノード・参照候補・ID 表に加えて、
+    // エッジ種別ごとの前方・後方 CSR を書き出す。
+    let expectedSegments = 6 + 2 * manifest.Counts.EdgeKinds.Length
+    Assert.Equal(expectedSegments, report.SegmentsChecked)
 
 [<Fact>]
 let ``セグメントを改竄すると検証が失敗する`` () =
@@ -499,7 +539,7 @@ let ``形式版が非互換なマニフェストは拒否される`` () =
 
   File.WriteAllText(
     Path.Combine(output.Path, Manifest.FileName),
-    """{"manifestVersion":2,"formatVersion":999,"segments":[]}"""
+    $$"""{"manifestVersion":{{Manifest.ManifestVersion}},"formatVersion":999,"segments":[]}"""
   )
 
   match Manifest.read output.Path with
@@ -530,14 +570,26 @@ let ``統計は言語と符号化の内訳を返す`` () =
     Assert.Contains(statistics.Encodings, fun entry -> entry.Encoding = Encodings.Binary)
 
 [<Fact>]
-let ``ノード数は リポジトリ + ディレクトリ + ファイル に一致する`` () =
+let ``ノード数は 構造ノードとシンボルの合計以上になる`` () =
   use workspace = new Workspace()
   buildCorpus workspace
   use output = new Workspace()
   let manifest = indexInto workspace output.Path 4
 
-  Assert.Equal(1 + manifest.Counts.Directories + manifest.Counts.Files, manifest.Counts.Nodes)
-  Assert.Equal(manifest.Counts.Nodes - 1, manifest.Counts.Edges)
+  // 構成シンボルはファイルに属さないため、ノード数は構造ノードとシンボルの合計を上回り得る。
+  let structural =
+    1 + manifest.Counts.Directories + manifest.Counts.Files + manifest.Counts.Symbols
+
+  Assert.True(manifest.Counts.Nodes >= structural)
+
+  // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張る。
+  let contains =
+    manifest.Counts.EdgeKinds
+    |> Array.tryFind (fun entry -> entry.Kind = EdgeKind.name Contains)
+
+  match contains with
+  | Some entry -> Assert.Equal(manifest.Counts.Nodes - 1, entry.Count)
+  | None -> failwith "CONTAINS の件数が記録されていません"
 
 [<Fact>]
 let ``空のリポジトリでも成果物を生成できる`` () =
@@ -801,13 +853,16 @@ let ``書き出し中の取り消しは成果物を残さない`` () =
       Files =
         result.Files
         |> Array.map (fun file ->
-          { Writer.Path = file.Path
-            Writer.SizeBytes = file.SizeBytes
-            Writer.Language = file.Language
-            Writer.EncodingCode = Encodings.toCode file.Encoding
-            Writer.Flags = file.Flags
-            Writer.LineCount = file.LineCount
-            Writer.ContentHash = file.Hash }) }
+          ({ Path = file.Path
+             SizeBytes = file.SizeBytes
+             Language = file.Language
+             EncodingCode = Encodings.toCode file.Encoding
+             Flags = file.Flags
+             LineCount = file.LineCount
+             ContentHash = file.Hash
+             Symbols = file.Extraction.Symbols |> Array.map toSymbolInput
+             References = file.Extraction.References |> Array.map toReferenceInput }
+          : Writer.FileInput)) }
 
   use cancellation = new CancellationTokenSource()
   // 取り消し済みのトークンで開始する。時間に依存せず決定的に検証できる。
@@ -875,13 +930,16 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
       Files =
         walked.Files
         |> Array.map (fun file ->
-          { Writer.Path = file.Path
-            Writer.SizeBytes = file.SizeBytes
-            Writer.Language = file.Language
-            Writer.EncodingCode = Encodings.toCode file.Encoding
-            Writer.Flags = file.Flags
-            Writer.LineCount = file.LineCount
-            Writer.ContentHash = file.Hash }) }
+          ({ Path = file.Path
+             SizeBytes = file.SizeBytes
+             Language = file.Language
+             EncodingCode = Encodings.toCode file.Encoding
+             Flags = file.Flags
+             LineCount = file.LineCount
+             ContentHash = file.Hash
+             Symbols = file.Extraction.Symbols |> Array.map toSymbolInput
+             References = file.Extraction.References |> Array.map toReferenceInput }
+          : Writer.FileInput)) }
 
   let written =
     Writer.write (Manifest.stagedSegmentsPath output.Path) input diagnostics CancellationToken.None
@@ -898,14 +956,21 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
         { FollowSymbolicLinks = false
           RespectIgnoreFiles = true
           MaxDepth = Walk.WalkOptions.defaults.MaxDepth
-          MaxFileSizeBytes = Walk.WalkOptions.defaults.MaxFileSizeBytes }
+          MaxFileSizeBytes = Walk.WalkOptions.defaults.MaxFileSizeBytes
+          Tier = int (Model.Tier.toCode walked.AppliedTier)
+          ParserAvailable = walked.ParserAvailable
+          Grammars = Array.empty }
       Counts =
         { Nodes = written.NodeCount
           Edges = written.EdgeCount
           Strings = written.StringCount
           StringBytes = written.StringBytes
           Directories = walked.Directories.Length
-          Files = walked.Files.Length }
+          Files = walked.Files.Length
+          Symbols = written.SymbolCount
+          ReferenceCandidates = written.ReferenceCount
+          NodeKinds = written.NodeKinds
+          EdgeKinds = written.EdgeKinds }
       Segments = Manifest.qualify generation written.Segments
       Diagnostics = Array.empty }
 

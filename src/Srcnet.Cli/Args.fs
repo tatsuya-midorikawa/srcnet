@@ -11,6 +11,10 @@ open Srcnet.Core.Ids
 [<Literal>]
 let DefaultOutputDirectoryName = ".srcnet"
 
+/// 抽出段階の既定値。docs/query-and-cli.md 2.1 の `--tier` に対応する。
+[<Literal>]
+let DefaultTier = 2
+
 type IndexArguments =
   { RootPath: string
     OutputDirectory: string voption
@@ -18,6 +22,8 @@ type IndexArguments =
     Jobs: int voption
     MaxFileSizeBytes: int64 voption
     MaxDepth: int voption
+    /// 抽出段階（0..2）。既定は 2。docs/query-and-cli.md 2.1 を参照。
+    Tier: int
     RespectIgnoreFiles: bool
     FollowSymbolicLinks: bool
     AllowPartial: bool
@@ -50,6 +56,8 @@ type ParseError =
   | InvalidValue of option: string * value: string
   | UnexpectedArgument of value: string
   | MissingArgument of name: string
+  /// 構文としては正しいが、この版では実装していない値。
+  | UnsupportedValue of option: string * value: string * detail: string
 
 module ParseError =
 
@@ -62,6 +70,7 @@ module ParseError =
     | InvalidValue(option, value) -> $"オプション {option} の値が不正です: {value}"
     | UnexpectedArgument value -> $"余分な引数です: {value}"
     | MissingArgument name -> $"引数 {name} が必要です"
+    | UnsupportedValue(option, value, detail) -> $"オプション {option} の値 {value} は未対応です: {detail}"
 
 /// `4096`、`64KiB`、`1GB` のようなサイズ表記を解析する。
 /// 単位は 2 進接頭辞（KiB/MiB/GiB）と 10 進接頭辞（KB/MB/GB）の両方を受け付ける。
@@ -254,13 +263,34 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     let followSymlinks = reader.Flag "--follow-symlinks"
     let allowPartial = reader.Flag "--allow-partial"
 
+    // `--tier` は段階の番号をそのまま取る。3（ビルド構成に基づく解決）は未実装であり、
+    // 内部エラーではなく利用者エラーとして拒否する（backlog 021）。
+    let tier =
+      match reader.Value "--tier" with
+      | ValueNone -> ValueNone
+      | ValueSome text ->
+        match tryParseInt text with
+        | ValueSome 3 ->
+          ValueSome(
+            Error(
+              UnsupportedValue(
+                "--tier",
+                text,
+                "T3 はビルド構成に基づく解決であり、この版では実装していません"
+              )
+            )
+          )
+        | ValueSome value when value >= 0 && value <= 2 -> ValueSome(Ok value)
+        | ValueSome _
+        | ValueNone -> ValueSome(Error(InvalidValue("--tier", text)))
+
     let errorOf (value: Result<'T, ParseError> voption) =
       match value with
       | ValueSome(Error error) -> Some error
       | ValueSome(Ok _)
       | ValueNone -> None
 
-    match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize ] with
+    match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize; errorOf tier ] with
     | Some error -> Error error
     | None ->
       if positional.Count = 0 then Error(MissingArgument "<path>")
@@ -279,6 +309,10 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               Jobs = unwrap jobs
               MaxFileSizeBytes = unwrap maxFileSize
               MaxDepth = unwrap maxDepth
+              Tier =
+                match unwrap tier with
+                | ValueSome value -> value
+                | ValueNone -> DefaultTier
               RespectIgnoreFiles = not noGitignore
               FollowSymbolicLinks = followSymlinks
               AllowPartial = allowPartial
@@ -335,6 +369,7 @@ let usage =
       "  --jobs <n>             並列度。結果には影響しない"
       "  --max-file-size <size> 1 ファイルの処理上限 (例 64MiB)"
       "  --max-depth <n>        走査する階層の深さ上限"
+      "  --tier <0|1|2>         抽出段階 (0 走査のみ / 1 行指向 / 2 構文。既定 2)"
       "  --no-gitignore         .gitignore / .srcnetignore を無視する"
       "  --follow-symlinks      シンボリック リンクを追跡する (ルート外は拒否)"
       "  --allow-partial        不完全な走査結果での上書きを許可する"

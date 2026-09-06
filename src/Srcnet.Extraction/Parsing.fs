@@ -70,16 +70,21 @@ let supports (language: Language) =
 
 /// UTF-8 のソースを解析して構文木を返す。
 ///
+/// `length` は `source` のうち実際に内容が入っている長さ。バッファを再利用する
+/// 呼び出し側が、余りを含めずに解析できるようにするために分けて受け取る。
+///
 /// 戻り値の木は破棄すること。木は原文を保持しないため、ノードの本文を得るには
 /// 呼び出し側が同じ `source` を保持しておく必要がある。
-let parse
+let parseRange
   (language: Language)
   (source: byte[])
+  (length: int)
   (timeoutMicroseconds: uint64)
   (cancellation: CancellationToken)
   : Result<SyntaxTree.Tree, ParseFailure> =
 
-  if source.Length > MaxSourceBytes then Error(SourceTooLarge source.Length)
+  if length < 0 || length > source.Length then invalidArg (nameof length) "解析長がバッファ長を超えています"
+  elif length > MaxSourceBytes then Error(SourceTooLarge length)
   elif cancellation.IsCancellationRequested then Error Cancelled
   else
 
@@ -119,13 +124,13 @@ let parse
     Native.ts_parser_set_cancellation_flag(parser, flag)
 
     let tree =
-      Native.ts_parser_parse_string(parser, 0n, pinned.AddrOfPinnedObject(), uint32 source.Length)
+      Native.ts_parser_parse_string(parser, 0n, pinned.AddrOfPinnedObject(), uint32 length)
 
     if tree = 0n then
       // 木が返らないのは取り消しか時間切れのいずれか。区別して報告する。
       if cancellation.IsCancellationRequested then Error Cancelled else Error TimedOut
     else
-      Ok(new SyntaxTree.Tree(tree, source.Length))
+      Ok(new SyntaxTree.Tree(tree, length))
   finally
     // 登録を先に解除してから、フラグの領域を解放する。逆順にすると
     // 解放済み領域へ書き込む競合が起こり得る。
@@ -133,6 +138,15 @@ let parse
     pinned.Free()
     Marshal.FreeHGlobal flag
     Native.ts_parser_delete parser
+
+/// UTF-8 のソース全体を解析して構文木を返す。
+let parse
+  (language: Language)
+  (source: byte[])
+  (timeoutMicroseconds: uint64)
+  (cancellation: CancellationToken)
+  : Result<SyntaxTree.Tree, ParseFailure> =
+  parseRange language source source.Length timeoutMicroseconds cancellation
 
 /// 既定の上限で解析する。
 let parseDefault (language: Language) (source: byte[]) (cancellation: CancellationToken) =

@@ -17,6 +17,7 @@ open Srcnet.Core
 open Srcnet.Core.Diagnostics
 open Srcnet.Core.Graph
 open Srcnet.Core.Paths
+open Srcnet.Extraction
 open Srcnet.Text
 
 type WalkOptions =
@@ -32,7 +33,9 @@ type WalkOptions =
     /// 階層を問わず除外するディレクトリ名。
     ExcludedDirectoryNames: string[]
     /// 除外する論理パス。生成物の出力先が解析ルート配下にある場合に使う。
-    ExcludedPaths: string[] }
+    ExcludedPaths: string[]
+    /// 抽出の条件。走査の 1 回読みの中で段 4 まで行う（backlog 014）。
+    Extraction: Extractor.ExtractionOptions }
 
 module WalkOptions =
 
@@ -51,7 +54,8 @@ module WalkOptions =
       MaxFileSizeBytes = DefaultMaxFileSizeBytes
       Jobs = Environment.ProcessorCount
       ExcludedDirectoryNames = [| ".git"; ".hg"; ".svn" |]
-      ExcludedPaths = Array.empty }
+      ExcludedPaths = Array.empty
+      Extraction = Extractor.ExtractionOptions.defaults }
 
 type DiscoveredFile =
   { Path: LogicalPath
@@ -63,7 +67,18 @@ type DiscoveredFile =
     Encoding: Encodings.DetectedEncoding
     /// 構造規則を満たした符号化候補。単一に確定した場合は空。
     EncodingCandidates: Encodings.DetectedEncoding[]
-    LineCount: int }
+    LineCount: int
+    /// このファイルの抽出結果。段階 0 では空。
+    Extraction: Model.ExtractedFile }
+
+/// 段階ごとの処理件数。`index` の出力へそのまま載せる（backlog 021）。
+type TierCounts =
+  { /// T2 まで到達したファイル数。
+    Syntax: int
+    /// T1 で止まったファイル数。
+    LineOriented: int
+    /// 抽出しなかったファイル数（バイナリ、上限超過、読み取り失敗）。
+    NotExtracted: int }
 
 type WalkResult =
   { /// 論理パスの序数昇順。ルートは含まない。
@@ -71,7 +86,12 @@ type WalkResult =
     /// 論理パスの序数昇順。
     Files: DiscoveredFile[]
     /// 上限や権限による打ち切りがなく、ツリー全体を走査できたか。
-    Complete: bool }
+    Complete: bool
+    /// 実際に到達した最も高い段階。要求した段階と一致しない場合は縮退している。
+    AppliedTier: Model.Tier
+    /// 構文解析器を利用できたか。
+    ParserAvailable: bool
+    Tiers: TierCounts }
 
 [<Literal>]
 let private GitIgnoreFileName = ".gitignore"
@@ -237,6 +257,9 @@ let run
     let mutable drained = false
     let mutable entryCount = 0
     let mutable truncated = 0
+    let mutable syntaxFiles = 0
+    let mutable lineOrientedFiles = 0
+    let mutable notExtractedFiles = 0
 
     let enqueue item =
       Interlocked.Increment &pending |> ignore
@@ -260,7 +283,7 @@ let run
       // 別ディレクトリを同一と誤認するより、拒否して診断するほうが安全側に倒れる。
       candidate = rootReal || candidate.StartsWith(rootPrefix, StringComparison.Ordinal)
 
-    let processDirectory (item: WorkItem) (reader: Content.ContentReader) =
+    let processDirectory (item: WorkItem) (reader: Content.ContentReader) (extractor: Extractor.Extractor) =
       let entries =
         try
           DirectoryInfo(item.Physical).GetFileSystemInfos()
@@ -395,15 +418,51 @@ let run
 
                   diagnostics.Add(AmbiguousEncoding, childValue, $"複数の符号化に適合します ({names})")
 
+                let discoveredFlags = pathFlags ||| linkFlag ||| summary.Flags
+
+                // 抽出は読み取りと同じ 1 回の走査の中で行う。ここを後段へ移すと
+                // ファイルを二度開くことになり、走査時間がほぼ倍になる（backlog 014）。
+                let extraction =
+                  if summary.Decoded && summary.DecodedLength > 0 then
+                    extractor.Extract(
+                      language,
+                      childValue,
+                      reader.Decoded,
+                      summary.DecodedLength,
+                      discoveredFlags,
+                      cancellation
+                    )
+                  elif summary.Decoded then Model.ExtractedFile.empty extractor.Options.Tier
+                  elif discoveredFlags.HasFlag NodeFlags.Binary then
+                    Model.ExtractedFile.skipped Model.Structure Model.NotText
+                  else
+                    // 復号できない符号化では抽出しない。判定した符号化は成果物に残る。
+                    Model.ExtractedFile.skipped
+                      Model.Structure
+                      (Model.ParseUnavailable $"{Encodings.name summary.Encoding} を復号できません")
+
+                match extraction.Tier with
+                | Model.Syntax -> Interlocked.Increment &syntaxFiles |> ignore
+                | Model.LineOriented -> Interlocked.Increment &lineOrientedFiles |> ignore
+                | Model.Structure
+                | Model.BuildAware -> Interlocked.Increment &notExtractedFiles |> ignore
+
+                if extraction.Truncated then
+                  diagnostics.Add(ExtractionTruncated, childValue, "抽出の上限に達したため打ち切りました")
+
                 files.Add
                   { Path = childPath
                     SizeBytes = fileInfo.Length
                     Language = language
-                    Flags = pathFlags ||| linkFlag ||| summary.Flags
+                    Flags = discoveredFlags ||| extraction.FileFlags
                     Hash = summary.Hash
                     Encoding = summary.Encoding
                     EncodingCandidates = summary.EncodingCandidates
-                    LineCount = summary.LineCount }
+                    LineCount =
+                      match extraction.LineCount with
+                      | ValueSome count -> count
+                      | ValueNone -> summary.LineCount
+                    Extraction = extraction }
               | Error error ->
                 let kind =
                   match error with
@@ -414,6 +473,8 @@ let run
 
                 diagnostics.Add(kind, childValue, Content.ReadError.describe error)
 
+                Interlocked.Increment &notExtractedFiles |> ignore
+
                 files.Add
                   { Path = childPath
                     SizeBytes = fileInfo.Length
@@ -422,7 +483,8 @@ let run
                     Hash = emptyHash
                     Encoding = Encodings.Undetermined
                     EncodingCandidates = Array.empty
-                    LineCount = 0 }
+                    LineCount = 0
+                    Extraction = Model.ExtractedFile.empty Model.Structure }
 
       for entry in entries do
         cancellation.ThrowIfCancellationRequested()
@@ -439,7 +501,13 @@ let run
 
     let worker () =
       task {
-        use reader = new Content.ContentReader(options.MaxFileSizeBytes)
+        // 抽出しない段階では本文を保持しない。保持量が走査の常駐メモリを決める。
+        let retained =
+          if options.Extraction.Tier = Model.Structure then 0L
+          else options.Extraction.MaxExtractionBytes
+
+        use reader = new Content.ContentReader(options.MaxFileSizeBytes, retained)
+        let extractor = Extractor.Extractor options.Extraction
         let mutable running = true
 
         while running do
@@ -449,7 +517,7 @@ let run
             match queue.TryDequeue() with
             | true, item ->
               try
-                processDirectory item reader
+                processDirectory item reader extractor
               finally
                 completeOne ()
             | false, _ -> if Volatile.Read &drained then running <- false
@@ -510,8 +578,35 @@ let run
       && diagnostics.ErrorCount = 0
       && not (incompleteKinds |> Array.exists (fun kind -> Array.contains kind observed))
 
+    // 縮退の診断は実行あたり 1 回にまとめる。ファイルごとに出すと、数千万ファイルで
+    // 同じ内容が繰り返される（backlog 021）。
+    let parserAvailable = Parsing.isAvailable.Value
+
+    let appliedTier =
+      if options.Extraction.Tier = Model.Structure then Model.Structure
+      elif Volatile.Read &syntaxFiles > 0 then Model.Syntax
+      elif Model.Tier.rank options.Extraction.Tier >= Model.Tier.rank Model.Syntax && not parserAvailable then
+        Model.LineOriented
+      else Model.LineOriented
+
+    if
+      Model.Tier.rank options.Extraction.Tier >= Model.Tier.rank Model.Syntax
+      && not parserAvailable
+    then
+      diagnostics.Add(
+        ExtractionDegraded,
+        "",
+        "構文解析器を利用できないため、抽出は T1（行指向）までで実行しました"
+      )
+
     return
       { Directories = orderedDirectories
         Files = orderedFiles
-        Complete = complete }
+        Complete = complete
+        AppliedTier = appliedTier
+        ParserAvailable = parserAvailable
+        Tiers =
+          { Syntax = Volatile.Read &syntaxFiles
+            LineOriented = Volatile.Read &lineOrientedFiles
+            NotExtracted = Volatile.Read &notExtractedFiles } }
   }

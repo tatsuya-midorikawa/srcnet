@@ -22,8 +22,12 @@ type Issue =
   | ReferenceOutOfRange of name: string * detail: string
   | OrderViolation of name: string * detail: string
   | UnknownNodeKind of name: string * code: byte
+  | UnknownEdgeKind of name: string * code: byte
   /// セグメント名から成果物内のパスへ変換できなかった。
   | SegmentPathRejected of name: string * detail: string
+  /// 成果物を生成した文法の版が、現在の実行ファイルの版と違う。
+  /// 破損ではないため失敗にはしないが、再生成で結果が変わり得ることを伝える。
+  | GrammarVersionDiffers of language: string * recorded: string * current: string
 
 module Issue =
 
@@ -38,7 +42,10 @@ module Issue =
     | ReferenceOutOfRange(name, detail) -> $"{name}: 参照が範囲外です ({detail})"
     | OrderViolation(name, detail) -> $"{name}: 整列の不変条件が破れています ({detail})"
     | UnknownNodeKind(name, code) -> $"{name}: 未知のノード種別コード {code} です"
+    | UnknownEdgeKind(name, code) -> $"{name}: 未知のエッジ種別コード {code} です"
     | SegmentPathRejected(_, detail) -> detail
+    | GrammarVersionDiffers(language, recorded, current) ->
+      $"{language} の文法が記録された {recorded} ではなく {current} です。再生成すると結果が変わり得ます"
 
 type Report =
   { Issues: Issue[]
@@ -248,6 +255,58 @@ let private checkIdMap (name: string) (segment: Reader.MappedSegment) (nodeCount
 
       index <- index + 1
 
+/// 参照候補の件数・文字列参照・種別コードを検証する。
+let private checkReferences
+  (name: string)
+  (segment: Reader.MappedSegment)
+  (nodeCount: int)
+  (stringCount: int)
+  (issues: ResizeArray<Issue>)
+  =
+  let payload = segment.Payload
+  let count = int segment.Header.PrimaryCount
+  let expectedLength = count * Format.RecordLength
+
+  if payload.Length <> expectedLength then
+    issues.Add(LengthMismatch(name, int64 expectedLength, int64 payload.Length))
+  else
+    let mutable index = 0
+    let mutable reported = false
+
+    while index < count && not reported do
+      let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
+      let source = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4))
+      let target = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4))
+      let qualifier = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4))
+      let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
+
+      if source >= uint32 nodeCount then
+        issues.Add(ReferenceOutOfRange(name, $"参照 {index} の発生元 {source} がノード数 {nodeCount} を超えています"))
+        reported <- true
+      elif target >= uint32 stringCount || qualifier >= uint32 stringCount then
+        issues.Add(ReferenceOutOfRange(name, $"参照 {index} の文字列参照が {stringCount} 件を超えています"))
+        reported <- true
+      elif edgeCode = 0uy || edgeCode > EdgeKind.toCode MemberOf then
+        issues.Add(UnknownEdgeKind(name, edgeCode))
+        reported <- true
+
+      index <- index + 1
+
+/// 成果物へ記録された文法の版と、現在の実行ファイルの版を突き合わせる。
+///
+/// 違いは破損ではなく条件の違いである。失敗にはせず、再生成で結果が変わり得ることを伝える
+/// （backlog 020）。
+let private checkGrammars (manifest: Manifest.Manifest) (issues: ResizeArray<Issue>) =
+  for recorded in manifest.Options.Grammars do
+    match Srcnet.Extraction.GrammarVersions.tryFind recorded.Language with
+    | ValueNone -> issues.Add(GrammarVersionDiffers(recorded.Language, recorded.Version, "（同梱していません）"))
+    | ValueSome current ->
+      if
+        not (String.Equals(current.Version, recorded.Version, StringComparison.Ordinal))
+        || not (String.Equals(current.Sha256, recorded.Sha256, StringComparison.Ordinal))
+      then
+        issues.Add(GrammarVersionDiffers(recorded.Language, recorded.Version, current.Version))
+
 let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (cancellation: CancellationToken) =
   let issues = ResizeArray<Issue>()
   let mutable bytesChecked = 0L
@@ -304,9 +363,18 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
     openSegment "stroffsets" (fun name segment -> checkStringOffsets name segment issues)
     openSegment "nodes" (fun name segment -> checkNodes name segment manifest.Counts.Strings manifest.Counts.Files issues)
     openSegment "files" (fun name segment -> checkFiles name segment manifest.Counts.Strings issues)
-    openSegment $"edges.{EdgeKind.name Contains}" (fun name segment -> checkCsr name segment manifest.Counts.Nodes issues)
-    openSegment $"redges.{EdgeKind.name Contains}" (fun name segment -> checkCsr name segment manifest.Counts.Nodes issues)
+
+    // エッジ種別ごとに前方・後方の CSR を持つ。種別が増えても検査を取りこぼさないよう、
+    // マニフェストが数えている種別をそのまま辿る。
+    for entry in manifest.Counts.EdgeKinds do
+      openSegment $"edges.{entry.Kind}" (fun name segment -> checkCsr name segment manifest.Counts.Nodes issues)
+      openSegment $"redges.{entry.Kind}" (fun name segment -> checkCsr name segment manifest.Counts.Nodes issues)
+
+    openSegment "refs" (fun name segment ->
+      checkReferences name segment manifest.Counts.Nodes manifest.Counts.Strings issues)
+
     openSegment "idmap" (fun name segment -> checkIdMap name segment manifest.Counts.Nodes issues)
+    checkGrammars manifest issues
 
   { Issues = issues.ToArray()
     SegmentsChecked = checkedSegments

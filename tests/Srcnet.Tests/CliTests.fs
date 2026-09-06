@@ -126,6 +126,7 @@ let private indexOptions (root: string) : Args.IndexArguments =
     Jobs = ValueSome 1
     MaxFileSizeBytes = ValueNone
     MaxDepth = ValueNone
+    Tier = Args.DefaultTier
     RespectIgnoreFiles = true
     FollowSymbolicLinks = false
     AllowPartial = false

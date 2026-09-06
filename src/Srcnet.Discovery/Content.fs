@@ -40,7 +40,12 @@ type ContentSummary =
     EncodingCandidates: Encodings.DetectedEncoding[]
     /// 改行種別によらない論理的な行数。判定できない場合は 0。
     LineCount: int
-    Flags: NodeFlags }
+    Flags: NodeFlags
+    /// 抽出へ渡せる復号済み UTF-8 の長さ。渡せない場合は 0。
+    /// 実体は `ContentReader.Decoded` にあり、次の `Read` まで有効である。
+    DecodedLength: int
+    /// 抽出へ渡せる本文を保持しているか。復号できない符号化では false。
+    Decoded: bool }
 
 let private isLineFeed = 0x0Auy
 let private isCarriageReturn = 0x0Duy
@@ -49,13 +54,28 @@ let private crlf = [| 0x0Duy; 0x0Auy |]
 /// ワーカーごとに 1 つ持つ読み取り器。バッファとハッシュ器を再利用し、
 /// ファイルごとの割り当てをダイジェストの 32 バイトだけに抑える。
 [<Sealed>]
-type ContentReader(maxFileSizeBytes: int64) =
+type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
   let hasher = new Hashing.Hasher()
   let buffer = ArrayPool<byte>.Shared.Rent ReadBufferBytes
   let prefix = Array.zeroCreate<byte> Encodings.DetectionPrefixBytes
+  // 抽出へ渡す本文。走査の 1 回読みで貯め、ファイルを二度開かないためにある
+  // （backlog 014）。ワーカーごとに 1 つで、次の `Read` まで有効。
+  let mutable retained: byte[] = Array.Empty()
+  // 変換が要る符号化のための書き出し先。UTF-8 のファイルでは使わない。
+  let mutable converted: byte[] = Array.Empty()
+  let mutable decodedIsConverted = false
   let mutable disposed = false
 
+  /// 本文を保持しない読み取り器。段階 0（走査のみ）で使う。
+  new(maxFileSizeBytes: int64) = new ContentReader(maxFileSizeBytes, 0L)
+
   member _.MaxFileSizeBytes = maxFileSizeBytes
+
+  member _.MaxRetainedBytes = maxRetainedBytes
+
+  /// 復号済み UTF-8 の本文。有効な長さは直前の `Read` が返した `DecodedLength`。
+  /// 次の `Read` で上書きされるため、結果へ参照を残してはならない。
+  member _.Decoded = if decodedIsConverted then converted else retained
 
   /// ファイルを読み、内容ハッシュ・符号化・行数を返す。
   ///
@@ -74,7 +94,9 @@ type ContentReader(maxFileSizeBytes: int64) =
           Encoding = Encodings.Utf8
           EncodingCandidates = Array.empty
           LineCount = 0
-          Flags = NodeFlags.None }
+          Flags = NodeFlags.None
+          DecodedLength = 0
+          Decoded = true }
     else
 
     let openOptions =
@@ -95,6 +117,16 @@ type ContentReader(maxFileSizeBytes: int64) =
       else
 
       hasher.Reset()
+
+      // 抽出へ渡す本文を保持するかは、開始前のサイズで決める。判定を読み取り中に
+      // 変えると、途中まで貯めたバッファを捨てることになる。
+      let retaining = maxRetainedBytes > 0L && length <= maxRetainedBytes
+
+      if retaining && int64 retained.Length < length then
+        if retained.Length > 0 then ArrayPool<byte>.Shared.Return retained
+        retained <- ArrayPool<byte>.Shared.Rent(int length)
+
+      let mutable retainedLength = 0
       let mutable prefixLength = 0
       let mutable total = 0L
       let mutable lineFeeds = 0
@@ -121,6 +153,14 @@ type ContentReader(maxFileSizeBytes: int64) =
             overflowed <- true
             reading <- false
           else
+
+          // 保持は上限内でのみ行う。読み取り中に伸びたファイルではバッファを超えるため、
+          // 超えた時点で保持をあきらめ、ハッシュと行数の計数だけを続ける。
+          if retaining && retainedLength >= 0 then
+            if retainedLength + read <= retained.Length then
+              span.CopyTo(Span(retained, retainedLength, read))
+              retainedLength <- retainedLength + read
+            else retainedLength <- -1
 
           if prefixLength < prefix.Length then
             let take = min (prefix.Length - prefixLength) read
@@ -177,12 +217,51 @@ type ContentReader(maxFileSizeBytes: int64) =
       let digest = Array.zeroCreate<byte> Hashing.HashLength
       hasher.Finish(Span digest)
 
+      // --- 抽出へ渡す本文を用意する ---
+      // 復号は抽出の直前に行い、抽出器へは UTF-8 だけを渡す（docs/storage.md 5）。
+      // 原文はファイル側に残るため、ここでの変換は成果物の内容を変えない。
+      let mutable decodedLength = 0
+      let mutable decodable = false
+      let mutable decodedLineCount = lineCount
+      decodedIsConverted <- false
+
+      if retaining && retainedLength >= 0 && Decoding.isSupported detection.Encoding then
+        let source = ReadOnlySpan(retained, 0, retainedLength)
+
+        if Decoding.isUtf8 detection.Encoding then
+          // BOM を持つ場合だけ、抽出器へ渡す前に取り除く。複製は避ける。
+          let offset = Decoding.bomLengthOf detection.Encoding source
+
+          if offset > 0 then Array.blit retained offset retained 0 (retainedLength - offset)
+
+          decodedLength <- retainedLength - offset
+          decodable <- true
+        else
+          let required = Decoding.maxUtf8Bytes retainedLength
+
+          if converted.Length < required then
+            if converted.Length > 0 then ArrayPool<byte>.Shared.Return converted
+            converted <- ArrayPool<byte>.Shared.Rent required
+
+          match Decoding.toUtf8 detection.Encoding source (Span converted) with
+          | Decoding.Converted written ->
+            decodedIsConverted <- true
+            decodedLength <- written
+            decodable <- true
+            // バイト単位で数えられない符号化は、復号してから行数を確定させる。
+            decodedLineCount <- Decoding.countLines (ReadOnlySpan(converted, 0, written))
+          | Decoding.AlreadyUtf8 _
+          | Decoding.Unsupported
+          | Decoding.NotText -> ()
+
       Ok
         { Hash = digest
           Encoding = detection.Encoding
           EncodingCandidates = detection.Candidates
-          LineCount = lineCount
-          Flags = flags }
+          LineCount = decodedLineCount
+          Flags = flags
+          DecodedLength = decodedLength
+          Decoded = decodable }
     with
     | :? UnauthorizedAccessException -> Error AccessDenied
     | :? FileNotFoundException -> Error NotFound
@@ -196,3 +275,7 @@ type ContentReader(maxFileSizeBytes: int64) =
         disposed <- true
         (hasher :> IDisposable).Dispose()
         ArrayPool<byte>.Shared.Return buffer
+        if converted.Length > 0 then ArrayPool<byte>.Shared.Return converted
+        if retained.Length > 0 then ArrayPool<byte>.Shared.Return retained
+        converted <- Array.Empty()
+        retained <- Array.Empty()

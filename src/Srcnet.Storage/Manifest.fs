@@ -16,8 +16,9 @@ open Srcnet.Core
 /// マニフェストの構造の版。セグメント形式の版とは独立に管理する。
 ///
 /// 2: セグメント名へ世代を含め、チェックサムのアルゴリズムを SHA-256 にした。
+/// 3: シンボルと参照候補を載せ、抽出段階・文法の版・種別ごとの件数を記録した（M2）。
 [<Literal>]
-let ManifestVersion = 2u
+let ManifestVersion = 3u
 
 [<Literal>]
 let FileName = "manifest.json"
@@ -50,13 +51,35 @@ type Counts =
     Strings: int
     StringBytes: int64
     Directories: int
-    Files: int }
+    Files: int
+    /// 抽出したシンボル ノードの数。ファイルに属さないノードは含まない。
+    Symbols: int
+    /// 未解決の参照候補の数。
+    ReferenceCandidates: int
+    /// ノード種別ごとの件数。種別名の序数昇順。
+    NodeKinds: Writer.KindCount[]
+    /// エッジ種別ごとの件数。種別名の序数昇順。
+    EdgeKinds: Writer.KindCount[] }
+
+/// 同梱している文法 1 つ分。実行ファイルへコンパイル時に埋め込んだ値を記録する。
+/// 対象リポジトリからも構成ファイルからも読み込まない（docs/security.md C-1）。
+type GrammarRecord =
+  { Language: string
+    Version: string
+    /// 取得元アーカイブの SHA-256（16 進小文字）。
+    Sha256: string }
 
 type IndexOptions =
   { FollowSymbolicLinks: bool
     RespectIgnoreFiles: bool
     MaxDepth: int
-    MaxFileSizeBytes: int64 }
+    MaxFileSizeBytes: int64
+    /// 実際に適用した抽出段階（0..3）。
+    Tier: int
+    /// 構文解析器を利用できたか。段階が下がった理由を成果物から説明できるようにする。
+    ParserAvailable: bool
+    /// 同梱している文法の一覧。言語名の序数昇順。
+    Grammars: GrammarRecord[] }
 
 type DiagnosticCount = { Kind: string; Count: int }
 
@@ -125,6 +148,18 @@ let private serialize (manifest: Manifest) =
   writer.WriteBoolean("respectIgnoreFiles", manifest.Options.RespectIgnoreFiles)
   writer.WriteNumber("maxDepth", manifest.Options.MaxDepth)
   writer.WriteNumber("maxFileSizeBytes", manifest.Options.MaxFileSizeBytes)
+  writer.WriteNumber("tier", manifest.Options.Tier)
+  writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
+  writer.WriteStartArray "grammars"
+
+  for grammar in manifest.Options.Grammars do
+    writer.WriteStartObject()
+    writer.WriteString("language", grammar.Language)
+    writer.WriteString("version", grammar.Version)
+    writer.WriteString("sha256", grammar.Sha256)
+    writer.WriteEndObject()
+
+  writer.WriteEndArray()
   writer.WriteEndObject()
 
   writer.WriteStartObject "counts"
@@ -134,6 +169,26 @@ let private serialize (manifest: Manifest) =
   writer.WriteNumber("stringBytes", manifest.Counts.StringBytes)
   writer.WriteNumber("directories", manifest.Counts.Directories)
   writer.WriteNumber("files", manifest.Counts.Files)
+  writer.WriteNumber("symbols", manifest.Counts.Symbols)
+  writer.WriteNumber("referenceCandidates", manifest.Counts.ReferenceCandidates)
+  writer.WriteStartArray "nodeKinds"
+
+  for entry in manifest.Counts.NodeKinds do
+    writer.WriteStartObject()
+    writer.WriteString("kind", entry.Kind)
+    writer.WriteNumber("count", entry.Count)
+    writer.WriteEndObject()
+
+  writer.WriteEndArray()
+  writer.WriteStartArray "edgeKinds"
+
+  for entry in manifest.Counts.EdgeKinds do
+    writer.WriteStartObject()
+    writer.WriteString("kind", entry.Kind)
+    writer.WriteNumber("count", entry.Count)
+    writer.WriteEndObject()
+
+  writer.WriteEndArray()
   writer.WriteEndObject()
 
   writeSegments writer manifest.Segments
@@ -375,10 +430,13 @@ let private readSegments (element: JsonElement) =
               if checksum.Length <> Hashing.HashLength * 2 || not (String.forall isHexLower checksum) then
                 Error(Malformed $"{name}: チェックサムが 16 進小文字 {Hashing.HashLength * 2} 桁ではありません")
               else
-                Ok
-                  { Writer.Name = name
-                    Writer.ByteLength = byteLength
-                    Writer.Checksum = checksum }
+                // `Writer` には `Name` を持つレコードが複数あるため、型を明示して選ぶ。
+                let descriptor: Writer.SegmentDescriptor =
+                  { Name = name
+                    ByteLength = byteLength
+                    Checksum = checksum }
+
+                Ok descriptor
           | Error error, _, _
           | _, Error error, _
           | _, _, Error error -> Error error
@@ -391,6 +449,28 @@ let private readSegments (element: JsonElement) =
   | ValueSome error -> Error error
   | ValueNone -> Ok(segments.ToArray())
 
+/// 種別ごとの件数を読む。並びは書き出し側で名前の序数昇順に固定されている。
+let private readKindCounts (element: JsonElement) (name: string) =
+  match requireArray element name with
+  | Error error -> Error error
+  | Ok array ->
+    let entries = List<Writer.KindCount>()
+    let mutable failure = ValueNone
+
+    for item in array.EnumerateArray() do
+      if failure.IsNone then
+        if item.ValueKind <> JsonValueKind.Object then
+          failure <- ValueSome(Malformed $"{name} の項目がオブジェクトではありません")
+        else
+          match requireString item "kind", requireInt32 item "count" with
+          | Ok kind, Ok count -> entries.Add { Kind = kind; Count = count }
+          | Error error, _
+          | _, Error error -> failure <- ValueSome error
+
+    match failure with
+    | ValueSome error -> Error error
+    | ValueNone -> Ok(entries.ToArray())
+
 let private readCounts (element: JsonElement) =
   match
     requireInt32 element "nodes",
@@ -401,19 +481,60 @@ let private readCounts (element: JsonElement) =
     requireInt32 element "files"
   with
   | Ok nodes, Ok edges, Ok strings, Ok stringBytes, Ok directories, Ok files ->
-    Ok
-      { Nodes = nodes
-        Edges = edges
-        Strings = strings
-        StringBytes = stringBytes
-        Directories = directories
-        Files = files }
+    match
+      requireInt32 element "symbols",
+      requireInt32 element "referenceCandidates",
+      readKindCounts element "nodeKinds",
+      readKindCounts element "edgeKinds"
+    with
+    | Ok symbols, Ok referenceCandidates, Ok nodeKinds, Ok edgeKinds ->
+      Ok
+        { Nodes = nodes
+          Edges = edges
+          Strings = strings
+          StringBytes = stringBytes
+          Directories = directories
+          Files = files
+          Symbols = symbols
+          ReferenceCandidates = referenceCandidates
+          NodeKinds = nodeKinds
+          EdgeKinds = edgeKinds }
+    | Error error, _, _, _
+    | _, Error error, _, _
+    | _, _, Error error, _
+    | _, _, _, Error error -> Error error
   | Error error, _, _, _, _, _
   | _, Error error, _, _, _, _
   | _, _, Error error, _, _, _
   | _, _, _, Error error, _, _
   | _, _, _, _, Error error, _
   | _, _, _, _, _, Error error -> Error error
+
+let private readGrammars (element: JsonElement) =
+  match requireArray element "grammars" with
+  | Error error -> Error error
+  | Ok array ->
+    let entries = List<GrammarRecord>()
+    let mutable failure = ValueNone
+
+    for item in array.EnumerateArray() do
+      if failure.IsNone then
+        if item.ValueKind <> JsonValueKind.Object then
+          failure <- ValueSome(Malformed "文法の項目がオブジェクトではありません")
+        else
+          match requireString item "language", requireString item "version", requireString item "sha256" with
+          | Ok language, Ok version, Ok sha256 ->
+            entries.Add
+              { Language = language
+                Version = version
+                Sha256 = sha256 }
+          | Error error, _, _
+          | _, Error error, _
+          | _, _, Error error -> failure <- ValueSome error
+
+    match failure with
+    | ValueSome error -> Error error
+    | ValueNone -> Ok(entries.ToArray())
 
 let private readOptions (element: JsonElement) =
   match
@@ -423,11 +544,19 @@ let private readOptions (element: JsonElement) =
     requireInt64 element "maxFileSizeBytes" 0L Int64.MaxValue
   with
   | Ok followSymbolicLinks, Ok respectIgnoreFiles, Ok maxDepth, Ok maxFileSizeBytes ->
-    Ok
-      { FollowSymbolicLinks = followSymbolicLinks
-        RespectIgnoreFiles = respectIgnoreFiles
-        MaxDepth = maxDepth
-        MaxFileSizeBytes = maxFileSizeBytes }
+    match requireInt64 element "tier" 0L 3L, requireBoolean element "parserAvailable", readGrammars element with
+    | Ok tier, Ok parserAvailable, Ok grammars ->
+      Ok
+        { FollowSymbolicLinks = followSymbolicLinks
+          RespectIgnoreFiles = respectIgnoreFiles
+          MaxDepth = maxDepth
+          MaxFileSizeBytes = maxFileSizeBytes
+          Tier = int tier
+          ParserAvailable = parserAvailable
+          Grammars = grammars }
+    | Error error, _, _
+    | _, Error error, _
+    | _, _, Error error -> Error error
   | Error error, _, _, _
   | _, Error error, _, _
   | _, _, Error error, _
@@ -516,11 +645,17 @@ let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
     | _, Error error, _
     | _, _, Error error -> Error error
     | Ok toolVersion, Ok repositoryId, Ok complete ->
-      // ノード数とエッジ数の関係は書き出し側の不変条件である。破れていれば破損とみなす。
-      if counts.Nodes > 0 && counts.Edges <> counts.Nodes - 1 then
+      // 構造ノードとシンボルの関係は書き出し側の不変条件である。破れていれば破損とみなす。
+      //
+      // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張るため、エッジ総数は
+      // 少なくともノード数 - 1 になる。構成シンボルはファイルに属さないため、
+      // ノード数はディレクトリ・ファイル・シンボルの合計を下回らない。
+      let structural = 1 + counts.Directories + counts.Files + counts.Symbols
+
+      if counts.Nodes > 0 && counts.Edges < counts.Nodes - 1 then
         Error(Malformed $"エッジ数 {counts.Edges} がノード数 {counts.Nodes} と整合しません")
-      elif counts.Nodes <> 0 && counts.Nodes <> 1 + counts.Directories + counts.Files then
-        Error(Malformed $"ノード数 {counts.Nodes} がディレクトリ数とファイル数の合計と整合しません")
+      elif counts.Nodes <> 0 && counts.Nodes < structural then
+        Error(Malformed $"ノード数 {counts.Nodes} がディレクトリ・ファイル・シンボルの合計と整合しません")
       else
         Ok
           { ManifestVersion = manifestVersion

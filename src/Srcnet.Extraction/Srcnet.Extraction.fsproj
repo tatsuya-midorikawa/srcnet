@@ -9,8 +9,13 @@
     <ItemGroup>
         <Compile Include="Native.fs" />
         <Compile Include="Grammars.fs" />
+        <Compile Include="GrammarVersions.fs" />
         <Compile Include="SyntaxTree.fs" />
         <Compile Include="Parsing.fs" />
+        <Compile Include="Model.fs" />
+        <Compile Include="LineScan.fs" />
+        <Compile Include="CSyntax.fs" />
+        <Compile Include="Extractor.fs" />
     </ItemGroup>
 
     <ItemGroup>

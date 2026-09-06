@@ -7,6 +7,7 @@
     <ItemGroup>
         <Compile Include="Unicode.fs" />
         <Compile Include="Encodings.fs" />
+        <Compile Include="Decoding.fs" />
         <Compile Include="Sanitize.fs" />
         <Compile Include="Words.fs" />
     </ItemGroup>
