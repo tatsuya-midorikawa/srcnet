@@ -506,9 +506,9 @@ let ``生成した成果物は検証を通る`` () =
     Assert.Empty(report.Issues |> Array.map Verify.Issue.describe)
     Assert.True report.IsValid
 
-    // 文字列・オフセット・ファイル・ノード・参照候補・ID 表に加えて、
+    // 文字列・オフセット・ファイル・ノード・参照候補・ID 表・照会索引に加えて、
     // エッジ種別ごとの前方・後方 CSR を書き出す。
-    let expectedSegments = 6 + 2 * manifest.Counts.EdgeKinds.Length
+    let expectedSegments = 7 + 2 * manifest.Counts.EdgeKinds.Length
     Assert.Equal(expectedSegments, report.SegmentsChecked)
 
 [<Fact>]

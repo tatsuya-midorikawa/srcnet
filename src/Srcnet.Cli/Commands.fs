@@ -55,25 +55,31 @@ let SchemaVersion = 1
 let internal jsonEncoder =
   Encodings.Web.JavaScriptEncoder.Create Unicode.UnicodeRanges.All
 
-let private jsonWriterOptions =
+let private jsonWriterOptions indented =
   JsonWriterOptions(
-    Indented = true,
+    Indented = indented,
     IndentCharacter = ' ',
     IndentSize = 2,
     NewLine = Terminal.Newline,
     Encoder = jsonEncoder
   )
 
-let writeJson (build: Utf8JsonWriter -> unit) =
+let internal renderJson (indented: bool) (build: Utf8JsonWriter -> unit) =
   use buffer = new MemoryStream()
-  use writer = new Utf8JsonWriter(buffer, jsonWriterOptions)
-  writer.WriteStartObject()
-  writer.WriteNumber("schemaVersion", SchemaVersion)
+  use writer = new Utf8JsonWriter(buffer, jsonWriterOptions indented)
   build writer
-  writer.WriteEndObject()
   writer.Flush()
-  Terminal.out (Text.Encoding.UTF8.GetString(buffer.ToArray()))
-  Terminal.out Terminal.Newline
+  Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, int buffer.Length)
+
+let writeJson (build: Utf8JsonWriter -> unit) =
+  let text =
+    renderJson true (fun writer ->
+      writer.WriteStartObject()
+      writer.WriteNumber("schemaVersion", SchemaVersion)
+      build writer
+      writer.WriteEndObject())
+
+  Terminal.outLine text
 
 let private flagTable =
   [| NodeFlags.Definition, "definition"

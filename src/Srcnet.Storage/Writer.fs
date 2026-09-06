@@ -36,7 +36,8 @@ let inline private checkCancellation (cancellation: CancellationToken) (index: i
 
 /// 抽出したシンボル 1 件。位置は所属ファイル内のバイト位置と行番号。
 type SymbolInput =
-  { Kind: NodeKind
+  {
+    Kind: NodeKind
     Name: string
     QualifiedName: string
     /// 同一ファイル内の親シンボルの添字。ファイル直下は -1。
@@ -46,11 +47,13 @@ type SymbolInput =
     EndLine: int
     StartByte: int
     EndByte: int
-    Flags: NodeFlags }
+    Flags: NodeFlags
+  }
 
 /// 未解決の参照候補 1 件。解決は M3 で行う。docs/extraction.md 5 を参照。
 type ReferenceInput =
-  { /// 同一ファイル内の発生元シンボルの添字。ファイル自身が発生元の場合は -1。
+  {
+    /// 同一ファイル内の発生元シンボルの添字。ファイル自身が発生元の場合は -1。
     Source: int
     Kind: EdgeKind
     Target: string
@@ -60,10 +63,12 @@ type ReferenceInput =
     EndByte: int
     Line: int
     Stage: byte
-    Confidence: Confidence }
+    Confidence: Confidence
+  }
 
 type FileInput =
-  { Path: LogicalPath
+  {
+    Path: LogicalPath
     SizeBytes: int64
     Language: Language
     EncodingCode: uint16
@@ -74,27 +79,33 @@ type FileInput =
     /// バイト位置の昇順。親は必ず子より前に並ぶ。
     Symbols: SymbolInput[]
     /// 発生元の添字 → エッジ種別コード → バイト位置の昇順。
-    References: ReferenceInput[] }
+    References: ReferenceInput[]
+  }
 
 type IndexInput =
-  { Repository: RepositoryId
+  {
+    Repository: RepositoryId
     /// 論理パスの序数昇順。ルートは含まない。
     Directories: LogicalPath[]
     /// 論理パスの序数昇順。
-    Files: FileInput[] }
+    Files: FileInput[]
+  }
 
 type SegmentDescriptor =
-  { /// セグメント ディレクトリ内の名前。公開時に `segments/<generation>/` を前置きする。
+  {
+    /// セグメント ディレクトリ内の名前。公開時に `segments/<generation>/` を前置きする。
     Name: string
     ByteLength: int64
     /// チェックサム (SHA-256) の 16 進小文字表記。
-    Checksum: string }
+    Checksum: string
+  }
 
 /// 種別ごとの件数。名前は成果物とマニフェストで共有する。
 type KindCount = { Kind: string; Count: int }
 
 type WriteResult =
-  { Segments: SegmentDescriptor[]
+  {
+    Segments: SegmentDescriptor[]
     NodeCount: int
     EdgeCount: int
     StringCount: int
@@ -107,13 +118,15 @@ type WriteResult =
     /// エッジ種別ごとの件数。種別名の序数昇順。
     EdgeKinds: KindCount[]
     /// 同一のノード ID が複数のノードへ割り当てられた件数。0 でなければ公開してはならない。
-    IdCollisions: int }
+    IdCollisions: int
+  }
 
 /// 1 セグメント分の書き出し器。書きながらチェックサムを計算するため、
 /// 完全性検証のための再読み込みが不要になる。
 [<Sealed>]
 type private SegmentWriter(directory: string, name: string) =
-  let fullPath = Path.Combine(directory, name.Replace('/', Path.DirectorySeparatorChar))
+  let fullPath =
+    Path.Combine(directory, name.Replace('/', Path.DirectorySeparatorChar))
 
   do
     match Path.GetDirectoryName fullPath with
@@ -154,7 +167,8 @@ type private SegmentWriter(directory: string, name: string) =
     if length > buffer.Length then
       invalidArg (nameof length) "予約長がバッファ長を超えています"
 
-    if position + length > buffer.Length then this.FlushBuffer()
+    if position + length > buffer.Length then
+      this.FlushBuffer()
 
     let span = Span(buffer, position, length)
     span.Clear()
@@ -193,6 +207,244 @@ type private SegmentWriter(directory: string, name: string) =
 
 let private segmentName (suffix: string) = $"{InitialSegmentId}.{suffix}"
 
+type LookupBuildError =
+  | LookupSourceUnavailable of name: string * error: Reader.OpenError
+  | LookupSourceCorrupt of name: string * detail: string
+  | LookupTooLarge of detail: string
+
+exception LookupBuildException of LookupBuildError
+
+/// Build only 0001.lookup from the already-written 0001.{nodes,files,strings,stroffsets}.
+/// Use an unpublished staging directory (or a COPY of a generation). The caller owns
+/// publication: append the returned descriptor, recompute the generation from the full
+/// descriptor list, and qualify/publish the new manifest and generation together.
+/// This never reads source files or changes the existing base segments.
+let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : SegmentDescriptor =
+  let corrupt name detail =
+    raise(LookupBuildException(LookupSourceCorrupt(name, detail)))
+
+  let openSource suffix kind =
+    match Reader.MappedSegment.Open(Path.Combine(segmentDirectory, segmentName suffix)) with
+    | Error error -> raise(LookupBuildException(LookupSourceUnavailable(suffix, error)))
+    | Ok segment ->
+      if segment.Header.Kind <> kind then
+        (segment :> IDisposable).Dispose()
+        corrupt suffix "Unexpected segment kind"
+
+      segment
+
+  cancellation.ThrowIfCancellationRequested()
+  use nodes = openSource "nodes" Format.Nodes
+  use files = openSource "files" Format.Files
+  use strings = openSource "strings" Format.Strings
+  use offsets = openSource "stroffsets" Format.StringOffsets
+  let nodeCount = int nodes.Header.PrimaryCount
+  let stringCount = int strings.Header.PrimaryCount
+  let fileCount = int files.Header.PrimaryCount
+
+  if
+    offsets.Header.PrimaryCount <> strings.Header.PrimaryCount
+    || offsets.Header.SecondaryCount <> strings.Header.SecondaryCount
+  then
+    corrupt "stroffsets" "String counts disagree"
+
+  if
+    BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(0, 8)) <> 0UL
+    || BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(stringCount * 8, 8))
+       <> strings.Header.SecondaryCount
+  then
+    corrupt "stroffsets" "Invalid first or terminal string offset"
+
+  let normal = Array.create stringCount ValueNone
+  let folded = Array.create stringCount ValueNone
+
+  let key (reference: uint32) ignoreCase =
+    if reference >= uint32 stringCount then
+      corrupt "nodes/files" "String reference out of range"
+
+    let index = int reference
+    let cache = if ignoreCase then folded else normal
+
+    match cache[index] with
+    | ValueSome value -> value
+    | ValueNone ->
+      let first =
+        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(index * 8, 8))
+
+      let last =
+        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice((index + 1) * 8, 8))
+
+      if last < first || last > uint64 strings.Payload.Length then
+        corrupt "stroffsets" "String offsets out of range"
+
+      if last - first > uint64 Format.Lookup.MaxKeyBytes then
+        raise(LookupBuildException(LookupTooLarge "Source key exceeds the 1 MiB UTF-8 limit"))
+
+      let text =
+        try
+          Strings.utf8.GetString(strings.Payload.Slice(int first, int(last - first)))
+        with :? Text.DecoderFallbackException ->
+          corrupt "strings" "Invalid UTF-8"
+
+      let value = Strings.lookupKey ignoreCase text
+      cache[index] <- ValueSome value
+      value
+
+  // Offline build only: keep compact postings, not a second managed graph.
+  let postings = ResizeArray<struct (bool * string * int * int)>()
+
+  let add node target reference =
+    let text = key reference false
+
+    if text.Length > 0 then
+      postings.Add(struct (false, text, node, target))
+      postings.Add(struct (true, key reference true, node, target))
+
+  for index in 0 .. nodeCount - 1 do
+    checkCancellation cancellation index
+    let record = nodes.Payload.Slice(index * Format.RecordLength, Format.RecordLength)
+
+    match NodeKind.ofCode record[Format.NodeRecord.KindOffset] with
+    | ValueNone -> corrupt "nodes" "Unknown node kind"
+    | ValueSome _ -> ()
+
+    add index 0 (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.NameOffset, 4)))
+    add index 1 (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.QualifiedNameOffset, 4)))
+
+    let file =
+      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FileIndexOffset, 4))
+
+    if file <> Format.NodeRecord.NoFile then
+      if file >= uint32 fileCount then
+        corrupt "nodes" "File reference out of range"
+
+      add index 2 (BinaryPrimitives.ReadUInt32LittleEndian(files.Payload.Slice(int file * Format.RecordLength, 4)))
+
+    if postings.Count > (Int32.MaxValue - Format.HeaderLength - Format.Lookup.PreludeLength) / 8 then
+      raise(LookupBuildException(LookupTooLarge "Posting table exceeds the mapped segment limit"))
+
+  let mutable comparisons = 0
+
+  let comparePosting (struct (lf, lk, ln, lt)) (struct (rf, rk, rn, rt)) =
+    comparisons <- comparisons + 1
+    checkCancellation cancellation comparisons
+    let byFold = compare lf rf
+
+    if byFold <> 0 then
+      byFold
+    else
+      let byKey = String.CompareOrdinal(lk, rk)
+
+      if byKey <> 0 then
+        byKey
+      else
+        let byNode = compare ln rn
+        if byNode <> 0 then byNode else compare lt rt
+
+  cancellation.ThrowIfCancellationRequested()
+
+  try
+    postings.Sort(Comparison comparePosting)
+  with :? InvalidOperationException as error when (error.InnerException :? OperationCanceledException) ->
+    cancellation.ThrowIfCancellationRequested()
+    reraise()
+
+  cancellation.ThrowIfCancellationRequested()
+  let keys = ResizeArray<struct (string * int * int * int)>()
+  let mutable normalCount = 0
+  let mutable blobBytes = 0UL
+  let mutable position = 0
+
+  while position < postings.Count do
+    checkCancellation cancellation position
+    let first = position
+    let struct (fold, text, _, _) = postings[position]
+    position <- position + 1
+    let mutable same = true
+
+    while same && position < postings.Count do
+      let struct (nextFold, nextText, _, _) = postings[position]
+
+      if fold = nextFold && String.Equals(text, nextText, StringComparison.Ordinal) then
+        checkCancellation cancellation position
+        position <- position + 1
+      else
+        same <- false
+
+    let length = Strings.utf8.GetByteCount text
+
+    if length > Format.Lookup.MaxKeyBytes then
+      raise(LookupBuildException(LookupTooLarge $"Key exceeds {Format.Lookup.MaxKeyBytes} UTF-8 bytes"))
+
+    keys.Add(struct (text, first, position - first, length))
+
+    if not fold then
+      normalCount <- normalCount + 1
+
+    blobBytes <- blobBytes + uint64 length
+
+  let payloadLength =
+    uint64 Format.Lookup.PreludeLength
+    + uint64 keys.Count * 24UL
+    + uint64 postings.Count * 8UL
+    + blobBytes
+
+  if payloadLength > uint64(Int32.MaxValue - Format.HeaderLength) then
+    raise(LookupBuildException(LookupTooLarge "Lookup exceeds the mapped segment limit"))
+
+  use writer = new SegmentWriter(segmentDirectory, segmentName "lookup")
+
+  writer.WriteHeader
+    { Kind = Format.LexicalLookup
+      PrimaryCount = uint64 keys.Count
+      SecondaryCount = uint64 postings.Count
+      RecordLength = uint32 Format.Lookup.KeyLength
+      PayloadLength = payloadLength }
+
+  let prelude = writer.Reserve Format.Lookup.PreludeLength
+  BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(0, 4), Format.Lookup.Version)
+  BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(4, 4), uint32 nodeCount)
+  BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(8, 4), uint32 fileCount)
+  BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(12, 4), uint32 stringCount)
+  BinaryPrimitives.WriteUInt64LittleEndian(prelude.Slice(16, 8), blobBytes)
+  BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(24, 4), uint32 normalCount)
+  let mutable blobOffset = 0UL
+
+  for index in 0 .. keys.Count - 1 do
+    checkCancellation cancellation index
+    let struct (_, first, count, length) = keys[index]
+    let record = writer.Reserve Format.Lookup.KeyLength
+    BinaryPrimitives.WriteUInt64LittleEndian(record.Slice(0, 8), blobOffset)
+    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(8, 4), uint32 length)
+    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(12, 4), uint32 first)
+    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(16, 4), uint32 count)
+    blobOffset <- blobOffset + uint64 length
+
+  for index in 0 .. postings.Count - 1 do
+    checkCancellation cancellation index
+    let struct (_, _, node, target) = postings[index]
+    let record = writer.Reserve Format.Lookup.PostingLength
+    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(0, 4), uint32 node)
+    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(4, 4), uint32 target)
+
+  let mutable scratch = ArrayPool<byte>.Shared.Rent 4096
+
+  try
+    for index in 0 .. keys.Count - 1 do
+      checkCancellation cancellation index
+      let struct (text, _, _, length) = keys[index]
+
+      if length > scratch.Length then
+        ArrayPool<byte>.Shared.Return scratch
+        scratch <- ArrayPool<byte>.Shared.Rent length
+
+      let written = Strings.utf8.GetBytes(text.AsSpan(), Span scratch)
+      writer.WriteRaw(ReadOnlySpan(scratch, 0, written))
+
+    writer.Complete()
+  finally
+    ArrayPool<byte>.Shared.Return scratch
+
 /// 論理パスからノード名（最後のセグメント）を取り出す。ルートは空文字列。
 let private nodeName (path: LogicalPath) = fileName path
 
@@ -207,10 +459,14 @@ let private buildCsr (nodeCount: int) (edges: struct (int * int)[]) (cancellatio
   Array.sortInPlaceWith
     (fun (struct (leftSource, leftTarget)) (struct (rightSource, rightTarget)) ->
       let bySource = compare leftSource rightSource
-      if bySource <> 0 then bySource else compare leftTarget rightTarget)
+
+      if bySource <> 0 then
+        bySource
+      else
+        compare leftTarget rightTarget)
     edges
 
-  let offsets = Array.zeroCreate<uint64> (nodeCount + 1)
+  let offsets = Array.zeroCreate<uint64>(nodeCount + 1)
   let targets = ResizeArray<uint32> edges.Length
   let mutable previousSource = -1
   let mutable previousTarget = -1
@@ -225,7 +481,7 @@ let private buildCsr (nodeCount: int) (edges: struct (int * int)[]) (cancellatio
       previousSource <- source
       previousTarget <- target
 
-  for index in 1 .. nodeCount do
+  for index in 1..nodeCount do
     offsets[index] <- offsets[index] + offsets[index - 1]
 
   struct (offsets, targets.ToArray())
@@ -240,7 +496,7 @@ let private writeCsr
   (cancellation: CancellationToken)
   =
   use writer = new SegmentWriter(segmentDirectory, name)
-  let payloadLength = uint64 (nodeCount + 1) * 8UL + uint64 targets.Length * 4UL
+  let payloadLength = uint64(nodeCount + 1) * 8UL + uint64 targets.Length * 4UL
 
   writer.WriteHeader
     { Kind = Format.AdjacencyCsr
@@ -284,7 +540,7 @@ let write
 
   // --- シンボルの密インデックスを決める ---
   cancellation.ThrowIfCancellationRequested()
-  let symbolStart = Array.zeroCreate<int> (fileCount + 1)
+  let symbolStart = Array.zeroCreate<int>(fileCount + 1)
   let mutable symbolTotal = 0
 
   for index in 0 .. fileCount - 1 do
@@ -312,7 +568,8 @@ let write
   let configBase = symbolBase + symbolTotal
   let nodeCount = configBase + configArray.Length
 
-  let configIndexOf = Dictionary<string, int>(configArray.Length, StringComparer.Ordinal)
+  let configIndexOf =
+    Dictionary<string, int>(configArray.Length, StringComparer.Ordinal)
 
   for index in 0 .. configArray.Length - 1 do
     configIndexOf[configArray[index]] <- configBase + index
@@ -421,7 +678,10 @@ let write
 
   // --- エッジ ---
   cancellation.ThrowIfCancellationRequested()
-  let indexByPath = Dictionary<string, int>(directoryCount + 1, StringComparer.Ordinal)
+
+  let indexByPath =
+    Dictionary<string, int>(directoryCount + 1, StringComparer.Ordinal)
+
   indexByPath[value root] <- 0
 
   for index in 0 .. directoryCount - 1 do
@@ -466,12 +726,16 @@ let write
       let parentNode =
         if symbol.Parent >= 0 && symbol.Parent < file.Symbols.Length then
           symbolBase + start + symbol.Parent
-        else fileNode
+        else
+          fileNode
 
       contains.Add(struct (parentNode, node))
 
-      if symbol.Flags.HasFlag NodeFlags.DeclarationOnly then declares.Add(struct (fileNode, node))
-      if symbol.Flags.HasFlag NodeFlags.Definition then defines.Add(struct (fileNode, node))
+      if symbol.Flags.HasFlag NodeFlags.DeclarationOnly then
+        declares.Add(struct (fileNode, node))
+
+      if symbol.Flags.HasFlag NodeFlags.Definition then
+        defines.Add(struct (fileNode, node))
 
     for reference in file.References do
       if reference.Kind = GuardedBy then
@@ -480,7 +744,8 @@ let write
           let sourceNode =
             if reference.Source >= 0 && reference.Source < file.Symbols.Length then
               symbolBase + start + reference.Source
-            else fileNode
+            else
+              fileNode
 
           guardedBy.Add(struct (sourceNode, configNode))
         | false, _ -> ()
@@ -501,9 +766,15 @@ let write
 
   for kind, edges in edgeArrays do
     cancellation.ThrowIfCancellationRequested()
-    let reversed = edges |> Array.map (fun (struct (source, target)) -> struct (target, source))
+
+    let reversed =
+      edges |> Array.map(fun (struct (source, target)) -> struct (target, source))
+
     let struct (offsets, targets) = buildCsr nodeCount edges cancellation
-    let struct (reverseOffsets, reverseTargets) = buildCsr nodeCount reversed cancellation
+
+    let struct (reverseOffsets, reverseTargets) =
+      buildCsr nodeCount reversed cancellation
+
     csrByKind[kind] <- struct (offsets, targets)
     reverseByKind[kind] <- struct (reverseOffsets, reverseTargets)
     edgeTotal <- edgeTotal + targets.Length
@@ -524,7 +795,7 @@ let write
         RecordLength = 0u
         PayloadLength = blobLength }
 
-    let encoder = Text.Encoding.UTF8
+    let encoder = Strings.utf8
     let mutable scratch = ArrayPool<byte>.Shared.Rent 4096
 
     try
@@ -546,7 +817,7 @@ let write
 
   do
     use writer = new SegmentWriter(segmentDirectory, segmentName "stroffsets")
-    let payloadLength = uint64 (stringOffsets.Length * 8)
+    let payloadLength = uint64(stringOffsets.Length * 8)
 
     writer.WriteHeader
       { Kind = Format.StringOffsets
@@ -579,7 +850,11 @@ let write
       checkCancellation cancellation index
       let file = input.Files[index]
       let record = writer.Reserve Format.RecordLength
-      BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4), uint32 filePathRefs[index])
+
+      BinaryPrimitives.WriteUInt32LittleEndian(
+        record.Slice(Format.FileRecord.PathOffset, 4),
+        uint32 filePathRefs[index]
+      )
 
       BinaryPrimitives.WriteUInt16LittleEndian(
         record.Slice(Format.FileRecord.LanguageOffset, 2),
@@ -588,7 +863,12 @@ let write
 
       BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2), file.EncodingCode)
       BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4), uint32 file.Flags)
-      BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4), uint32 file.LineCount)
+
+      BinaryPrimitives.WriteUInt32LittleEndian(
+        record.Slice(Format.FileRecord.LineCountOffset, 4),
+        uint32 file.LineCount
+      )
+
       BinaryPrimitives.WriteInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8), file.SizeBytes)
 
       ReadOnlySpan(file.ContentHash)
@@ -786,10 +1066,15 @@ let write
         let sourceNode =
           if reference.Source >= 0 && reference.Source < file.Symbols.Length then
             symbolBase + start + reference.Source
-          else fileNode
+          else
+            fileNode
 
         let record = writer.Reserve Format.RecordLength
-        BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4), uint32 sourceNode)
+
+        BinaryPrimitives.WriteUInt32LittleEndian(
+          record.Slice(Format.ReferenceRecord.SourceOffset, 4),
+          uint32 sourceNode
+        )
 
         BinaryPrimitives.WriteUInt32LittleEndian(
           record.Slice(Format.ReferenceRecord.TargetOffset, 4),
@@ -801,7 +1086,10 @@ let write
           uint32 referenceQualifierRefs[cursor]
         )
 
-        BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(Format.ReferenceRecord.LineOffset, 4), uint32 reference.Line)
+        BinaryPrimitives.WriteUInt32LittleEndian(
+          record.Slice(Format.ReferenceRecord.LineOffset, 4),
+          uint32 reference.Line
+        )
 
         BinaryPrimitives.WriteInt64LittleEndian(
           record.Slice(Format.ReferenceRecord.StartByteOffset, 8),
@@ -827,13 +1115,13 @@ let write
 
   do
     use writer = new SegmentWriter(segmentDirectory, segmentName "idmap")
-    let payloadLength = uint64 nodeCount * uint64 (Ids.NodeIdLength + 4)
+    let payloadLength = uint64 nodeCount * uint64(Ids.NodeIdLength + 4)
 
     writer.WriteHeader
       { Kind = Format.IdMap
         PrimaryCount = uint64 nodeCount
         SecondaryCount = 0UL
-        RecordLength = uint32 (Ids.NodeIdLength + 4)
+        RecordLength = uint32(Ids.NodeIdLength + 4)
         PayloadLength = payloadLength }
 
     let order = Array.init nodeCount id
@@ -853,23 +1141,30 @@ let write
 
     descriptors.Add(writer.Complete())
 
+  descriptors.Add(buildLookup segmentDirectory cancellation)
+
   let ordered = descriptors.ToArray()
-  Array.sortInPlaceWith (fun (a: SegmentDescriptor) (b: SegmentDescriptor) -> String.CompareOrdinal(a.Name, b.Name)) ordered
+
+  Array.sortInPlaceWith
+    (fun (a: SegmentDescriptor) (b: SegmentDescriptor) -> String.CompareOrdinal(a.Name, b.Name))
+    ordered
 
   let nodeKinds =
     nodeKindCounts
-    |> Seq.map (fun entry -> { Kind = NodeKind.name entry.Key; Count = entry.Value })
-    |> Seq.sortWith (fun left right -> String.CompareOrdinal(left.Kind, right.Kind))
+    |> Seq.map(fun entry ->
+      { Kind = NodeKind.name entry.Key
+        Count = entry.Value })
+    |> Seq.sortWith(fun left right -> String.CompareOrdinal(left.Kind, right.Kind))
     |> Seq.toArray
 
   let edgeKinds =
     producedEdgeKinds
-    |> Array.map (fun kind ->
+    |> Array.map(fun kind ->
       let struct (_, targets) = csrByKind[kind]
 
       { Kind = EdgeKind.name kind
         Count = targets.Length })
-    |> Array.sortWith (fun left right -> String.CompareOrdinal(left.Kind, right.Kind))
+    |> Array.sortWith(fun left right -> String.CompareOrdinal(left.Kind, right.Kind))
 
   { Segments = ordered
     NodeCount = nodeCount

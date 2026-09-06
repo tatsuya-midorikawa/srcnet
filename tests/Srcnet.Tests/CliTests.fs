@@ -105,25 +105,60 @@ let ``数値オプションの検証順と値の消費をコマンド間で保�
   Assert.Equal(ValueSome 65_536L, indexed.MaxFileSizeBytes)
 
 [<Theory>]
-[<InlineData(0, 1, 50, 8000, 800)>]
-[<InlineData(1, 1, 1, 1, 1)>]
-[<InlineData(2147483647, 16, 10000, 1000000, 20000)>]
-let ``照会と HTML 出力の上限は既定値と絶対上限を保つ`` (value: int) depth limit budget maxNodes =
-  match parse [ "search"; "name"; $"--depth={value}"; $"--limit={value}"; $"--budget={value}" ] with
+[<InlineData(1, 256, 0, 1)>]
+[<InlineData(10000, 1000000, 16, 20000)>]
+let ``照会と HTML 出力は有効な境界値をそのまま使う`` limit budget depth maxNodes =
+  match parse [ "search"; "name"; $"--limit={limit}"; $"--budget={budget}" ] with
   | Ok(Args.Search arguments) ->
     Assert.Equal(limit, arguments.Limits.Limit)
     Assert.Equal(budget, arguments.Limits.Budget)
   | other -> failwith $"search として解析できませんでした: {other}"
 
-  match parse [ "neighbors"; "name"; $"--depth={value}" ] with
+  match parse [ "neighbors"; "name"; $"--depth={depth}" ] with
   | Ok(Args.Neighbors arguments) -> Assert.Equal(depth, arguments.Depth)
   | other -> failwith $"neighbors として解析できませんでした: {other}"
 
-  match parse [ "export"; "html"; $"--depth={value}"; $"--max-nodes={value}" ] with
+  match parse [ "export"; "html"; $"--depth={depth}"; $"--max-nodes={maxNodes}" ] with
   | Ok(Args.ExportHtml arguments) ->
     Assert.Equal(depth, arguments.Depth)
     Assert.Equal(maxNodes, arguments.MaxNodes)
   | other -> failwith $"export として解析できませんでした: {other}"
+
+[<Fact>]
+let ``件数と予算のゼロ指定は無制限ではなく既定値を使う`` () =
+  match parse [ "search"; "name"; "--limit=0"; "--budget=0" ] with
+  | Ok(Args.Search arguments) ->
+    Assert.Equal(Args.DefaultLimit, arguments.Limits.Limit)
+    Assert.Equal(Args.DefaultBudget, arguments.Limits.Budget)
+  | other -> failwith $"{other}"
+
+  match parse [ "export"; "html"; "--max-nodes=0" ] with
+  | Ok(Args.ExportHtml arguments) -> Assert.Equal(Args.DefaultMaxNodes, arguments.MaxNodes)
+  | other -> failwith $"{other}"
+
+[<Fact>]
+let ``範囲外の上限は黙って丸めず入力誤りとして返す`` () =
+  for arguments, option in
+    [ [ "search"; "name"; "--limit=10001" ], "--limit"
+      [ "search"; "name"; "--budget=255" ], "--budget"
+      [ "search"; "name"; "--budget=1000001" ], "--budget"
+      [ "neighbors"; "name"; "--depth=17" ], "--depth"
+      [ "export"; "html"; "--max-nodes=20001" ], "--max-nodes" ] do
+    match parse arguments with
+    | Error(Args.UnsupportedValue(name, _, _)) -> Assert.Equal(option, name)
+    | other -> failwith $"上限を拒否しませんでした: {other}"
+
+[<Fact>]
+let ``空や不正な照会と競合する HTML 起点を拒否する`` () =
+  for arguments in
+    [ [ "search"; "" ]
+      [ "show"; System.String(char 0xD800, 1) ]
+      [ "search"; String.replicate (Args.MaxQueryScalars + 1) "a" ]
+      [ "neighbors"; "name"; "--edge=" ]
+      [ "export"; "html"; "--query=x"; "--node=y" ]
+      [ "export"; "html"; "--query=" ]
+      [ "context" ] @ List.replicate (Args.MaxContextKeywords + 1) "name" ] do
+    Assert.True(parse arguments |> Result.isError, $"不正な照会を受け入れました: {arguments.Length} 引数")
 
 // --- コマンドの通し検証 ---
 
@@ -165,7 +200,7 @@ let private indexOptions (root: string) : Args.IndexArguments =
     Jobs = ValueSome 1
     MaxFileSizeBytes = ValueNone
     MaxDepth = ValueNone
-    Tier = Args.DefaultTier
+    Tier = 0
     AssumeEncoding = ValueNone
     RespectIgnoreFiles = true
     FollowSymbolicLinks = false

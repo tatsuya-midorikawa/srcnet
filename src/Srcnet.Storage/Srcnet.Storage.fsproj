@@ -8,9 +8,9 @@
         <Compile Include="Artifact.fs" />
         <Compile Include="Format.fs" />
         <Compile Include="Strings.fs" />
+        <Compile Include="Reader.fs" />
         <Compile Include="Writer.fs" />
         <Compile Include="Manifest.fs" />
-        <Compile Include="Reader.fs" />
         <Compile Include="Stats.fs" />
         <Compile Include="Query.fs" />
         <Compile Include="Verify.fs" />

@@ -24,6 +24,18 @@ type QueryError =
   | SegmentCorrupt of name: string * detail: string
   /// 読み取り中に再索引が完了し、一貫した世代を観測できなかった。
   | GenerationChanged
+  | InvalidArgument of name: string * detail: string
+  | ViewDisposed
+  | SearchIndexRequired
+
+/// Artifact-boundary failures from the low-level accessors. CLI/export catch only this type.
+exception QueryException of QueryError
+
+let private corrupt name detail =
+  raise(QueryException(SegmentCorrupt(name, detail)))
+
+let private invalid name detail =
+  raise(QueryException(InvalidArgument(name, detail)))
 
 module QueryError =
 
@@ -34,11 +46,16 @@ module QueryError =
     | SegmentMissing name -> $"セグメントがありません: {name}"
     | SegmentCorrupt(name, detail) -> $"{name}: {detail}"
     | GenerationChanged -> "読み取り中に成果物が更新されました。もう一度実行してください"
+    | InvalidArgument(name, detail) -> $"{name}: {detail}"
+    | ViewDisposed -> "GraphView has been disposed"
+    | SearchIndexRequired ->
+      "検索索引がありません。Reindex or explicitly build and publish a lexical lookup; no graph scan was performed."
 
 /// 1 ノード分の属性。文字列は参照のままで、復元は必要な分だけ行う。
 [<Struct>]
 type NodeView =
-  { Index: int
+  {
+    Index: int
     Id: NodeId
     Kind: NodeKind
     Language: Language
@@ -51,7 +68,8 @@ type NodeView =
     EndLine: int
     Ordinal: uint32
     StartByte: int64
-    EndByte: int64 }
+    EndByte: int64
+  }
 
 /// 探索の向き。
 type Direction =
@@ -94,6 +112,7 @@ type private EdgeSegments(forward: Reader.MappedSegment, backward: Reader.Mapped
 ///
 /// 破棄すると、このビューが返したすべての `ReadOnlySpan` は無効になる。
 /// 呼び出し側は span を保持せず、必要な値を取り出してから破棄すること。
+/// Dispose must not run concurrently with an accessor or while a returned span is in use.
 [<Sealed>]
 type GraphView
   private
@@ -104,108 +123,231 @@ type GraphView
     strings: Reader.MappedSegment,
     stringOffsets: Reader.MappedSegment,
     idMap: Reader.MappedSegment,
-    edges: Dictionary<EdgeKind, EdgeSegments>
+    edges: Dictionary<EdgeKind, EdgeSegments>,
+    lookup: Reader.MappedSegment voption
   ) =
   let mutable disposed = false
   let nodeCount = int nodes.Header.PrimaryCount
   let stringCount = int stringOffsets.Header.PrimaryCount
 
   let check () =
-    ObjectDisposedException.ThrowIf(disposed, typeof<GraphView>)
+    if disposed then
+      raise(QueryException ViewDisposed)
 
-  member _.Manifest = manifest
+  let checkNode index =
+    check()
 
-  member _.NodeCount = nodeCount
+    if index < 0 || index >= nodeCount then
+      invalid "node" "Index out of range"
 
-  member _.StringCount = stringCount
+  let checkStringRef name (index: uint32) =
+    if index >= uint32 stringCount then
+      corrupt name "String reference out of range"
 
-  member _.FileCount = int files.Header.PrimaryCount
+    int index
+
+  let language name code =
+    let value = Language.ofCode code
+
+    if Language.toCode value <> code then
+      corrupt name "Unknown language code"
+
+    value
+
+  let flags name code =
+    if code &&& ~~~ 8191u <> 0u then
+      corrupt name "Unknown node flags"
+
+    LanguagePrimitives.EnumOfValue<uint32, NodeFlags> code
+
+  let fileRecord (fileIndex: uint32) =
+    check()
+
+    if fileIndex >= uint32 files.Header.PrimaryCount then
+      invalid "fileIndex" "Index out of range"
+
+    let record =
+      files.Payload.Slice(int fileIndex * Format.RecordLength, Format.RecordLength)
+
+    language "files" (BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.LanguageOffset, 2)))
+    |> ignore
+
+    let encoding =
+      BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2))
+
+    if encoding < 1us || encoding > 12us then
+      corrupt "files" "Unknown encoding code"
+
+    flags "files" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4)))
+    |> ignore
+
+    if
+      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4)) > uint32
+        Int32.MaxValue
+      || BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8)) < 0L
+    then
+      corrupt "files" "Invalid file extent"
+
+    record
+
+  member _.Manifest =
+    check()
+    manifest
+
+  member _.NodeCount =
+    check()
+    nodeCount
+
+  member _.StringCount =
+    check()
+    stringCount
+
+  member _.FileCount =
+    check()
+    int files.Header.PrimaryCount
+
+  member internal _.Lookup =
+    check()
+    lookup
 
   /// 成果物が持つエッジ種別。マニフェストの記録ではなく、実際に開けたセグメントで決まる。
   member _.EdgeKinds =
-    edges.Keys
-    |> Seq.sortBy EdgeKind.toCode
-    |> Seq.toArray
+    check()
+    edges.Keys |> Seq.sortBy EdgeKind.toCode |> Seq.toArray
 
   /// 文字列を UTF-8 のまま取り出す。比較だけが目的なら復号せずに済む。
   member _.StringBytes(index: int) : ReadOnlySpan<byte> =
-    check ()
+    check()
 
-    if index < 0 || index >= stringCount then ReadOnlySpan.Empty
-    else
-      let offsets = stringOffsets.Payload
-      let start = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice(index * 8, 8))
-      let finish = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice((index + 1) * 8, 8))
-      let blob = strings.Payload
+    if index < 0 || index >= stringCount then
+      invalid "string" "Index out of range"
 
-      // 破損した成果物でも範囲外へ出ない。検証は `verify` の責務だが、
-      // 照会側でも境界を確かめる（docs/security.md C-6）。
-      if finish < start || finish > uint64 blob.Length then ReadOnlySpan.Empty
-      else blob.Slice(int start, int (finish - start))
+    let offsets = stringOffsets.Payload
+    let start = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice(index * 8, 8))
+
+    let finish =
+      BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice((index + 1) * 8, 8))
+
+    let blob = strings.Payload
+
+    if finish < start || finish > uint64 blob.Length then
+      corrupt "stroffsets" "String offsets out of range"
+
+    let bytes = blob.Slice(int start, int(finish - start))
+
+    if bytes.Length > Format.Lookup.MaxKeyBytes then
+      corrupt "strings" "String exceeds the supported 1 MiB UTF-8 limit"
+
+    try
+      Strings.utf8.GetCharCount bytes |> ignore
+    with :? DecoderFallbackException ->
+      corrupt "strings" "Invalid UTF-8"
+
+    bytes
 
   /// 文字列を復元する。必要な分だけ呼ぶこと。
   member this.String(index: int) =
     let bytes = this.StringBytes index
-    if bytes.Length = 0 then "" else Encoding.UTF8.GetString bytes
+    Strings.utf8.GetString bytes
 
   member _.Node(index: int) : NodeView =
-    check ()
-
-    if index < 0 || index >= nodeCount then
-      { Index = -1
-        Id = { High = 0UL; Low = 0UL }
-        Kind = Repository
-        Language = Unknown
-        Flags = NodeFlags.None
-        FileIndex = Format.NodeRecord.NoFile
-        NameRef = 0
-        QualifiedNameRef = 0
-        StartLine = 0
-        EndLine = 0
-        Ordinal = 0u
-        StartByte = 0L
-        EndByte = 0L }
-    else
-
+    checkNode index
     let record = nodes.Payload.Slice(index * Format.RecordLength, Format.RecordLength)
 
     let kind =
       match NodeKind.ofCode record[Format.NodeRecord.KindOffset] with
       | ValueSome value -> value
-      | ValueNone -> Repository
+      | ValueNone -> corrupt "nodes" "Unknown node kind"
 
-    let languageCode = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.NodeRecord.LanguageOffset, 2))
+    let languageCode =
+      BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.NodeRecord.LanguageOffset, 2))
+
+    let fileIndex =
+      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FileIndexOffset, 4))
+
+    if
+      fileIndex <> Format.NodeRecord.NoFile
+      && fileIndex >= uint32 files.Header.PrimaryCount
+    then
+      corrupt "nodes" "File reference out of range"
+
+    match kind with
+    | File when fileIndex = Format.NodeRecord.NoFile -> corrupt "nodes" "File node has no file record"
+    | Repository
+    | Directory when fileIndex <> Format.NodeRecord.NoFile -> corrupt "nodes" "Global node has a file record"
+    | _ -> ()
+
+    let startLine =
+      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.StartLineOffset, 4))
+
+    let endLine =
+      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.EndLineOffset, 4))
+
+    let startByte =
+      BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.NodeRecord.StartByteOffset, 8))
+
+    let endByte =
+      BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.NodeRecord.EndByteOffset, 8))
+
+    if
+      endLine > uint32 Int32.MaxValue
+      || startLine > endLine
+      || startByte < 0L
+      || endByte < startByte
+    then
+      corrupt "nodes" "Invalid node extent"
 
     { Index = index
-      Id = NodeId.ofBytes (record.Slice(Format.NodeRecord.IdOffset, Ids.NodeIdLength))
+      Id = NodeId.ofBytes(record.Slice(Format.NodeRecord.IdOffset, Ids.NodeIdLength))
       Kind = kind
-      Language = Language.ofCode languageCode
-      Flags =
-        LanguagePrimitives.EnumOfValue<uint32, NodeFlags>(
-          BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FlagsOffset, 4))
-        )
-      FileIndex = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FileIndexOffset, 4))
-      NameRef = int (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.NameOffset, 4)))
+      Language = language "nodes" languageCode
+      Flags = flags "nodes" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FlagsOffset, 4)))
+      FileIndex = fileIndex
+      NameRef =
+        checkStringRef "nodes" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.NameOffset, 4)))
       QualifiedNameRef =
-        int (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.QualifiedNameOffset, 4)))
-      StartLine = int (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.StartLineOffset, 4)))
-      EndLine = int (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.EndLineOffset, 4)))
+        checkStringRef
+          "nodes"
+          (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.QualifiedNameOffset, 4)))
+      StartLine = int startLine
+      EndLine = int endLine
       Ordinal = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.OrdinalOffset, 4))
-      StartByte = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.NodeRecord.StartByteOffset, 8))
-      EndByte = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.NodeRecord.EndByteOffset, 8)) }
+      StartByte = startByte
+      EndByte = endByte }
 
   /// ファイル レコードのパス文字列参照。
   member _.FilePathRef(fileIndex: uint32) =
-    check ()
+    let record = fileRecord fileIndex
+    checkStringRef "files" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4)))
 
-    if fileIndex = Format.NodeRecord.NoFile || int fileIndex >= int files.Header.PrimaryCount then -1
+  /// v3 dense order is Repository, Directories, Files, Symbols, ConfigSymbols.
+  /// NoFile represents legitimate absence; any other invalid reference is an error.
+  member this.FileNodeIndex(fileIndex: uint32) : int voption =
+    check()
+
+    if fileIndex = Format.NodeRecord.NoFile then
+      ValueNone
     else
-      let record = files.Payload.Slice(int fileIndex * Format.RecordLength, Format.RecordLength)
-      int (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4)))
+      let path = this.FilePathRef fileIndex
+      let index = 1L + int64 manifest.Counts.Directories + int64 fileIndex
+
+      if index >= int64 nodeCount then
+        corrupt "files" "File node is outside the dense table"
+
+      let node = this.Node(int index)
+
+      if
+        node.Kind <> File
+        || node.FileIndex <> fileIndex
+        || node.QualifiedNameRef <> path
+      then
+        corrupt "files" "File node disagrees with the dense file schema"
+
+      ValueSome(int index)
 
   /// ノード ID から密インデックスを引く。`.idmap` は ID の昇順なので二分探索できる。
-  member _.TryResolve(id: NodeId) =
-    check ()
+  member this.TryResolve(id: NodeId) =
+    check()
     let payload = idMap.Payload
     let count = int idMap.Header.PrimaryCount
     let indicesOffset = count * Ids.NodeIdLength
@@ -220,65 +362,99 @@ type GraphView
     while low <= high do
       let middle = low + (high - low) / 2
       let candidate = payload.Slice(middle * Ids.NodeIdLength, Ids.NodeIdLength)
+
+      let index =
+        BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(indicesOffset + middle * 4, 4))
+
+      if index >= uint32 nodeCount then
+        corrupt "idmap" "Node reference out of range"
+
+      if (this.Node(int index)).Id <> NodeId.ofBytes candidate then
+        corrupt "idmap" "Node ID does not match its reference"
+
+      if
+        middle > 0
+        && payload
+             .Slice((middle - 1) * Ids.NodeIdLength, Ids.NodeIdLength)
+             .SequenceCompareTo(candidate)
+           >= 0
+      then
+        corrupt "idmap" "IDs are not strictly increasing"
+
+      if
+        middle + 1 < count
+        && candidate.SequenceCompareTo(payload.Slice((middle + 1) * Ids.NodeIdLength, Ids.NodeIdLength))
+           >= 0
+      then
+        corrupt "idmap" "IDs are not strictly increasing"
+
       let comparison = candidate.SequenceCompareTo key
 
       if comparison = 0 then
-        found <- ValueSome(int (BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(indicesOffset + middle * 4, 4))))
+        found <- ValueSome(int index)
         low <- high + 1
-      elif comparison < 0 then low <- middle + 1
-      else high <- middle - 1
+      elif comparison < 0 then
+        low <- middle + 1
+      else
+        high <- middle - 1
 
     found
 
-  /// 指定した種別・向きの隣接ノードを返す。
-  ///
-  /// CSR の範囲は書き出し時に昇順・重複なしで整えてあるため、返る配列もその性質を保つ。
-  member _.Neighbors(index: int, kind: EdgeKind, direction: Direction) : int[] =
-    check ()
+  member internal _.Adjacency(index: int, kind: EdgeKind, incoming: bool) =
+    checkNode index
 
-    if index < 0 || index >= nodeCount then Array.empty
-    else
-      match edges.TryGetValue kind with
-      | false, _ -> Array.empty
-      | true, segments ->
-        let read (segment: Reader.MappedSegment) =
-          let payload = segment.Payload
-          let count = int segment.Header.PrimaryCount
+    if isNull(box kind) then
+      invalid "kind" "Edge kind must not be null"
 
-          if index >= count then Array.empty
-          else
-            let targetsOffset = (count + 1) * 8
-            let start = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(index * 8, 8))
-            let finish = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice((index + 1) * 8, 8))
+    match edges.TryGetValue kind with
+    | false, _ -> ValueNone
+    | true, segments ->
+      let segment = if incoming then segments.Backward else segments.Forward
+      let payload = segment.Payload
+      let start = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(index * 8, 8))
 
-            if finish < start || finish > segment.Header.SecondaryCount then Array.empty
-            else
-              let length = int (finish - start)
-              let result = Array.zeroCreate<int> length
+      let finish =
+        BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice((index + 1) * 8, 8))
 
-              for offset in 0 .. length - 1 do
-                result[offset] <-
-                  int (
-                    BinaryPrimitives.ReadUInt32LittleEndian(
-                      payload.Slice(targetsOffset + (int start + offset) * 4, 4)
-                    )
-                  )
+      if finish < start || finish > segment.Header.SecondaryCount then
+        corrupt "CSR" "Adjacency offsets out of range"
 
-              result
+      ValueSome(struct (segment, (nodeCount + 1) * 8 + int start * 4, int(finish - start)))
 
-        match direction with
-        | Outgoing -> read segments.Forward
-        | Incoming -> read segments.Backward
-        | Both ->
-          // 両向きの和集合。昇順・重複なしを保つために併合する。
-          let forward = read segments.Forward
-          let backward = read segments.Backward
-          let merged = SortedSet<int>()
-          merged.UnionWith forward
-          merged.UnionWith backward
-          let result = Array.zeroCreate merged.Count
-          merged.CopyTo result
-          result
+  member internal _.Target(segment: Reader.MappedSegment, offset: int, position: int) =
+    check()
+    let payload = segment.Payload
+
+    let target =
+      BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(offset + position * 4, 4))
+
+    if target >= uint32 nodeCount then
+      corrupt "CSR" "Target out of range"
+
+    if
+      position > 0
+      && BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(offset + (position - 1) * 4, 4))
+         >= target
+    then
+      corrupt "CSR" "Targets are not strictly increasing"
+
+    int target
+
+  /// Materializes one adjacency row. Use bounded traversal APIs for graph exploration.
+  member this.Neighbors(index: int, kind: EdgeKind, direction: Direction) : int[] =
+    if isNull(box direction) then
+      invalid "direction" "Direction must not be null"
+
+    let read incoming =
+      match this.Adjacency(index, kind, incoming) with
+      | ValueNone -> Array.empty
+      | ValueSome(struct (segment, offset, count)) ->
+        Array.init count (fun position -> this.Target(segment, offset, position))
+
+    match direction with
+    | Outgoing -> read false
+    | Incoming -> read true
+    | Both -> Array.append (read false) (read true) |> Array.distinct |> Array.sort
 
   interface IDisposable with
 
@@ -288,6 +464,10 @@ type GraphView
 
         for entry in edges.Values do
           (entry :> IDisposable).Dispose()
+
+        match lookup with
+        | ValueSome segment -> (segment :> IDisposable).Dispose()
+        | ValueNone -> ()
 
         (idMap :> IDisposable).Dispose()
         (stringOffsets :> IDisposable).Dispose()
@@ -300,88 +480,196 @@ type GraphView
   /// マニフェストを読んでからセグメントを開くまでの間に公開が起きると、退役した世代を
   /// 参照してしまう。開いた後にマニフェストを読み直し、変化していればやり直す。
   static member Open(outputDirectory: string) : Result<GraphView, QueryError> =
-    let mutable attempt = 0
-    let mutable outcome = ValueNone
+    if
+      String.IsNullOrWhiteSpace outputDirectory
+      || outputDirectory.IndexOf(char 0) >= 0
+    then
+      Error(InvalidArgument("outputDirectory", "Expected a nonempty directory path"))
+    else
 
-    while outcome.IsNone && attempt < StableOpenAttempts do
-      attempt <- attempt + 1
+      let mutable attempt = 0
+      let mutable outcome = ValueNone
 
-      match Manifest.read outputDirectory with
-      | Error error -> outcome <- ValueSome(Error(ArtifactUnreadable error))
-      | Ok manifest ->
-        let opened = List<IDisposable>()
+      while outcome.IsNone && attempt < StableOpenAttempts do
+        attempt <- attempt + 1
 
-        let openSegment (suffix: string) =
-          match
-            manifest.Segments
-            |> Array.tryFind (fun segment -> segment.Name.EndsWith("." + suffix, StringComparison.Ordinal))
-          with
-          | None -> Error(SegmentMissing suffix)
-          | Some descriptor ->
-            match Artifact.tryResolveSegment outputDirectory descriptor.Name with
-            | Error error -> Error(SegmentCorrupt(descriptor.Name, Artifact.PathError.describe error))
-            | Ok path ->
-              match Reader.MappedSegment.Open path with
-              | Error error -> Error(SegmentUnavailable(descriptor.Name, error))
-              | Ok segment ->
-                opened.Add segment
-                Ok segment
+        match Manifest.read outputDirectory with
+        | Error error -> outcome <- ValueSome(Error(ArtifactUnreadable error))
+        | Ok manifest ->
+          let opened = List<IDisposable>()
 
-        let result =
-          match
-            openSegment "nodes",
-            openSegment "files",
-            openSegment "strings",
-            openSegment "stroffsets",
-            openSegment "idmap"
-          with
-          | Ok nodes, Ok files, Ok strings, Ok stringOffsets, Ok idMap ->
-            let edges = Dictionary<EdgeKind, EdgeSegments>()
-            let mutable failure = ValueNone
+          let openSegment (suffix: string) (expected: Format.SegmentKind) =
+            match
+              manifest.Segments
+              |> Array.tryFind(fun segment -> segment.Name.EndsWith("." + suffix, StringComparison.Ordinal))
+            with
+            | None -> Error(SegmentMissing suffix)
+            | Some descriptor when
+              (manifest.Segments
+               |> Array.filter(fun segment -> segment.Name.EndsWith("." + suffix, StringComparison.Ordinal)))
+                .Length
+              <> 1
+              ->
+              Error(SegmentCorrupt(descriptor.Name, "Duplicate segment role"))
+            | Some descriptor ->
+              match Artifact.tryResolveSegment outputDirectory descriptor.Name with
+              | Error error -> Error(SegmentCorrupt(descriptor.Name, Artifact.PathError.describe error))
+              | Ok path ->
+                let mapped =
+                  try
+                    Reader.MappedSegment.Open path
+                  with
+                  | :? IO.IOException as error -> Error(Reader.OpenFailed(path, error.Message))
+                  | :? UnauthorizedAccessException as error -> Error(Reader.OpenFailed(path, error.Message))
 
-            // 成果物が持つ種別だけを開く。マニフェストが数えている種別を辿ることで、
-            // 種別が増えても照会側の対応が漏れない。
-            for entry in manifest.Counts.EdgeKinds do
-              if failure.IsNone then
-                match EdgeKind.all |> Array.tryFind (fun kind -> EdgeKind.name kind = entry.Kind) with
-                | None -> ()
-                | Some kind ->
-                  match openSegment $"edges.{entry.Kind}", openSegment $"redges.{entry.Kind}" with
-                  | Ok forward, Ok backward -> edges[kind] <- new EdgeSegments(forward, backward)
-                  | Error error, _
-                  | _, Error error -> failure <- ValueSome error
+                match mapped with
+                | Error error -> Error(SegmentUnavailable(descriptor.Name, error))
+                | Ok segment ->
+                  opened.Add segment
 
-            match failure with
-            | ValueSome error -> Error error
-            | ValueNone ->
-              Ok(new GraphView(manifest, nodes, files, strings, stringOffsets, idMap, edges))
-          | Error error, _, _, _, _
-          | _, Error error, _, _, _
-          | _, _, Error error, _, _
-          | _, _, _, Error error, _
-          | _, _, _, _, Error error -> Error error
+                  if segment.Header.Kind <> expected then
+                    Error(SegmentCorrupt(suffix, "Unexpected segment kind"))
+                  elif int64 segment.ByteLength <> descriptor.ByteLength then
+                    Error(SegmentCorrupt(suffix, "Manifest length mismatch"))
+                  else
+                    Ok segment
 
-        match result with
-        | Error error ->
-          for item in opened do
-            item.Dispose()
+          let result =
+            match
+              openSegment "nodes" Format.Nodes,
+              openSegment "files" Format.Files,
+              openSegment "strings" Format.Strings,
+              openSegment "stroffsets" Format.StringOffsets,
+              openSegment "idmap" Format.IdMap
+            with
+            | Ok nodes, Ok files, Ok strings, Ok stringOffsets, Ok idMap ->
+              let edges = Dictionary<EdgeKind, EdgeSegments>()
+              let mutable failure = ValueNone
 
-          outcome <- ValueSome(Error error)
-        | Ok view ->
-          // 開いている間に公開が起きていないことを確かめる。
-          match Manifest.read outputDirectory with
-          | Ok current when Manifest.generationIn current = Manifest.generationIn manifest ->
-            outcome <- ValueSome(Ok view)
-          | Ok _ ->
-            (view :> IDisposable).Dispose()
-            // 世代が変わった。新しいマニフェストで開き直す。
+              let fail name detail =
+                failure <- ValueSome(SegmentCorrupt(name, detail))
+
+              let counts = manifest.Counts
+
+              if
+                nodes.Header.PrimaryCount <> uint64 counts.Nodes
+                || files.Header.PrimaryCount <> uint64 counts.Files
+                || strings.Header.PrimaryCount <> uint64 counts.Strings
+                || strings.Header.SecondaryCount <> uint64 counts.StringBytes
+                || stringOffsets.Header.PrimaryCount <> strings.Header.PrimaryCount
+                || stringOffsets.Header.SecondaryCount <> strings.Header.SecondaryCount
+                || idMap.Header.PrimaryCount <> nodes.Header.PrimaryCount
+                || 1L + int64 counts.Directories + int64 counts.Files > int64 counts.Nodes
+              then
+                fail "segments" "Segment counts disagree with the manifest"
+
+              if
+                BinaryPrimitives.ReadUInt64LittleEndian(stringOffsets.Payload.Slice(0, 8))
+                <> 0UL
+                || BinaryPrimitives.ReadUInt64LittleEndian(
+                     stringOffsets.Payload.Slice(int stringOffsets.Header.PrimaryCount * 8, 8)
+                   )
+                   <> strings.Header.SecondaryCount
+              then
+                fail "stroffsets" "Invalid first or terminal string offset"
+
+              // 成果物が持つ種別だけを開く。マニフェストが数えている種別を辿ることで、
+              // 種別が増えても照会側の対応が漏れない。
+              for entry in manifest.Counts.EdgeKinds do
+                if failure.IsNone then
+                  match EdgeKind.all |> Array.tryFind(fun kind -> EdgeKind.name kind = entry.Kind) with
+                  | None -> fail "manifest" $"Unknown edge kind {entry.Kind}"
+                  | Some kind ->
+                    match
+                      openSegment $"edges.{entry.Kind}" Format.AdjacencyCsr,
+                      openSegment $"redges.{entry.Kind}" Format.AdjacencyCsr
+                    with
+                    | Ok forward, Ok backward ->
+                      for segment in [| forward; backward |] do
+                        if
+                          segment.Header.PrimaryCount <> nodes.Header.PrimaryCount
+                          || segment.Header.SecondaryCount <> uint64 entry.Count
+                        then
+                          fail entry.Kind "CSR counts disagree"
+                        elif
+                          BinaryPrimitives.ReadUInt64LittleEndian(segment.Payload.Slice(0, 8)) <> 0UL
+                          || BinaryPrimitives.ReadUInt64LittleEndian(
+                               segment.Payload.Slice(int nodes.Header.PrimaryCount * 8, 8)
+                             )
+                             <> segment.Header.SecondaryCount
+                        then
+                          fail entry.Kind "Invalid first or terminal CSR offset"
+
+                      if edges.ContainsKey kind then
+                        fail entry.Kind "Duplicate edge kind"
+                      else
+                        edges[kind] <- new EdgeSegments(forward, backward)
+                    | Error error, _
+                    | _, Error error -> failure <- ValueSome error
+
+              let mutable lookup = ValueNone
+
+              if
+                manifest.Segments
+                |> Array.exists(fun segment -> segment.Name.EndsWith(".lookup", StringComparison.Ordinal))
+              then
+                match openSegment "lookup" Format.LexicalLookup with
+                | Error error -> failure <- ValueSome error
+                | Ok segment ->
+                  let data = segment.Payload
+                  let blobBytes = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(16, 8))
+
+                  let minimum =
+                    32UL + segment.Header.PrimaryCount * 24UL + segment.Header.SecondaryCount * 8UL
+
+                  if
+                    BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(0, 4))
+                    <> Format.Lookup.Version
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4, 4)) <> uint32 counts.Nodes
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(8, 4)) <> uint32 counts.Files
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(12, 4))
+                       <> uint32 counts.Strings
+                    || blobBytes <> uint64 data.Length - minimum
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(24, 4)) = 0u
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(24, 4))
+                       >= uint32 segment.Header.PrimaryCount
+                    || BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(28, 4)) <> 0u
+                  then
+                    fail "lookup" "Invalid lookup prelude or counts"
+                  else
+                    lookup <- ValueSome segment
+
+              match failure with
+              | ValueSome error -> Error error
+              | ValueNone -> Ok(new GraphView(manifest, nodes, files, strings, stringOffsets, idMap, edges, lookup))
+            | Error error, _, _, _, _
+            | _, Error error, _, _, _
+            | _, _, Error error, _, _
+            | _, _, _, Error error, _
+            | _, _, _, _, Error error -> Error error
+
+          match result with
           | Error error ->
-            (view :> IDisposable).Dispose()
-            outcome <- ValueSome(Error(ArtifactUnreadable error))
+            for item in opened do
+              item.Dispose()
 
-    match outcome with
-    | ValueSome result -> result
-    | ValueNone -> Error GenerationChanged
+            match Manifest.read outputDirectory with
+            | Ok current when current <> manifest -> ()
+            | Ok _ -> outcome <- ValueSome(Error error)
+            | Error changed -> outcome <- ValueSome(Error(ArtifactUnreadable changed))
+          | Ok view ->
+            // 開いている間に公開が起きていないことを確かめる。
+            match Manifest.read outputDirectory with
+            | Ok current when current = manifest -> outcome <- ValueSome(Ok view)
+            | Ok _ -> (view :> IDisposable).Dispose()
+            // 世代が変わった。新しいマニフェストで開き直す。
+            | Error error ->
+              (view :> IDisposable).Dispose()
+              outcome <- ValueSome(Error(ArtifactUnreadable error))
+
+      match outcome with
+      | ValueSome result -> result
+      | ValueNone -> Error GenerationChanged
 
 // --- 検索 -------------------------------------------------------------------
 
@@ -432,128 +720,421 @@ type SearchHit =
     Strength: MatchStrength
     Target: MatchTarget }
 
-/// 走査するノード数の上限。
-///
-/// M2 の成果物には検索索引がない。全走査へ黙って退行させず、上限に達したら
-/// 打ち切りとして報告する（backlog 028）。索引は M5 で追加する。
 [<Literal>]
-let MaxScannedNodes = 20_000_000
+let MaxScannedNodes = 50_000
+
+/// Separate bounds for the scanned key region and decoded posting strings.
+[<Literal>]
+let MaxLookupBytes = 268_435_456
+
+[<Literal>]
+let MaxLookupPostings = 200_000
+
+[<Literal>]
+let MaxLookupCandidates = 200_000
+
+[<Literal>]
+let private LookupScanChunkBytes = 1_048_576
 
 type SearchOutcome =
-  { Hits: SearchHit[]
+  {
+    Hits: SearchHit[]
     /// 上限に達して走査を打ち切った。
     Truncated: bool
-    /// 検索索引を使わず全走査したか。M2 の成果物では常に true。
+    /// True only when the on-disk lexical lookup was used.
     UsedIndex: bool
-    ScannedNodes: int }
+    ScannedNodes: int
+    OmittedCount: int
+    OmittedCountIsLowerBound: bool
+    Diagnostics: string[]
+  }
 
-/// 文字列表を 1 回走査して、一致の強さを求める。
-///
-/// ノードごとに文字列を復元すると、ノード数ぶんの割り当てが起きる。文字列表は重複排除
-/// 済みで要素数が少ないため、先に表側で判定してからノードを走査するほうが速い。
-let private matchStringTable (view: GraphView) (needle: string) (ignoreCase: bool) =
-  let strengths = Array.zeroCreate<byte> view.StringCount
+let private lookupRangeAt (segment: Reader.MappedSegment) (index: int) =
+  let data = segment.Payload
+  let keyCount = int segment.Header.PrimaryCount
+  let postingCount = int segment.Header.SecondaryCount
+  let blobStart = 32 + keyCount * 24 + postingCount * 8
+  let record = data.Slice(32 + index * 24, 24)
+  let offset = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0, 8))
+  let length = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(8, 4))
+  let first = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(12, 4))
+  let count = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(16, 4))
 
-  if ignoreCase then
-    // 大文字小文字を畳む場合は復号が要る。ロケール依存の比較はしない。
-    let folded = Srcnet.Text.Unicode.caseFold needle
+  if
+    offset > uint64(data.Length - blobStart)
+    || uint64 length > uint64(data.Length - blobStart) - offset
+    || length = 0u
+    || length > uint32 Format.Lookup.MaxKeyBytes
+    || count = 0u
+    || uint64 first + uint64 count > uint64 postingCount
+    || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(20, 4)) <> 0u
+  then
+    corrupt "lookup" "Invalid key or posting range"
 
-    for index in 0 .. view.StringCount - 1 do
-      let text = Srcnet.Text.Unicode.caseFold(view.String index)
+  if index = 0 && (offset <> 0UL || first <> 0u) then
+    corrupt "lookup" "Invalid initial key range"
 
-      strengths[index] <-
-        if String.Equals(text, folded, StringComparison.Ordinal) then 3uy
-        elif text.StartsWith(folded, StringComparison.Ordinal) then 2uy
-        elif text.Contains(folded, StringComparison.Ordinal) then 1uy
-        else 0uy
-  else
-    // 比較はバイト単位で行う。UTF-8 は自己同期的なので、部分列の一致が
-    // 文字境界を跨いだ誤検出になることはない。
-    let needleBytes = Encoding.UTF8.GetBytes needle
+  if index + 1 < keyCount then
+    let next = data.Slice(32 + (index + 1) * 24, 24)
 
-    for index in 0 .. view.StringCount - 1 do
-      let bytes = view.StringBytes index
+    if
+      BinaryPrimitives.ReadUInt64LittleEndian(next.Slice(0, 8))
+      <> offset + uint64 length
+      || BinaryPrimitives.ReadUInt32LittleEndian(next.Slice(12, 4)) <> first + count
+    then
+      corrupt "lookup" "Noncontiguous key or posting ranges"
+  elif
+    offset + uint64 length <> uint64(data.Length - blobStart)
+    || first + count <> uint32 postingCount
+  then
+    corrupt "lookup" "Invalid terminal key range"
 
-      strengths[index] <-
-        if bytes.SequenceEqual(ReadOnlySpan needleBytes) then 3uy
-        elif bytes.StartsWith(ReadOnlySpan needleBytes) then 2uy
-        elif bytes.IndexOf(ReadOnlySpan needleBytes) >= 0 then 1uy
-        else 0uy
+  struct (blobStart + int offset, int length, int first, int count)
 
-  strengths
+let private lookupKeyAt (segment: Reader.MappedSegment) (index: int) =
+  let struct (offset, length, first, count) = lookupRangeAt segment index
 
-let private strengthOf (code: byte) =
-  match code with
-  | 3uy -> ValueSome Exact
-  | 2uy -> ValueSome Prefix
-  | 1uy -> ValueSome Substring
-  | _ -> ValueNone
+  let normalCount =
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
 
-/// 名前・修飾名・パスに対して字句一致で検索する。
-///
-/// 順位付けは呼び出し側が行う。ここは「どのノードが、どの対象に、どの強さで一致したか」
-/// までを決める。
-let search (view: GraphView) (needle: string) (ignoreCase: bool) (cancellation: CancellationToken) =
-  // 検索キーは NFC 正規化する。抽出時の名前も NFC なので、合成の違いで外れない。
-  let normalized = Srcnet.Text.Unicode.normalize needle
+  let text =
+    try
+      Strings.utf8.GetString(segment.Payload.Slice(offset, length))
+    with :? DecoderFallbackException ->
+      corrupt "lookup" "Invalid UTF-8"
 
-  if normalized.Length = 0 then
-    { Hits = Array.empty
-      Truncated = false
-      UsedIndex = false
-      ScannedNodes = 0 }
-  else
+  if not(String.Equals(text, Strings.lookupKey (index >= normalCount) text, StringComparison.Ordinal)) then
+    corrupt "lookup" "Key is not normalized"
 
-  let strengths = matchStringTable view normalized ignoreCase
-  let hits = List<SearchHit>()
-  let limit = min view.NodeCount MaxScannedNodes
-  let mutable scanned = 0
+  struct (text, first, count, length)
 
-  for index in 0 .. limit - 1 do
-    if index &&& 0xFFFF = 0 then cancellation.ThrowIfCancellationRequested()
-    scanned <- scanned + 1
-    let node = view.Node index
+let private lookupContainingKey (segment: Reader.MappedSegment) firstKey endKey position =
+  let mutable low = firstKey
+  let mutable high = endKey - 1
+  let mutable found = -1
 
-    // 一致の強さは「名前 → 修飾名 → パス」の順で最も強いものを採る。
-    let nameStrength = if node.NameRef < strengths.Length then strengths[node.NameRef] else 0uy
+  while low <= high do
+    let middle = low + (high - low) / 2
+    let struct (offset, length, _, _) = lookupRangeAt segment middle
 
-    let qualifiedStrength =
-      if node.QualifiedNameRef < strengths.Length then strengths[node.QualifiedNameRef] else 0uy
+    if position < offset then
+      high <- middle - 1
+    elif position >= offset + length then
+      low <- middle + 1
+    else
+      found <- middle
+      low <- high + 1
 
-    let pathRef = view.FilePathRef node.FileIndex
-    let pathStrength = if pathRef >= 0 && pathRef < strengths.Length then strengths[pathRef] else 0uy
+  if found < 0 then
+    corrupt "lookup" "Byte match is outside the key ranges"
 
-    // 強さを先に比較し、同点では名前 → 修飾名 → パスの順を保つ。
-    let struct (target, strength) =
-      if nameStrength >= qualifiedStrength && nameStrength >= pathStrength then struct (Name, nameStrength)
-      elif qualifiedStrength >= pathStrength then struct (QualifiedName, qualifiedStrength)
-      else struct (Path, pathStrength)
+  found
 
-    match strengthOf strength with
-    | ValueNone -> ()
-    | ValueSome value ->
-      hits.Add
-        { Node = index
-          Strength = value
-          Target = target }
+let private searchCore
+  (exactNamesOnly: bool)
+  (view: GraphView)
+  (needle: string)
+  (ignoreCase: bool)
+  (cancellation: CancellationToken)
+  =
+  cancellation.ThrowIfCancellationRequested()
 
-  { Hits = hits.ToArray()
-    Truncated = view.NodeCount > limit
-    UsedIndex = false
-    ScannedNodes = scanned }
+  if String.IsNullOrEmpty needle then
+    invalid "text" "Search text must not be empty"
+
+  if needle.Length > Format.Lookup.MaxKeyBytes then
+    invalid "text" "Search text exceeds the lookup key limit"
+
+  let normalized =
+    try
+      Strings.utf8.GetByteCount needle |> ignore
+      Strings.lookupKey ignoreCase needle
+    with :? EncoderFallbackException ->
+      invalid "text" "Invalid Unicode"
+
+  if Strings.utf8.GetByteCount normalized > Format.Lookup.MaxKeyBytes then
+    invalid "text" "Search text exceeds the UTF-8 lookup key limit"
+
+  let segment =
+    match view.Lookup with
+    | ValueSome value -> value
+    | ValueNone -> raise(QueryException SearchIndexRequired)
+
+  let normalCount =
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
+
+  let firstKey = if ignoreCase then normalCount else 0
+
+  let endKey =
+    if ignoreCase then
+      int segment.Header.PrimaryCount
+    else
+      normalCount
+
+  let postingBase = 32 + int segment.Header.PrimaryCount * 24
+
+  let checkedKey index =
+    let struct (text, _, _, _) as key = lookupKeyAt segment index
+
+    if index > firstKey then
+      let struct (previous, _, _, _) = lookupKeyAt segment (index - 1)
+
+      if String.CompareOrdinal(previous, text) >= 0 then
+        corrupt "lookup" "Keys are not strictly increasing"
+
+    key
+
+  let mutable low = firstKey
+  let mutable high = endKey
+
+  while low < high do
+    cancellation.ThrowIfCancellationRequested()
+    let middle = low + (high - low) / 2
+    let struct (text, _, _, _) = checkedKey middle
+
+    if String.CompareOrdinal(text, normalized) < 0 then
+      low <- middle + 1
+    else
+      high <- middle
+
+  let hits = Dictionary<int, SearchHit>()
+  let validatedReferences = HashSet<int>()
+  let mutable decodedBytes = 0L
+  let mutable work = 0
+  let mutable omitted = 0
+  let mutable truncated = false
+
+  let addKey strength (struct (text: string, first: int, count: int, _: int)) =
+    validatedReferences.Clear()
+    let mutable position = 0
+    let mutable previous = struct (-1, -1)
+
+    while position < count && not truncated do
+      if work >= MaxLookupPostings then
+        truncated <- true
+      else
+        if work &&& 1023 = 0 then
+          cancellation.ThrowIfCancellationRequested()
+
+        let record = segment.Payload.Slice(postingBase + (first + position) * 8, 8)
+        let index = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(0, 4))
+        let targetCode = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(4, 4))
+
+        if index >= uint32 view.NodeCount || targetCode > 2u then
+          corrupt "lookup" "Invalid posting reference or target"
+
+        let pair = struct (int index, int targetCode)
+
+        if compare pair previous <= 0 then
+          corrupt "lookup" "Postings are not strictly increasing"
+
+        previous <- pair
+
+        if not exactNamesOnly || targetCode <> 2u then
+          let node = view.Node(int index)
+
+          let target, reference =
+            match targetCode with
+            | 0u -> Name, node.NameRef
+            | 1u -> QualifiedName, node.QualifiedNameRef
+            | 2u ->
+              if node.FileIndex = Format.NodeRecord.NoFile then
+                corrupt "lookup" "Path posting has no file"
+
+              Path, view.FilePathRef node.FileIndex
+            | _ -> corrupt "lookup" "Invalid posting target"
+
+          if validatedReferences.Add reference then
+            let bytes = view.StringBytes reference
+
+            if int64 bytes.Length > int64 MaxLookupBytes - decodedBytes then
+              truncated <- true
+            else
+              decodedBytes <- decodedBytes + int64 bytes.Length
+
+              if Strings.lookupKey ignoreCase (Strings.utf8.GetString bytes) <> text then
+                corrupt "lookup" "Posting key disagrees with its node"
+
+          if not truncated then
+            let hit =
+              { Node = int index
+                Strength = strength
+                Target = target }
+
+            match hits.TryGetValue hit.Node with
+            | true, existing ->
+              if
+                compare
+                  (MatchStrength.rank strength, MatchTarget.rank target)
+                  (MatchStrength.rank existing.Strength, MatchTarget.rank existing.Target) < 0
+              then
+                hits[hit.Node] <- hit
+            | false, _ ->
+              if hits.Count >= MaxScannedNodes then
+                omitted <- 1
+                truncated <- true
+              else
+                hits.Add(hit.Node, hit)
+
+        position <- position + 1
+        work <- work + 1
+
+  // Exact and prefix keys are sought before spending any substring work budget.
+  let prefixStart = low
+  let mutable cursor = prefixStart
+  let mutable prefix = true
+
+  while cursor < endKey
+        && prefix
+        && not truncated
+        && (not exactNamesOnly || cursor = prefixStart) do
+    cancellation.ThrowIfCancellationRequested()
+    let struct (text, _, _, _) as key = checkedKey cursor
+
+    if
+      text = normalized
+      || (not exactNamesOnly && text.StartsWith(normalized, StringComparison.Ordinal))
+    then
+      addKey (if text = normalized then Exact else Prefix) key
+      cursor <- cursor + 1
+    else
+      prefix <- false
+
+  let prefixEnd = cursor
+
+  if not exactNamesOnly && not truncated && firstKey < endKey then
+    let needleBytes = Strings.utf8.GetBytes normalized
+    let struct (regionStart, _, _, _) = lookupRangeAt segment firstKey
+    let struct (lastOffset, lastLength, _, _) = lookupRangeAt segment (endKey - 1)
+    let regionEnd = lastOffset + lastLength
+    let budgetEnd = regionStart + min MaxLookupBytes (regionEnd - regionStart)
+    let mutable validatedEnd = regionStart
+    let mutable searchPosition = regionStart
+    let mutable candidates = 0
+
+    // Scan mmap bytes rather than allocating one string per dictionary key. Keep
+    // needleLength-1 bytes across windows (at most one extra window of work);
+    // validate UTF-8 at complete scalar boundaries.
+    // Only byte matches seek/decode a containing key, and cross-key matches are rejected.
+    while validatedEnd < budgetEnd && not truncated do
+      cancellation.ThrowIfCancellationRequested()
+
+      let mutable finish =
+        validatedEnd + min LookupScanChunkBytes (budgetEnd - validatedEnd)
+
+      if finish < regionEnd then
+        let mutable continuationBytes = 0
+
+        while finish > validatedEnd
+              && segment.Payload[finish] &&& 0xC0uy = 0x80uy
+              && continuationBytes < 3 do
+          finish <- finish - 1
+          continuationBytes <- continuationBytes + 1
+
+        if segment.Payload[finish] &&& 0xC0uy = 0x80uy then
+          corrupt "lookup" "Invalid UTF-8"
+
+      if finish = validatedEnd then
+        truncated <- true
+      else
+        try
+          Strings.utf8.GetCharCount(segment.Payload.Slice(validatedEnd, finish - validatedEnd))
+          |> ignore
+        with :? DecoderFallbackException ->
+          corrupt "lookup" "Invalid UTF-8"
+
+        validatedEnd <- finish
+        let mutable searching = true
+
+        while searching
+              && not truncated
+              && needleBytes.Length <= validatedEnd - searchPosition do
+          cancellation.ThrowIfCancellationRequested()
+
+          let relative =
+            segment.Payload
+              .Slice(searchPosition, validatedEnd - searchPosition)
+              .IndexOf(ReadOnlySpan needleBytes)
+
+          if relative < 0 then
+            searchPosition <- validatedEnd - needleBytes.Length + 1
+            searching <- false
+          elif candidates >= MaxLookupCandidates then
+            truncated <- true
+          else
+            candidates <- candidates + 1
+            let position = searchPosition + relative
+            let index = lookupContainingKey segment firstKey endKey position
+            let struct (offset, length, _, _) = lookupRangeAt segment index
+            let keyEnd = offset + length
+
+            if
+              needleBytes.Length <= keyEnd - position
+              && (index < prefixStart || index >= prefixEnd)
+            then
+              if keyEnd > budgetEnd then
+                truncated <- true
+              else
+                let key = checkedKey index
+
+                let strength =
+                  if position <> offset then Substring
+                  elif needleBytes.Length = length then Exact
+                  else Prefix
+
+                addKey strength key
+
+            searchPosition <- keyEnd
+
+    if budgetEnd < regionEnd then
+      truncated <- true
+
+  { Hits = hits.Values |> Seq.sortBy(fun hit -> hit.Node) |> Seq.toArray
+    Truncated = truncated
+    UsedIndex = true
+    ScannedNodes = hits.Count + omitted
+    OmittedCount = omitted
+    OmittedCountIsLowerBound = truncated
+    Diagnostics =
+      if truncated then
+        [| "Lexical lookup work limit reached; unseen node hits are not counted. omittedCount is a lower bound." |]
+      else
+        Array.empty }
+
+/// Binary exact/prefix lookup plus bounded UTF-8 key-blob scanning for substrings.
+/// No node-table fallback and no writes. Omission counts always count nodes, not keys/postings.
+let search (view: GraphView) (needle: string) (ignoreCase: bool) (cancellation: CancellationToken) : SearchOutcome =
+  searchCore false view needle ignoreCase cancellation
+
+/// Exact Name/QualifiedName matches only, deduplicated by node. Owning-file Path
+/// postings do not count as names. File/directory logical paths remain searchable
+/// through QualifiedName. No prefix/substring work is performed.
+/// A nontruncated result proves the complete exact-name candidate set; callers must
+/// still reject uniqueness when the posting/node work limits truncate this lookup.
+let searchExactNames
+  (view: GraphView)
+  (needle: string)
+  (ignoreCase: bool)
+  (cancellation: CancellationToken)
+  : SearchOutcome =
+  searchCore true view needle ignoreCase cancellation
 
 /// 検索結果の順位。docs/query-and-cli.md 3 の辞書式に従う。
 ///
 /// 中心性（5 段目）は M6 で導入するため、現時点では常に 0 として扱う。順位が一意に
 /// 定まることは 6 段目のパス順と、最後の ID 順で保証する。
 let compareHits (view: GraphView) (left: SearchHit) (right: SearchHit) =
-  let byStrength = compare (MatchStrength.rank left.Strength) (MatchStrength.rank right.Strength)
+  let byStrength =
+    compare (MatchStrength.rank left.Strength) (MatchStrength.rank right.Strength)
 
-  if byStrength <> 0 then byStrength
+  if byStrength <> 0 then
+    byStrength
   else
-    let byTarget = compare (MatchTarget.rank left.Target) (MatchTarget.rank right.Target)
+    let byTarget =
+      compare (MatchTarget.rank left.Target) (MatchTarget.rank right.Target)
 
-    if byTarget <> 0 then byTarget
+    if byTarget <> 0 then
+      byTarget
     else
       let leftNode = view.Node left.Node
       let rightNode = view.Node right.Node
@@ -564,9 +1145,11 @@ let compareHits (view: GraphView) (left: SearchHit) (right: SearchHit) =
         elif flags.HasFlag NodeFlags.DeclarationOnly then 1
         else 2
 
-      let byDefinition = compare (definitionRank leftNode.Flags) (definitionRank rightNode.Flags)
+      let byDefinition =
+        compare (definitionRank leftNode.Flags) (definitionRank rightNode.Flags)
 
-      if byDefinition <> 0 then byDefinition
+      if byDefinition <> 0 then
+        byDefinition
       else
         // フラグによる減点。順位を下げるだけで、除外はしない。
         let penalty (flags: NodeFlags) =
@@ -576,13 +1159,28 @@ let compareHits (view: GraphView) (left: SearchHit) (right: SearchHit) =
 
         let byPenalty = compare (penalty leftNode.Flags) (penalty rightNode.Flags)
 
-        if byPenalty <> 0 then byPenalty
+        if byPenalty <> 0 then
+          byPenalty
         else
-          let leftPath = view.String(view.FilePathRef leftNode.FileIndex)
-          let rightPath = view.String(view.FilePathRef rightNode.FileIndex)
-          let byPath = String.CompareOrdinal(leftPath, rightPath)
+          let path node =
+            if node.FileIndex <> Format.NodeRecord.NoFile then
+              view.String(view.FilePathRef node.FileIndex)
+            elif node.Kind = Directory then
+              view.String node.QualifiedNameRef
+            else
+              ""
 
-          if byPath <> 0 then byPath
+          let byKind =
+            compare (NodeKind.toCode leftNode.Kind) (NodeKind.toCode rightNode.Kind)
+
+          let byPath =
+            if byKind <> 0 then
+              byKind
+            else
+              String.CompareOrdinal(path leftNode, path rightNode)
+
+          if byPath <> 0 then
+            byPath
           else
             // 同点の最終解消。ID は決定的なので順序も決定的になる。
             compare leftNode.Id rightNode.Id
@@ -593,85 +1191,229 @@ let compareHits (view: GraphView) (left: SearchHit) (right: SearchHit) =
 [<Literal>]
 let MaxVisitedNodes = 200_000
 
+[<Literal>]
+let MaxExploredEdges = 400_000
+
+[<Literal>]
+let MaxTraversalDepth = 64
+
 [<Struct>]
-type EdgeView =
-  { From: int
-    To: int
-    Kind: EdgeKind }
+type EdgeView = { From: int; To: int; Kind: EdgeKind }
 
 type Traversal =
-  { /// 起点からの距離つきで訪れたノード。距離の昇順、同距離は密インデックス昇順。
+  {
+    /// 起点からの距離つきで訪れたノード。距離の昇順、同距離は密インデックス昇順。
     Nodes: (struct (int * int))[]
     /// 辿ったエッジ。始点・種別コード・終点の昇順。
     Edges: EdgeView[]
     /// 上限に達して打ち切った。
-    Truncated: bool }
+    Truncated: bool
+    OmittedCount: int
+    OmittedEdgeCount: int
+    OmittedCountIsLowerBound: bool
+    Diagnostics: string[]
+  }
+
+type PathOutcome =
+  { Path: int[] voption
+    Edges: EdgeView[]
+    Truncated: bool
+    OmittedCount: int
+    OmittedCountIsLowerBound: bool
+    Diagnostics: string[] }
+
+let private directions direction =
+  match direction with
+  | Outgoing -> [| false |]
+  | Incoming -> [| true |]
+  | Both -> [| false; true |]
+
+let private validateTraversal (view: GraphView) (starts: int[]) (kinds: EdgeKind[]) direction depth =
+  if isNull(box starts) || starts.Length = 0 then
+    invalid "starts" "At least one start is required"
+
+  if starts.Length > MaxVisitedNodes then
+    invalid "starts" "Too many starting nodes"
+
+  if isNull(box kinds) then
+    invalid "kinds" "Kinds must not be null"
+
+  if kinds.Length > EdgeKind.all.Length then
+    invalid "kinds" "Too many edge kinds"
+
+  for kind in kinds do
+    if isNull(box kind) then
+      invalid "kind" "Edge kind must not be null"
+
+  if isNull(box direction) then
+    invalid "direction" "Direction must not be null"
+
+  if depth < 0 || depth > MaxTraversalDepth then
+    invalid "depth" $"Expected 0..{MaxTraversalDepth}"
+
+  for start in starts do
+    if start < 0 || start >= view.NodeCount then
+      invalid "node" "Index out of range"
+
+    view.Node start |> ignore
+
+  kinds |> Array.distinct |> Array.sortBy EdgeKind.toCode
+
+let private compareEdges (left: EdgeView) (right: EdgeView) =
+  let byFrom = compare left.From right.From
+
+  if byFrom <> 0 then
+    byFrom
+  else
+    let byKind = compare (EdgeKind.toCode left.Kind) (EdgeKind.toCode right.Kind)
+    if byKind <> 0 then byKind else compare left.To right.To
+
+/// Does not materialize adjacency rows, including an adversarial high-degree row.
+let private visitEdges
+  (view: GraphView)
+  current
+  (kinds: EdgeKind[])
+  direction
+  (cancellation: CancellationToken)
+  remaining
+  (visit: int -> EdgeView -> bool)
+  =
+  let orientations = directions direction
+  let mutable examined = 0
+  let mutable complete = true
+  let mutable kindIndex = 0
+
+  while complete && kindIndex < kinds.Length do
+    let kind = kinds[kindIndex]
+    let mutable orientation = 0
+
+    while complete && orientation < orientations.Length do
+      let incoming = orientations[orientation]
+
+      match view.Adjacency(current, kind, incoming) with
+      | ValueNone -> ()
+      | ValueSome(struct (segment, offset, count)) ->
+        let mutable position = 0
+
+        while complete && position < count do
+          if examined >= remaining then
+            complete <- false
+          else
+            if examined &&& 1023 = 0 then
+              cancellation.ThrowIfCancellationRequested()
+
+            let next = view.Target(segment, offset, position)
+
+            let edge =
+              if incoming then
+                { From = next
+                  To = current
+                  Kind = kind }
+              else
+                { From = current
+                  To = next
+                  Kind = kind }
+
+            examined <- examined + 1
+            complete <- visit next edge
+            position <- position + 1
+
+      orientation <- orientation + 1
+
+    kindIndex <- kindIndex + 1
+
+  struct (examined, complete)
 
 /// 幅優先で近傍を辿る。
 ///
-/// 深さと訪問数の両方に上限を設ける。どちらかに達したら打ち切り、結果に印を残す。
-let neighbors
+/// Requested depth filters the traversal; boundary nodes are not expanded.
+/// Only safety caps truncate the result or contribute omitted candidates.
+let neighborsFrom
   (view: GraphView)
-  (start: int)
+  (starts: int[])
   (kinds: EdgeKind[])
   (direction: Direction)
   (depth: int)
   (cancellation: CancellationToken)
   : Traversal =
-  if start < 0 || start >= view.NodeCount then
-    { Nodes = Array.empty
-      Edges = Array.empty
-      Truncated = false }
-  else
-
+  cancellation.ThrowIfCancellationRequested()
+  let kinds = validateTraversal view starts kinds direction depth
   let distance = Dictionary<int, int>()
-  let edges = List<EdgeView>()
+  let edges = HashSet<EdgeView>()
+  let omittedNodes = HashSet<int>()
+  let omittedEdges = HashSet<EdgeView>()
   let queue = Queue<int>()
-  distance[start] <- 0
-  queue.Enqueue start
-  let mutable truncated = false
+  let seeds = starts |> Array.distinct |> Array.sort
 
-  while queue.Count > 0 do
+  for start in seeds do
+    if distance.Count < MaxVisitedNodes then
+      distance.Add(start, 0)
+      queue.Enqueue start
+    else
+      omittedNodes.Add start |> ignore
+
+  let mutable stopped = omittedNodes.Count > 0
+  let mutable work = 0
+
+  while not stopped && queue.Count > 0 do
     cancellation.ThrowIfCancellationRequested()
     let current = queue.Dequeue()
     let currentDistance = distance[current]
 
     if currentDistance < depth then
-      for kind in kinds do
-        for next in view.Neighbors(current, kind, direction) do
-          if distance.Count >= MaxVisitedNodes then truncated <- true
+      let struct (examined, complete) =
+        visitEdges view current kinds direction cancellation (MaxExploredEdges - work) (fun next edge ->
+          if distance.ContainsKey next then
+            edges.Add edge |> ignore
+            true
+          elif distance.Count >= MaxVisitedNodes then
+            omittedNodes.Add next |> ignore
+            omittedEdges.Add edge |> ignore
+            false
           else
-            edges.Add { From = current; To = next; Kind = kind }
+            distance.Add(next, currentDistance + 1)
+            queue.Enqueue next
+            edges.Add edge |> ignore
+            true)
 
-            if not (distance.ContainsKey next) then
-              distance[next] <- currentDistance + 1
-              queue.Enqueue next
+      work <- work + examined
+      stopped <- not complete
 
   let orderedNodes =
     distance
-    |> Seq.map (fun entry -> struct (entry.Key, entry.Value))
-    |> Seq.sortWith (fun (struct (leftNode, leftDistance)) (struct (rightNode, rightDistance)) ->
+    |> Seq.map(fun entry -> struct (entry.Key, entry.Value))
+    |> Seq.sortWith(fun (struct (leftNode, leftDistance)) (struct (rightNode, rightDistance)) ->
       let byDistance = compare leftDistance rightDistance
-      if byDistance <> 0 then byDistance else compare leftNode rightNode)
+
+      if byDistance <> 0 then
+        byDistance
+      else
+        compare leftNode rightNode)
     |> Seq.toArray
 
-  let orderedEdges = edges.ToArray()
-
-  Array.sortInPlaceWith
-    (fun (left: EdgeView) (right: EdgeView) ->
-      let byFrom = compare left.From right.From
-
-      if byFrom <> 0 then byFrom
-      else
-        let byKind = compare (EdgeKind.toCode left.Kind) (EdgeKind.toCode right.Kind)
-        if byKind <> 0 then byKind else compare left.To right.To)
-    orderedEdges
+  let orderedEdges = edges |> Seq.toArray
+  Array.sortInPlaceWith compareEdges orderedEdges
+  let truncated = stopped || omittedNodes.Count > 0 || omittedEdges.Count > 0
 
   { Nodes = orderedNodes
     Edges = orderedEdges
-    Truncated = truncated }
+    Truncated = truncated
+    OmittedCount = omittedNodes.Count
+    OmittedEdgeCount = omittedEdges.Count
+    OmittedCountIsLowerBound = truncated
+    Diagnostics =
+      if stopped then
+        [| "Traversal work limit reached; omitted node/edge counts are lower bounds." |]
+      else
+        Array.empty }
+
+let neighbors view start kinds direction depth cancellation =
+  neighborsFrom view [| start |] kinds direction depth cancellation
 
 /// 2 ノード間の最短経路。深さ上限つきの幅優先で解く。
+///
+/// A complete no-match outcome refers only to paths within the requested depth.
+/// Routes outside that query boundary are not omitted candidates.
 ///
 /// 経路が複数ある場合は、密インデックスの昇順で最初に見つかったものを返す。CSR の
 /// 隣接が昇順に整列しているため、この選択は決定的である。
@@ -683,39 +1425,159 @@ let shortestPath
   (direction: Direction)
   (maxDepth: int)
   (cancellation: CancellationToken)
-  : int[] voption =
-  if source < 0 || target < 0 || source >= view.NodeCount || target >= view.NodeCount then ValueNone
-  elif source = target then ValueSome [| source |]
+  : PathOutcome =
+  cancellation.ThrowIfCancellationRequested()
+  let kinds = validateTraversal view [| source; target |] kinds direction maxDepth
+
+  let outcome path edges truncated omitted diagnostics =
+    { Path = path
+      Edges = edges
+      Truncated = truncated
+      OmittedCount = omitted
+      OmittedCountIsLowerBound = truncated
+      Diagnostics = diagnostics }
+
+  if source = target then
+    outcome (ValueSome [| source |]) Array.empty false 0 Array.empty
+  elif maxDepth = 0 then
+    outcome ValueNone Array.empty false 0 Array.empty
   else
+    let reverse =
+      match direction with
+      | Outgoing -> Incoming
+      | Incoming -> Outgoing
+      | Both -> Both
 
-  let previous = Dictionary<int, int>()
-  let queue = Queue<struct (int * int)>()
-  previous[source] <- -1
-  queue.Enqueue(struct (source, 0))
-  let mutable found = false
+    let forwardDistances = Dictionary<int, int>()
+    let backwardDistances = Dictionary<int, int>()
+    let forwardParents = Dictionary<int, struct (int * EdgeView)>()
+    let backwardParents = Dictionary<int, struct (int * EdgeView)>()
+    let seen = HashSet<int>()
+    seen.Add source |> ignore
+    seen.Add target |> ignore
+    forwardDistances.Add(source, 0)
+    backwardDistances.Add(target, 0)
+    let mutable forward = [| source |]
+    let mutable backward = [| target |]
+    let mutable forwardDepth = 0
+    let mutable backwardDepth = 0
+    let mutable best = Int32.MaxValue
+    let mutable meeting = -1
+    let mutable work = 0
+    let mutable stopped = false
+    let mutable omitted = 0
 
-  while not found && queue.Count > 0 do
-    cancellation.ThrowIfCancellationRequested()
-    let struct (current, currentDepth) = queue.Dequeue()
+    let cost frontier orientation =
+      let mutable total = 0L
 
-    if currentDepth < maxDepth && previous.Count < MaxVisitedNodes then
-      // 種別をまたぐ場合も、隣接は種別コード順・添字順で決まる。
-      for kind in kinds do
-        for next in view.Neighbors(current, kind, direction) do
-          if not found && not (previous.ContainsKey next) then
-            previous[next] <- current
+      for node in frontier do
+        cancellation.ThrowIfCancellationRequested()
 
-            if next = target then found <- true
-            else queue.Enqueue(struct (next, currentDepth + 1))
+        for kind in kinds do
+          for incoming in directions orientation do
+            match view.Adjacency(node, kind, incoming) with
+            | ValueNone -> ()
+            | ValueSome(struct (_, _, count)) -> total <- total + int64 count
 
-  if not found then ValueNone
-  else
-    let path = List<int>()
-    let mutable cursor = target
+      total
 
-    while cursor >= 0 do
-      path.Add cursor
-      cursor <- previous[cursor]
+    let mutable forwardCost = cost forward direction
+    let mutable backwardCost = cost backward reverse
 
-    path.Reverse()
-    ValueSome(path.ToArray())
+    // Every completed layer establishes full distance balls of these two radii.
+    // Once best <= their sum, no shorter path can remain undiscovered.
+    while not stopped
+          && forward.Length > 0
+          && backward.Length > 0
+          && forwardDepth + backwardDepth < maxDepth
+          && best > forwardDepth + backwardDepth do
+      cancellation.ThrowIfCancellationRequested()
+      let fromSource = forwardCost <= backwardCost
+
+      let frontier, distances, others, parents, orientation, level =
+        if fromSource then
+          forward, forwardDistances, backwardDistances, forwardParents, direction, forwardDepth
+        else
+          backward, backwardDistances, forwardDistances, backwardParents, reverse, backwardDepth
+
+      let nextLayer = ResizeArray<int>()
+      let mutable position = 0
+
+      while position < frontier.Length && not stopped do
+        let current = frontier[position]
+
+        let struct (examined, complete) =
+          visitEdges view current kinds orientation cancellation (MaxExploredEdges - work) (fun next edge ->
+            if not(distances.ContainsKey next) then
+              if not(seen.Contains next) && seen.Count >= MaxVisitedNodes then
+                omitted <- 1
+                stopped <- true
+              else
+                seen.Add next |> ignore
+                distances.Add(next, level + 1)
+                parents.Add(next, struct (current, edge))
+                nextLayer.Add next
+
+                match others.TryGetValue next with
+                | true, otherDistance ->
+                  let length = level + 1 + otherDistance
+
+                  if length < best || (length = best && next < meeting) then
+                    best <- length
+                    meeting <- next
+                | false, _ -> ()
+
+            not stopped)
+
+        work <- work + examined
+        stopped <- stopped || not complete
+        position <- position + 1
+
+      if not stopped then
+        let ordered = nextLayer.ToArray()
+        Array.sortInPlace ordered
+
+        if fromSource then
+          forward <- ordered
+          forwardDepth <- forwardDepth + 1
+        else
+          backward <- ordered
+          backwardDepth <- backwardDepth + 1
+
+        if best > forwardDepth + backwardDepth && forwardDepth + backwardDepth < maxDepth then
+          if fromSource then
+            forwardCost <- cost forward direction
+          else
+            backwardCost <- cost backward reverse
+
+    if not stopped && meeting >= 0 && best <= maxDepth then
+      let nodes = ResizeArray<int>()
+      let edges = ResizeArray<EdgeView>()
+      let mutable cursor = meeting
+      nodes.Add cursor
+
+      while cursor <> source do
+        let struct (parent, edge) = forwardParents[cursor]
+        edges.Add edge
+        cursor <- parent
+        nodes.Add cursor
+
+      nodes.Reverse()
+      edges.Reverse()
+      cursor <- meeting
+
+      while cursor <> target do
+        let struct (parent, edge) = backwardParents[cursor]
+        edges.Add edge
+        cursor <- parent
+        nodes.Add cursor
+
+      outcome (ValueSome(nodes.ToArray())) (edges.ToArray()) false 0 Array.empty
+    else
+      let diagnostics =
+        if stopped then
+          [| "Path exploration work limit reached; no shortest-path or no-route conclusion was proved." |]
+        else
+          Array.empty
+
+      outcome ValueNone Array.empty stopped omitted diagnostics

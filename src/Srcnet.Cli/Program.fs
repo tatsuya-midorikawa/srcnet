@@ -25,9 +25,7 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
       Terminal.outLine Args.usage
       return Commands.ExitCode.UserError
     | Error error ->
-      Terminal.errLine (Args.ParseError.describe error)
-      Terminal.errLine "使い方は `srcnet --help` を参照してください"
-      return Commands.ExitCode.UserError
+      return QueryCommands.writeArgumentError arguments Commands.ExitCode.UserError (Args.ParseError.describe error)
     | Ok Args.Help ->
       Terminal.outLine Args.usage
       return Commands.ExitCode.Success
@@ -72,12 +70,11 @@ let main arguments =
       (run arguments cancellation.Token).GetAwaiter().GetResult()
     with
     | :? OperationCanceledException ->
-      Terminal.errLine "中断しました"
-      Commands.ExitCode.Interrupted
+      QueryCommands.writeArgumentError arguments Commands.ExitCode.Interrupted "中断しました"
     | ex ->
       // 想定外の障害。文脈を失わないよう型と本文を残す。
-      Terminal.errLine $"内部エラー: {ex.GetType().Name}: {ex.Message}"
-      Commands.ExitCode.InternalError
+      QueryCommands.writeArgumentError arguments Commands.ExitCode.InternalError
+        $"内部エラー: {ex.GetType().Name}: {ex.Message}"
   finally
     Console.CancelKeyPress.RemoveHandler handler
     Terminal.flush ()

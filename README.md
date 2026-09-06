@@ -5,8 +5,8 @@
 Chromium や Linux カーネルのような数千万行規模のリポジトリを、実用的な時間とメモリで扱いきることを最優先の設計目標としています。
 
 > **状態: 開発初期。** [マイルストーン](docs/roadmap.md) M0（基盤）と M1（構造グラフ）を実装済みで、
-> M2 の構文解析基盤（tree-sitter の統合）まで入っています。シンボルのグラフ化、解決、
-> 増分更新、検索はまだありません。記載された性能値のうち実測済みのものは
+> M2 の構文解析とシンボルのグラフ化、M4 の有界 JSON 照会と対話的 HTML 出力を実装しています。
+> シンボル間の参照解決、増分更新、n-gram 検索索引、コミュニティ解析は後続の範囲です。実測値は
 > [性能](docs/performance.md) 5.1 に、それ以外は目標として本文に記載しています。
 
 ## 解決する問題
@@ -61,13 +61,23 @@ $ dotnet build srcnet.slnx -c Release
 $ dotnet test srcnet.slnx -c Release
 ```
 
-現時点で動作するサブコマンドは次の 3 つです。
+索引・整合性検査に加えて、部分グラフを予算内で照会できます。
 
 ```console
 $ srcnet index <path> [--out <dir>] [--jobs <n>] [--no-gitignore] [--json]
 $ srcnet stats [<path>] [--out <dir>] [--json]
 $ srcnet verify [<path>] [--out <dir>] [--deterministic] [--json]
+$ srcnet search <text> --root <path> --json --limit 20 --budget 4000
+$ srcnet show <node-id> --root <path> --json
+$ srcnet neighbors <node-id> --root <path> --direction in --depth 2 --json
+$ srcnet path <from-id> <to-id> --root <path> --depth 16 --json
+$ srcnet context <keywords...> --root <path> --budget 4000 --json
+$ srcnet export html --root <path> --node <node-id> --depth 2 --max-nodes 2000
 ```
+
+JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、省略件数を明示します。
+検索索引のない旧成果物は再索引が必要です。HTML は単一ファイルで、外部通信なしに
+ズーム・パン・検索・向き／種別フィルターを使えます。詳細は [クエリと CLI](docs/query-and-cli.md) にあります。
 
 `index` はリポジトリを走査して `Repository` / `Directory` / `File` ノードと `CONTAINS` エッジを
 `<repo>/.srcnet/` へ書き出します。`verify --deterministic` は同じ入力から二度生成し、`manifest.json`

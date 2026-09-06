@@ -9,6 +9,16 @@ open System
 open System.Collections.Generic
 open System.Text
 
+let internal utf8 = UTF8Encoding(false, true)
+
+let internal lookupKey (ignoreCase: bool) (text: string) =
+  let normalized = Srcnet.Text.Unicode.normalize text
+
+  if ignoreCase then
+    normalized |> Srcnet.Text.Unicode.caseFold |> Srcnet.Text.Unicode.normalize
+  else
+    normalized
+
 /// 文字列表。追加順が索引値を決めるため、呼び出し側は決定的な順序で追加すること。
 [<Sealed>]
 type StringTable() =
@@ -33,7 +43,7 @@ type StringTable() =
     | true, existing -> existing
     | false, _ ->
       let index = values.Count
-      let length = Encoding.UTF8.GetByteCount text
+      let length = utf8.GetByteCount text
       indexOf[text] <- index
       values.Add text
       byteLengths.Add length
@@ -47,7 +57,7 @@ type StringTable() =
 
   /// blob 内の各文字列の開始オフセット。長さは `Count + 1` で、末尾は blob 全体の長さ。
   member _.Offsets() =
-    let offsets = Array.zeroCreate<uint64> (values.Count + 1)
+    let offsets = Array.zeroCreate<uint64>(values.Count + 1)
     let mutable running = 0UL
 
     for index in 0 .. values.Count - 1 do

@@ -28,6 +28,10 @@ let MaxLimit = 10_000
 [<Literal>]
 let DefaultBudget = 8_000
 
+/// 診断を含む JSON 封筒にも予算が必要になる。これ未満は入力誤りとして拒否する。
+[<Literal>]
+let MinBudget = 256
+
 [<Literal>]
 let MaxBudget = 1_000_000
 
@@ -47,6 +51,12 @@ let DefaultMaxNodes = 800
 /// 全体エクスポートは提供しない。上限を超える入力は集約または打ち切りにする。
 [<Literal>]
 let MaxExportNodes = 20_000
+
+[<Literal>]
+let MaxContextKeywords = 32
+
+[<Literal>]
+let MaxQueryScalars = 4096
 
 type IndexArguments =
   { RootPath: string
@@ -183,6 +193,27 @@ module ParseError =
     | UnexpectedArgument value -> $"余分な引数です: {value}"
     | MissingArgument name -> $"引数 {name} が必要です"
     | UnsupportedValue(option, value, detail) -> $"オプション {option} の値 {value} は未対応です: {detail}"
+
+let private strictUtf8 = Text.UTF8Encoding(false, true)
+
+let internal validateQueryText (name: string) (text: string) =
+  if text.Length = 0 then ValueSome(InvalidValue(name, text))
+  elif text.Length > MaxQueryScalars * 2 then
+    ValueSome(UnsupportedValue(name, "", $"文字列は {MaxQueryScalars} Unicode scalar 以下にしてください"))
+  else
+    try
+      strictUtf8.GetByteCount text |> ignore
+      let mutable count = 0
+      let mutable runes = text.EnumerateRunes()
+
+      while count <= MaxQueryScalars && runes.MoveNext() do
+        count <- count + 1
+
+      if count > MaxQueryScalars then
+        ValueSome(UnsupportedValue(name, "", $"文字列は {MaxQueryScalars} Unicode scalar 以下にしてください"))
+      else ValueNone
+    with :? Text.EncoderFallbackException ->
+      ValueSome(InvalidValue(name, "不正な Unicode 文字列"))
 
 /// `4096`、`64KiB`、`1GB` のようなサイズ表記を解析する。
 /// 単位は 2 進接頭辞（KiB/MiB/GiB）と 10 進接頭辞（KB/MB/GB）の両方を受け付ける。
@@ -359,18 +390,30 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
   let optionalInt name = optionalParsed tryParseInt name
   let optionalSize name = optionalParsed tryParseSize name
 
+  let boundedInt name lower upper zeroIsDefault =
+    match optionalInt name with
+    | ValueSome(Ok value) when value > upper || (value < lower && not (zeroIsDefault && value = 0)) ->
+      ValueSome(
+        Error(
+          UnsupportedValue(
+            name,
+            value.ToString Globalization.CultureInfo.InvariantCulture,
+            $"{lower} 以上 {upper} 以下で指定してください"
+          )
+        )
+      )
+    | value -> value
+
   let errorOf (value: Result<'T, ParseError> voption) =
     match value with
     | ValueSome(Error error) -> Some error
     | ValueSome(Ok _)
     | ValueNone -> None
 
-  // 上限は「指定がなければ既定、指定があれば絶対上限で頭打ち」にする。
-  // 利用者が大きな値を渡しても、出力量は有界のままになる。
-  let clamp (value: Result<int, ParseError> voption) (fallback: int) (upper: int) =
+  let number (value: Result<int, ParseError> voption) (fallback: int) zeroIsDefault =
     match value with
-    | ValueSome(Ok parsed) when parsed > 0 -> min parsed upper
-    | ValueSome(Ok _) -> fallback
+    | ValueSome(Ok 0) when zeroIsDefault -> fallback
+    | ValueSome(Ok parsed) -> parsed
     | ValueSome(Error _)
     | ValueNone -> fallback
 
@@ -442,9 +485,9 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
   | "context" ->
     let output = optionalValue "--out"
     let root = optionalValue "--root"
-    let limit = optionalInt "--limit"
-    let budget = optionalInt "--budget"
-    let depth = optionalInt "--depth"
+    let limit = boundedInt "--limit" 1 MaxLimit true
+    let budget = boundedInt "--budget" MinBudget MaxBudget true
+    let depth = boundedInt "--depth" 0 MaxQueryDepth false
     let direction = optionalValue "--direction"
     let edges = optionalValue "--edge"
     let ignoreCase = reader.Flag "--ignore-case"
@@ -465,16 +508,26 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     | None ->
 
     let limits =
-      { Limit = clamp limit DefaultLimit MaxLimit
-        Budget = clamp budget DefaultBudget MaxBudget }
+      { Limit = number limit DefaultLimit true
+        Budget = number budget DefaultBudget true }
 
-    let resolvedDepth = clamp depth DefaultDepth MaxQueryDepth
+    let resolvedDepth = number depth DefaultDepth false
 
     let parsedDirection = Query.Direction.tryParse directionText
 
     if parsedDirection.IsNone then
       Error(InvalidValue("--direction", directionText))
+    elif edges.IsSome && edgeKinds.Length = 0 then
+      Error(InvalidValue("--edge", ""))
     else
+
+    let textError =
+      positional
+      |> Seq.tryPick (fun item -> validateQueryText "<query>" item.Text |> ValueOption.toOption)
+
+    match textError with
+    | Some error -> Error error
+    | None ->
 
     match command with
     | "search" ->
@@ -522,11 +575,13 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               To = positional[1].Text
               Edges = edgeKinds
               Direction = directionText
-              Depth = max resolvedDepth 1
+              Depth = resolvedDepth
               Limits = limits
               Json = json })
     | _ ->
       if positional.Count = 0 then Error(MissingArgument "<keywords...>")
+      elif positional.Count > MaxContextKeywords then
+        Error(UnsupportedValue("<keywords...>", "", $"キーワードは {MaxContextKeywords} 個までです"))
       else
         // `context` は語をいくつでも取る。位置引数の上限を実際の個数に合わせる。
         finish reader positional positional.Count (fun () ->
@@ -543,8 +598,8 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     let file = optionalValue "--file"
     let queryText = optionalValue "--query"
     let node = optionalValue "--node"
-    let depth = optionalInt "--depth"
-    let maxNodes = optionalInt "--max-nodes"
+    let depth = boundedInt "--depth" 0 MaxQueryDepth false
+    let maxNodes = boundedInt "--max-nodes" 1 MaxExportNodes true
 
     match List.tryPick id [ errorOf depth; errorOf maxNodes ] with
     | Some error -> Error error
@@ -553,7 +608,21 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     if positional.Count = 0 then Error(MissingArgument "<format>")
     elif positional[0].Text <> "html" then
       Error(UnsupportedValue("export", positional[0].Text, "対応しているのは html だけです"))
+    elif queryText.IsSome && node.IsSome then
+      Error(UnsupportedValue("--query", "", "--node と同時には指定できません"))
     else
+
+      let seedError =
+        [ "--query", queryText; "--node", node ]
+        |> List.tryPick (fun (name, value) ->
+          match value with
+          | ValueSome text -> validateQueryText name text |> ValueOption.toOption
+          | ValueNone -> None)
+
+      match seedError with
+      | Some error -> Error error
+      | None ->
+
       finish reader positional 1 (fun () ->
         ExportHtml
           { OutputDirectory = output
@@ -567,8 +636,8 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               match node with
               | ValueSome text -> text
               | ValueNone -> ""
-            Depth = clamp depth DefaultDepth MaxQueryDepth
-            MaxNodes = clamp maxNodes DefaultMaxNodes MaxExportNodes
+            Depth = number depth DefaultDepth false
+            MaxNodes = number maxNodes DefaultMaxNodes true
             Json = json })
   | "stats" ->
     let output = optionalValue "--out"
@@ -640,8 +709,8 @@ let usage =
       "照会 (search / show / neighbors / path / context) のオプション:"
       "  --root <path>          解析ルート (生成物の位置を決めるために使う)"
       "  --limit <n>            返すノード数の上限 (既定 50、上限 10000)"
-      "  --budget <tokens>      出力トークン予算 (既定 8000)"
-      "  --depth <n>            探索の深さ (既定 1、上限 16)"
+      "  --budget <tokens>      JSON 封筒を含む出力予算 (256..1000000、既定 8000)"
+      "  --depth <n>            探索の深さ (0..16、既定 1)"
       "  --edge <kind,...>      辿るエッジ種別 (既定はすべて)"
       "  --direction in|out|both 探索の向き (既定 both)"
       "  --ignore-case          大文字小文字を畳んで検索する"
@@ -650,8 +719,9 @@ let usage =
       "  --file <path>          出力先 (既定 <out>/graph.html)"
       "  --query <text>         起点を検索で決める"
       "  --node <id|name>       起点をノード ID または完全一致の名前で決める"
-      "  --depth <n>            起点からの深さ (既定 1、上限 16)"
+      "  --depth <n>            起点からの深さ (0..16、既定 1)"
       "  --max-nodes <n>        表示するノード数の上限 (既定 800、上限 20000)"
+      "  --query と --node は同時に指定できません"
       ""
       "共通:"
       "  --out <dir>            生成物の位置"

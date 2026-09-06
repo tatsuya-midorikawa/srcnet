@@ -163,6 +163,94 @@ jobs:
             - name: Compare manifests
               run: diff macos/manifest.json windows/manifest.json
 
+    query-contract:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Publish query CLI
+              run: dotnet publish src/Srcnet.Cli/Srcnet.Cli.fsproj -c Release -o artifacts/query-cli
+
+            - name: Generate portable query contracts (POSIX)
+              if: runner.os != 'Windows'
+              run: python .github/scripts/query_contract.py --cli artifacts/query-cli/srcnet --out artifacts/query-contract
+
+            - name: Generate portable query contracts (Windows)
+              if: runner.os == 'Windows'
+              run: python .github/scripts/query_contract.py --cli artifacts/query-cli/srcnet.exe --out artifacts/query-contract
+
+            - name: Offline Chrome and Edge contracts (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                  node --experimental-websocket .github/scripts/browser_contract.mjs \
+                    --browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                    --html artifacts/query-contract/portable/browser.html --out artifacts/browser-chrome
+                  node --experimental-websocket .github/scripts/browser_contract.mjs \
+                    --browser "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+                    --html artifacts/query-contract/portable/browser.html --out artifacts/browser-edge
+
+            - name: Offline Chrome and Edge contracts (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $chrome = @(
+                    "$env:ProgramFiles/Google/Chrome/Application/chrome.exe",
+                    "${env:ProgramFiles(x86)}/Google/Chrome/Application/chrome.exe"
+                  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+                  $edge = @(
+                    "$env:ProgramFiles/Microsoft/Edge/Application/msedge.exe",
+                    "${env:ProgramFiles(x86)}/Microsoft/Edge/Application/msedge.exe"
+                  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+                  if (!$chrome -or !$edge) { throw "Chrome and Edge are required for the offline contract" }
+                  node --experimental-websocket .github/scripts/browser_contract.mjs --browser "$chrome" --html artifacts/query-contract/portable/browser.html --out artifacts/browser-chrome
+                  if ($LASTEXITCODE -ne 0) { throw "Chrome contract failed" }
+                  node --experimental-websocket .github/scripts/browser_contract.mjs --browser "$edge" --html artifacts/query-contract/portable/browser.html --out artifacts/browser-edge
+                  if ($LASTEXITCODE -ne 0) { throw "Edge contract failed" }
+
+            - name: Upload portable JSON and HTML
+              uses: actions/upload-artifact@v4
+              with:
+                  name: query-contract-${{ matrix.os }}
+                  path: artifacts/query-contract/portable/
+                  if-no-files-found: error
+
+            - name: Upload browser evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: query-browser-${{ matrix.os }}
+                  path: |
+                      artifacts/browser-chrome/
+                      artifacts/browser-edge/
+
+    query-cross-platform:
+        needs: query-contract
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: query-contract-macos-latest
+                  path: macos-query
+            - uses: actions/download-artifact@v4
+              with:
+                  name: query-contract-windows-latest
+                  path: windows-query
+            - name: Compare query JSON and HTML byte for byte
+              run: diff -r macos-query windows-query
 
     corpus-large:
         # M2 の完了条件の実測。`linux` コーパスの走査と抽出を通し、両 OS の成果物が

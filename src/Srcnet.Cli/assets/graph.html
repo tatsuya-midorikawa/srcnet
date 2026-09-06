@@ -10,6 +10,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'" />
     <title>srcnet graph</title>
     <style>
       :root {
@@ -37,11 +38,12 @@
         /* CJK を含む名前が豆腐にならないよう、各 OS の既定 UI フォントを順に指す */
         font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI",
           "Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK KR",
-          "Microsoft YaHei", "Malgun Gothic", sans-serif;
+          "Microsoft YaHei", "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
         font-size: 13px;
         display: grid;
-        grid-template-columns: 1fr 340px;
-        grid-template-rows: auto 1fr;
+        grid-template-columns: minmax(0, 1fr) min(340px, 44vw);
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        overflow: hidden;
       }
       header {
         grid-column: 1 / -1;
@@ -52,18 +54,34 @@
         align-items: center;
         flex-wrap: wrap;
       }
-      header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+      header h1 { font-size: 14px; margin: 0; font-weight: 600; max-width: 65vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .notice { color: var(--muted); }
       .warn { color: #b45309; font-weight: 600; }
-      main { position: relative; overflow: hidden; }
-      canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+      main { position: relative; overflow: hidden; min-height: 0; }
+      canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       canvas.dragging { cursor: grabbing; }
       aside {
         border-left: 1px solid var(--line);
         background: var(--panel);
         overflow-y: auto;
         padding: 10px 12px;
+        min-height: 0;
+        overflow-wrap: anywhere;
       }
+      #status {
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        padding: 6px 12px;
+        max-height: 32vh;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        overflow-wrap: anywhere;
+      }
+      #diagnostics { overflow-y: auto; max-height: 7em; min-height: 0; }
+      #selection { overflow-wrap: anywhere; }
+      #direction { font: inherit; max-width: 100%; }
+      #directionReference { margin: 5px 0; }
       aside h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; }
       aside h2:first-child { margin-top: 0; }
       input[type="search"] { width: 100%; padding: 5px 7px; font: inherit; }
@@ -80,33 +98,42 @@
         color: var(--muted);
       }
       button { font: inherit; padding: 3px 8px; }
-      .hit { cursor: pointer; }
+      .hit { cursor: pointer; text-align: left; background: transparent; color: inherit; border: 0; padding: 2px 0; overflow-wrap: anywhere; max-width: 100%; }
       .hit:hover { text-decoration: underline; }
     </style>
   </head>
   <body>
     <header>
       <h1 id="title">srcnet</h1>
-      <span class="notice" id="counts"></span>
-      <span class="warn" id="truncation"></span>
       <button id="reset" type="button">表示をリセット</button>
     </header>
     <main>
-      <canvas id="view"></canvas>
+      <canvas id="view" aria-label="有向グラフ。検索結果や隣接ノードのボタンでも選択できます。"></canvas>
     </main>
     <aside>
       <h2>検索</h2>
-      <input id="filter" type="search" placeholder="名前・修飾名・パス" autocomplete="off" />
+      <input id="filter" type="search" aria-label="名前・修飾名・パスを検索" placeholder="名前・修飾名・パス" autocomplete="off" />
       <ul id="hits"></ul>
+      <h2>向き</h2>
+      <label for="direction">選択ノードを基準に表示</label>
+      <select id="direction" aria-describedby="directionReference" disabled>
+        <option value="both">入出力 (both)</option>
+        <option value="in">入力 (in)</option>
+        <option value="out">出力 (out)</option>
+      </select>
+      <p class="notice" id="directionReference"></p>
       <h2>ノード種別</h2>
       <ul id="kinds"></ul>
       <h2>エッジ種別</h2>
       <ul id="edgeKinds"></ul>
       <h2>選択</h2>
       <div id="selection" class="notice">ノードを選ぶと属性を表示します。</div>
-      <h2>診断</h2>
-      <ul id="diagnostics"></ul>
     </aside>
+    <footer id="status" aria-label="グラフの範囲と診断">
+      <div class="notice" id="counts"></div>
+      <div class="warn" id="truncation" role="status"></div>
+      <ul id="diagnostics" aria-label="診断" tabindex="0"></ul>
+    </footer>
     <script id="srcnet-data" type="application/json">{{DATA}}</script>
     <script>
       "use strict";
@@ -127,6 +154,9 @@
 
       const visibleKinds = new Set(kinds);
       const visibleEdgeKinds = new Set(edgeKinds);
+      const direction = document.getElementById("direction");
+      const searchText = data.nodes.map(n =>
+        (n.name + " " + n.qualifiedName + " " + (n.path || "")).normalize("NFC").toLowerCase().normalize("NFC"));
       let selected = -1;
       let highlighted = new Set();
       let foreground = getComputedStyle(document.body).color;
@@ -172,6 +202,17 @@
         return visibleKinds.has(data.nodes[index].kind);
       }
 
+      function edgeVisible(edge) {
+        if (!visibleEdgeKinds.has(edge.kind) || !nodeVisible(edge.from) || !nodeVisible(edge.to)) return false;
+        if (selected < 0) return true;
+        return (direction.value !== "in" && edge.from === selected) ||
+          (direction.value !== "out" && edge.to === selected);
+      }
+
+      function nodeRadius(index) {
+        return Math.max(3, Math.min(12, 3 + Math.log2(1 + (data.nodes[index].weight ?? 1)) * 2));
+      }
+
       function toScreen(point) {
         return {
           x: point.x * scale + offsetX + canvas.clientWidth / 2,
@@ -184,29 +225,54 @@
         context.lineWidth = 1;
 
         for (const edge of data.edges) {
-          if (!visibleEdgeKinds.has(edge.kind)) continue;
-          if (!nodeVisible(edge.from) || !nodeVisible(edge.to)) continue;
+          if (!edgeVisible(edge)) continue;
           const a = toScreen(positions[edge.from]);
           const b = toScreen(positions[edge.to]);
           const active = highlighted.has(edge.from) || highlighted.has(edge.to);
           context.strokeStyle = active
             ? kindColor.get(data.nodes[edge.from].kind)
             : "rgba(128,128,128,0.3)";
+          context.fillStyle = context.strokeStyle;
+          const length = Math.hypot(b.x - a.x, b.y - a.y);
           context.beginPath();
-          context.moveTo(a.x, a.y);
-          context.lineTo(b.x, b.y);
-          context.stroke();
+          if (edge.from === edge.to) {
+            const radius = nodeRadius(edge.from);
+            context.arc(a.x, a.y - radius - 7, 8, 0.3, 2 * Math.PI);
+            context.stroke();
+            context.beginPath();
+            context.moveTo(a.x + 8, a.y - radius - 7);
+            context.lineTo(a.x + 3, a.y - radius - 12);
+            context.lineTo(a.x + 12, a.y - radius - 12);
+          } else if (length > nodeRadius(edge.from) + nodeRadius(edge.to) + 8) {
+            const dx = (b.x - a.x) / length, dy = (b.y - a.y) / length;
+            // 逆向きのエッジは反対側へずらし、矢印が重ならないようにする。
+            const tipX = b.x - dx * (nodeRadius(edge.to) + 2) - dy * 3;
+            const tipY = b.y - dy * (nodeRadius(edge.to) + 2) + dx * 3;
+            context.moveTo(a.x + dx * nodeRadius(edge.from) - dy * 3, a.y + dy * nodeRadius(edge.from) + dx * 3);
+            context.lineTo(tipX, tipY);
+            context.stroke();
+            context.beginPath();
+            context.moveTo(tipX, tipY);
+            context.lineTo(tipX - dx * 7 - dy * 3.5, tipY - dy * 7 + dx * 3.5);
+            context.lineTo(tipX - dx * 7 + dy * 3.5, tipY - dy * 7 - dx * 3.5);
+          } else {
+            context.moveTo(a.x, a.y);
+            context.lineTo(b.x, b.y);
+            context.stroke();
+            continue;
+          }
+          context.closePath();
+          context.fill();
         }
 
         const withLabels = scale > 0.7 && data.nodes.length <= 1500;
-        context.font = "11px sans-serif";
+        context.font = "11px " + getComputedStyle(document.body).fontFamily;
 
         for (let index = 0; index < data.nodes.length; index += 1) {
           if (!nodeVisible(index)) continue;
           const node = data.nodes[index];
           const point = toScreen(positions[index]);
-          const weight = node.weight === undefined ? 1 : node.weight;
-          const radius = Math.max(3, Math.min(12, 3 + Math.log2(1 + weight) * 2));
+          const radius = nodeRadius(index);
           context.fillStyle = kindColor.get(node.kind);
           context.globalAlpha = highlighted.size === 0 || highlighted.has(index) ? 1 : 0.25;
           context.beginPath();
@@ -254,7 +320,12 @@
       }
 
       function select(index) {
+        if (index >= 0 && !nodeVisible(index)) index = -1;
         selected = index;
+        direction.disabled = index < 0;
+        document.getElementById("directionReference").textContent = index < 0
+          ? "ノードを選択すると向きで絞れます。現在は全表示エッジです。矢印は保存された出力先を示します。"
+          : "基準: " + data.nodes[index].qualifiedName + "。選択ノードに接続するエッジのみ表示。矢印は出力先です。";
         highlighted = new Set();
         const panel = document.getElementById("selection");
         panel.textContent = "";
@@ -275,7 +346,8 @@
           ["行", node.lines ? node.lines.join("-") : "-"],
           ["言語", node.language || "-"],
           ["属性", (node.flags || []).join(", ") || "-"],
-          ["ID", node.id]
+          ["ID", node.id],
+          ["集約重み", data.aggregated ? node.weight + " 件の直接の子 (子孫数ではありません)" : "-"]
         ];
 
         for (const row of rows) {
@@ -295,6 +367,7 @@
         const incoming = [];
 
         for (const edge of data.edges) {
+          if (!edgeVisible(edge)) continue;
           if (edge.from === index) {
             outgoing.push(edge);
             highlighted.add(edge.to);
@@ -315,20 +388,33 @@
           for (const edge of group[1].slice(0, 100)) {
             const other = edge[group[2]];
             const item = document.createElement("li");
-            item.className = "hit";
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "hit";
             const badge = document.createElement("span");
             badge.className = "badge";
             badge.appendChild(text(edge.kind));
-            item.appendChild(badge);
-            item.appendChild(text(data.nodes[other].qualifiedName));
-            item.addEventListener("click", function () {
+            button.appendChild(badge);
+            button.appendChild(text(data.nodes[other].qualifiedName));
+            button.addEventListener("click", function () {
               select(other);
             });
+            item.appendChild(button);
             items.appendChild(item);
           }
 
           panel.appendChild(items);
+          if (group[1].length > 100) {
+            const omitted = document.createElement("p");
+            omitted.className = "warn";
+            omitted.textContent = "このリストでは " + (group[1].length - 100) + " エッジを省略";
+            panel.appendChild(omitted);
+          }
         }
+        const note = document.createElement("p");
+        note.className = "notice";
+        note.textContent = "隣接一覧は埋め込みデータと現在のフィルター内のみです。成果物全体の次数ではありません。";
+        panel.appendChild(note);
 
         draw();
       }
@@ -346,7 +432,8 @@
           box.addEventListener("change", function () {
             if (box.checked) set.add(value);
             else set.delete(value);
-            draw();
+            runFilter();
+            select(selected);
           });
           label.appendChild(box);
           const swatch = document.createElement("span");
@@ -360,27 +447,37 @@
       }
 
       function runFilter() {
-        const needle = document.getElementById("filter").value.trim().toLowerCase();
+        const needle = document.getElementById("filter").value.trim().normalize("NFC").toLowerCase().normalize("NFC");
         const hits = document.getElementById("hits");
         hits.textContent = "";
         if (needle.length === 0) return;
         let shown = 0;
+        let total = 0;
 
-        for (let index = 0; index < data.nodes.length && shown < 40; index += 1) {
+        for (let index = 0; index < data.nodes.length; index += 1) {
           const node = data.nodes[index];
-          const haystack = (node.name + " " + node.qualifiedName + " " + (node.path || "")).toLowerCase();
-          if (haystack.indexOf(needle) < 0) continue;
+          if (!nodeVisible(index) || !searchText[index].includes(needle)) continue;
+          total += 1;
+          if (shown >= 40) continue;
           shown += 1;
           const item = document.createElement("li");
-          item.className = "hit";
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "hit";
           const badge = document.createElement("span");
           badge.className = "badge";
           badge.appendChild(text(node.kind));
-          item.appendChild(badge);
-          item.appendChild(text(node.qualifiedName));
-          item.addEventListener("click", function () {
+          button.appendChild(badge);
+          button.appendChild(text(node.qualifiedName));
+          button.addEventListener("click", function () {
             select(index);
           });
+          item.appendChild(button);
+          hits.appendChild(item);
+        }
+        if (total > shown || total === 0) {
+          const item = document.createElement("li");
+          item.textContent = total === 0 ? "一致なし (現在のノード種別内)" : "検索候補 " + (total - shown) + " 件をリストから省略";
           hits.appendChild(item);
         }
       }
@@ -389,14 +486,20 @@
 
       const countParts = [
         "表示 " + data.nodes.length + " ノード / " + data.edges.length + " エッジ",
-        "成果物全体 " + data.totalNodes + " ノード"
+        "成果物全体 " + data.totalNodes + " ノード",
+        "表示上限適用前の候補 " + data.candidateNodes + " ノード"
       ];
-      if (data.aggregated) countParts.push("ディレクトリ単位に集約");
+      if (data.aggregated) countParts.push("ディレクトリ単位に集約: " + data.groupedNodeCount + " ファイル等を非表示 (上限による省略とは別)");
+      countParts.push("色: ノード種別。コミュニティ・ハブのメタデータなし");
       document.getElementById("counts").textContent = countParts.join(" · ");
 
       if (data.truncated) {
         document.getElementById("truncation").textContent =
-          "打ち切り: " + data.omittedCount + " ノードを省略しました";
+          "打ち切り: " + (data.omittedCountIsLowerBound ? "少なくとも " : "") +
+          data.omittedCount + " ノード / " + data.omittedEdgeCount + " エッジを省略。" +
+          (data.traversalTruncated ? " 探索上限に到達。未訪問の子孫数は不明。" : "") +
+          (data.searchTruncated ? " 起点検索も打ち切り。" : "") +
+          " 表示エッジ上限 " + data.maxExportEdges;
       }
 
       const diagnostics = document.getElementById("diagnostics");
@@ -416,10 +519,19 @@
       buildToggles("kinds", kinds, visibleKinds);
       buildToggles("edgeKinds", edgeKinds, visibleEdgeKinds);
       document.getElementById("filter").addEventListener("input", runFilter);
+      direction.addEventListener("change", () => select(selected));
       document.getElementById("reset").addEventListener("click", function () {
         scale = 1;
         offsetX = 0;
         offsetY = 0;
+        direction.value = "both";
+        document.getElementById("filter").value = "";
+        visibleKinds.clear();
+        for (const kind of kinds) visibleKinds.add(kind);
+        visibleEdgeKinds.clear();
+        for (const kind of edgeKinds) visibleEdgeKinds.add(kind);
+        for (const box of document.querySelectorAll("#kinds input, #edgeKinds input")) box.checked = true;
+        runFilter();
         select(-1);
       });
 
@@ -453,6 +565,10 @@
         canvas.releasePointerCapture(event.pointerId);
         if (!moved) select(pick(event.clientX, event.clientY));
       });
+      canvas.addEventListener("pointercancel", function () {
+        dragging = false;
+        canvas.classList.remove("dragging");
+      });
 
       canvas.addEventListener(
         "wheel",
@@ -466,7 +582,7 @@
 
       window.addEventListener("resize", resize);
       resize();
-      if (data.nodes.length > 0 && data.seedIndex >= 0) select(data.seedIndex);
+      select(data.nodes.length > 0 && data.seedIndex >= 0 ? data.seedIndex : -1);
     </script>
   </body>
 </html>

@@ -64,9 +64,11 @@ let ``一意に判定できるレガシー符号化は欠落なく復号され�
   // 文字化けと欠落がないこと（docs/testing.md T-4）。
   Assert.DoesNotContain("\uFFFD", decoded)
   Assert.Contains("日本語のコメント", decoded)
+  Assert.Contains("iso2022_value", decoded)
 
-  let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
-  Assert.Contains("iso2022_value", names)
+  if Corpus.hasSyntaxParser() then
+    let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
+    Assert.Contains("iso2022_value", names)
 
 [<Fact>]
 let ``符号化が曖昧なファイルは候補の先頭を確定値として扱わない`` () =
@@ -88,9 +90,11 @@ let ``利用者が符号化を明示すると曖昧なファイルも復号さ�
   Assert.True summary.Decoded
   Assert.DoesNotContain("\uFFFD", decoded)
   Assert.Contains("日本語のコメント", decoded)
+  Assert.Contains("値", decoded)
 
-  let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
-  Assert.Contains("値", names)
+  if Corpus.hasSyntaxParser() then
+    let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
+    Assert.Contains("値", names)
 
 [<Fact>]
 let ``候補に含まれない符号化の指定は適用しない`` () =
@@ -113,9 +117,11 @@ let ``主要なレガシー符号化を明示すれば識別子とコメント�
     Assert.True(summary.Decoded, $"{name} を {Encodings.name encoding} として復号できませんでした")
     Assert.DoesNotContain("\uFFFD", decoded)
     Assert.Contains(comment, decoded)
+    Assert.Contains(identifier, decoded)
 
-    let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
-    Assert.Contains(identifier, names)
+    if Corpus.hasSyntaxParser() then
+      let names = extracted.Symbols |> Array.map (fun symbol -> symbol.Name)
+      Assert.Contains(identifier, names)
 
 [<Fact>]
 let ``UTF-16 のファイルは復号後に行数が確定する`` () =

@@ -106,6 +106,8 @@ ANSI エスケープの検証は、リポジトリから端末表示を偽装で
 | build-test | macOS, Windows | 全 PR | Release ビルド、全テスト、フォーマット、静的解析 |
 | parser | macOS, Windows | 全 PR | 固定した取得元の検証、tree-sitter の構築、解析器ありでのテスト |
 | determinism | macOS, Windows | 全 PR | T-1、両 OS 成果物の突き合わせ |
+| query-contract | macOS, Windows | 全 PR | 有界 JSON、異常系、HTML の生成と Chrome / Edge のオフライン操作 |
+| query-cross-platform | 補助比較 | 全 PR | 上記ジョブの JSON / HTML をバイト単位で比較 |
 | corpus-small | macOS, Windows | 全 PR | `micro` / `medium` / `cjk` / `pathological` |
 | bench-small | macOS, Windows | 全 PR | 小規模ベンチマークと回帰検出 |
 | corpus-large | macOS, Windows | 定期 | `linux` / `chromium` |
@@ -115,6 +117,25 @@ ANSI エスケープの検証は、リポジトリから端末表示を偽装で
 macOS と Windows の両方が必須である。一方でも未検証または失敗なら完了扱いにしない。
 
 Linux は対応実行環境に含めない（[設計判断](decisions.md) ADR-10）。Linux ランナーは、大規模コーパスの取得と補助的な検証のために利用してよいが、合否判定には使わない。取得したコーパスに対する索引と検証は macOS / Windows のランナーで行う。
+
+### 4.1 照会と HTML の契約
+
+`QueryCliTests` は全照会の JSON 封筒全体を再計数し、件数・トークン予算、エッジ端点、
+省略内訳、エラー JSON、テキスト出力、決定性を検証する。`QueryTests` は小グラフの完全探索を
+基準に有向最短経路と安全上限を照合し、破損・UTF-8 窓境界・大きな辞書末尾の部分一致を検証する。
+`ExportTests` は全体件数、集約・探索・出力上限の区別、出力の原子性と破損時の既存ファイル保持を扱う。
+
+`.github/scripts/query_contract.py` は外部依存なしで固定コーパスと比較用 JSON / HTML を生成する。
+`.github/scripts/browser_contract.mjs` は Node の標準 WebSocket とブラウザーの CDP を使い、
+ネットワークを切った隔離プロファイルで検索・選択・方向／種別フィルター・ズーム・パン・
+リセット・診断の可視性を確認する。UI 用の小さな合成データは実際に出力した HTML テンプレートへ
+埋め込む。実際のデータ選択とエスケープは CLI / ExportTests が別に検証する。
+
+構文解析器に依存しない契約はファイル・ディレクトリまたは固定グラフを使う。
+C/C++ 構文シンボルを前提とする項目だけは `Corpus.ParserFact` で解析器なしの構成に
+明示的なスキップを記録し、`parser` ジョブでは実行する。`SRCNET_REQUIRE_PARSER=1` の場合は
+省略しない。復号のテストは解析器なしでも文字列・識別子の復号を検証し、解析器がある場合は
+抽出したシンボルも照合する。
 
 ## 5. コーパスの管理
 

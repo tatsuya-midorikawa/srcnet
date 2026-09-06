@@ -8,6 +8,17 @@ module Srcnet.Tests.Corpus
 open System
 open System.IO
 
+let hasSyntaxParser () =
+  let languages = Srcnet.Extraction.Parsing.availableLanguages()
+  Array.contains "c" languages && Array.contains "cpp" languages
+
+/// 構文抽出の結果を前提にするテストだけを、解析器のない構成で明示的に省略する。
+type ParserFactAttribute() as this =
+  inherit Xunit.FactAttribute()
+  do
+    if not (hasSyntaxParser()) && Environment.GetEnvironmentVariable("SRCNET_REQUIRE_PARSER") <> "1" then
+      this.Skip <- "Requires the optional C/C++ syntax parser; covered by the parser CI matrix."
+
 /// コーパスと期待値を置くディレクトリ。リポジトリ ルートからの相対。
 [<Literal>]
 let CorpusDirectory = "tests/corpus"
@@ -128,3 +139,44 @@ let compare (name: string) (actual: string) =
         index <- index + 1
 
       struct (false, difference)
+
+/// 両ストリームを同時に読み、読み取り自体にも期限とサイズ上限を適用する。
+let runCli (arguments: string list) =
+  task {
+    let info = Diagnostics.ProcessStartInfo("dotnet")
+    info.ArgumentList.Add(typeof<Srcnet.Cli.Args.Command>.Assembly.Location)
+    for argument in arguments do info.ArgumentList.Add argument
+    info.WorkingDirectory <- root.Value
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.StandardOutputEncoding <- Text.UTF8Encoding(false, true)
+    info.StandardErrorEncoding <- Text.UTF8Encoding(false, true)
+    use child = new Diagnostics.Process(StartInfo = info)
+    use timeout = new Threading.CancellationTokenSource(TimeSpan.FromSeconds 30.0)
+    if not (child.Start()) then failwith "CLI プロセスを開始できませんでした"
+
+    let read (reader: StreamReader) =
+      task {
+        let buffer = Array.zeroCreate<char> 4096
+        let text = Text.StringBuilder()
+        let mutable finished = false
+        while not finished do
+          let! count = reader.ReadAsync(buffer.AsMemory(), timeout.Token)
+          if count = 0 then finished <- true
+          elif text.Length + count > 8 * 1024 * 1024 then
+            timeout.Cancel()
+            raise (InvalidDataException "CLI の出力が検証用の上限を超えました")
+          else text.Append(buffer, 0, count) |> ignore
+        return text.ToString()
+      }
+
+    let output = read child.StandardOutput
+    let errors = read child.StandardError
+    try
+      do! child.WaitForExitAsync timeout.Token
+      let! stdout = output
+      let! stderr = errors
+      return struct (child.ExitCode, stdout, stderr)
+    finally
+      if not child.HasExited then child.Kill true
+  }

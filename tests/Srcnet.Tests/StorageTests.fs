@@ -22,7 +22,7 @@ let ``ヘッダーは往復する`` () =
 
   match Format.tryReadHeader (ReadOnlySpan buffer) fileLength with
   | Ok parsed -> Assert.Equal(header, parsed)
-  | Error error -> failwith (Format.FormatError.describe error)
+  | Error error -> failwith(Format.FormatError.describe error)
 
 [<Fact>]
 let ``マジック番号が違うセグメントは拒否される`` () =
@@ -66,10 +66,17 @@ let ``未知のセグメント種別は拒否される`` () =
 [<Fact>]
 let ``セグメント種別コードは往復する`` () =
   let all =
-    [ Format.Nodes; Format.Files; Format.Strings; Format.StringOffsets; Format.AdjacencyCsr; Format.IdMap ]
+    [ Format.Nodes
+      Format.Files
+      Format.Strings
+      Format.StringOffsets
+      Format.AdjacencyCsr
+      Format.IdMap
+      Format.References
+      Format.LexicalLookup ]
 
   for kind in all do
-    Assert.Equal(ValueSome kind, Format.SegmentKind.ofCode (Format.SegmentKind.toCode kind))
+    Assert.Equal(ValueSome kind, Format.SegmentKind.ofCode(Format.SegmentKind.toCode kind))
 
 // --- 文字列表 ---
 
@@ -106,3 +113,33 @@ let ``CJK 文字列のバイト長を正しく数える`` () =
   let table = Strings.StringTable()
   let index = table.Intern "日本語"
   Assert.Equal(9, table.ByteLength index)
+
+[<Fact>]
+let ``unpaired surrogates cannot be silently replaced in the string table`` () =
+  let table = Strings.StringTable()
+
+  Assert.Throws<Text.EncoderFallbackException>(fun () -> table.Intern(String(char 0xD800, 1)) |> ignore)
+  |> ignore
+
+  Assert.Equal(1, table.Count)
+  Assert.Equal(0L, table.TotalBytes)
+
+[<Fact>]
+let ``lookup format rejects undersized and overflowed table declarations`` () =
+  for count, postings, bytes in
+    [ 1UL, 1UL, 63UL
+      uint64 UInt32.MaxValue, 0UL, 32UL
+      0UL, uint64 UInt32.MaxValue, 32UL ] do
+    let buffer = Array.zeroCreate<byte> Format.HeaderLength
+
+    Format.writeHeader
+      (Span buffer)
+      { Kind = Format.LexicalLookup
+        PrimaryCount = count
+        SecondaryCount = postings
+        RecordLength = 24u
+        PayloadLength = bytes }
+
+    match Format.tryReadHeader (ReadOnlySpan buffer) (int64 Format.HeaderLength + int64 bytes) with
+    | Error _ -> ()
+    | Ok _ -> failwith "Accepted invalid lookup table lengths"

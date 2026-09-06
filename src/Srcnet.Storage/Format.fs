@@ -36,6 +36,7 @@ type SegmentKind =
   | IdMap
   /// 未解決の参照候補。抽出（M2）と解決（M3）の間を繋ぐ。docs/extraction.md 5 を参照。
   | References
+  | LexicalLookup
 
 module SegmentKind =
 
@@ -48,6 +49,7 @@ module SegmentKind =
     | AdjacencyCsr -> 5u
     | IdMap -> 6u
     | References -> 7u
+    | LexicalLookup -> 8u
 
   let ofCode code =
     match code with
@@ -58,20 +60,23 @@ module SegmentKind =
     | 5u -> ValueSome AdjacencyCsr
     | 6u -> ValueSome IdMap
     | 7u -> ValueSome References
+    | 8u -> ValueSome LexicalLookup
     | _ -> ValueNone
 
 /// セグメント ヘッダー。すべての整数はリトル エンディアン。
 /// 対象は x64 と arm64 のみで、いずれもリトル エンディアンである。
 [<Struct>]
 type Header =
-  { Kind: SegmentKind
+  {
+    Kind: SegmentKind
     /// レコード数、ノード数、文字列数など、そのセグメントの主要な件数。
     PrimaryCount: uint64
     /// CSR の隣接要素数、文字列 blob のバイト長など、従属する件数。
     SecondaryCount: uint64
     /// 固定長レコードのバイト長。可変長セグメントでは 0。
     RecordLength: uint32
-    PayloadLength: uint64 }
+    PayloadLength: uint64
+  }
 
 type FormatError =
   | TooShort
@@ -94,8 +99,7 @@ module FormatError =
     | LengthMismatch(declared, actual) -> $"宣言された長さ {declared} と実際の長さ {actual} が一致しません"
     | InvalidCount(field, found) -> $"{field} の値 {found} が扱える範囲を超えています"
     | InvalidRecordLength(found, expected) -> $"レコード長が {expected} ではなく {found} です"
-    | PayloadMismatch(declared, expected) ->
-      $"宣言された payload 長 {declared} が、件数から求まる {expected} と一致しません"
+    | PayloadMismatch(declared, expected) -> $"宣言された payload 長 {declared} が、件数から求まる {expected} と一致しません"
 
 let writeHeader (destination: Span<byte>) (header: Header) =
   if destination.Length < HeaderLength then
@@ -121,62 +125,76 @@ let private checkInvariants (kind: SegmentKind) (header: Header) =
   // 先に件数を抑えてから乗算すれば、以降の算術は uint64 の範囲に必ず収まる。
   let limit = uint64 Int32.MaxValue
 
-  if header.PrimaryCount > limit then Error(InvalidCount("primaryCount", header.PrimaryCount))
-  elif header.SecondaryCount > limit then Error(InvalidCount("secondaryCount", header.SecondaryCount))
+  if header.PrimaryCount > limit then
+    Error(InvalidCount("primaryCount", header.PrimaryCount))
+  elif header.SecondaryCount > limit then
+    Error(InvalidCount("secondaryCount", header.SecondaryCount))
   else
 
-  let inline expect (recordLength: uint32) (payloadLength: uint64) (secondary: uint64 voption) =
-    if header.RecordLength <> recordLength then
-      Error(InvalidRecordLength(header.RecordLength, recordLength))
-    elif header.PayloadLength <> payloadLength then
-      Error(PayloadMismatch(header.PayloadLength, payloadLength))
-    else
-      match secondary with
-      | ValueSome expected when header.SecondaryCount <> expected ->
-        Error(InvalidCount("secondaryCount", header.SecondaryCount))
-      | ValueSome _
-      | ValueNone -> Ok header
+    let inline expect (recordLength: uint32) (payloadLength: uint64) (secondary: uint64 voption) =
+      if header.RecordLength <> recordLength then
+        Error(InvalidRecordLength(header.RecordLength, recordLength))
+      elif header.PayloadLength <> payloadLength then
+        Error(PayloadMismatch(header.PayloadLength, payloadLength))
+      else
+        match secondary with
+        | ValueSome expected when header.SecondaryCount <> expected ->
+          Error(InvalidCount("secondaryCount", header.SecondaryCount))
+        | ValueSome _
+        | ValueNone -> Ok header
 
-  match kind with
-  | Nodes
-  | Files
-  | References -> expect (uint32 RecordLength) (header.PrimaryCount * uint64 RecordLength) (ValueSome 0UL)
-  | Strings -> expect 0u header.SecondaryCount ValueNone
-  | StringOffsets -> expect 8u ((header.PrimaryCount + 1UL) * 8UL) ValueNone
-  | AdjacencyCsr -> expect 0u ((header.PrimaryCount + 1UL) * 8UL + header.SecondaryCount * 4UL) ValueNone
-  | IdMap ->
-    let recordLength = uint32 (Ids.NodeIdLength + 4)
-    expect recordLength (header.PrimaryCount * uint64 recordLength) (ValueSome 0UL)
+    match kind with
+    | Nodes
+    | Files
+    | References -> expect (uint32 RecordLength) (header.PrimaryCount * uint64 RecordLength) (ValueSome 0UL)
+    | Strings -> expect 0u header.SecondaryCount ValueNone
+    | StringOffsets -> expect 8u ((header.PrimaryCount + 1UL) * 8UL) ValueNone
+    | AdjacencyCsr -> expect 0u ((header.PrimaryCount + 1UL) * 8UL + header.SecondaryCount * 4UL) ValueNone
+    | IdMap ->
+      let recordLength = uint32(Ids.NodeIdLength + 4)
+      expect recordLength (header.PrimaryCount * uint64 recordLength) (ValueSome 0UL)
+    | LexicalLookup ->
+      let minimum = 32UL + header.PrimaryCount * 24UL + header.SecondaryCount * 8UL
+
+      if header.RecordLength <> 24u then
+        Error(InvalidRecordLength(header.RecordLength, 24u))
+      elif header.PayloadLength < minimum then
+        Error(PayloadMismatch(header.PayloadLength, minimum))
+      else
+        Ok header
 
 /// ヘッダーを読み、形式版と宣言された長さを検証する。
 /// 破損を検出した場合は部分的に読み進めず失敗させる。docs/security.md C-6 を参照。
 let tryReadHeader (source: ReadOnlySpan<byte>) (fileLength: int64) : Result<Header, FormatError> =
-  if source.Length < HeaderLength then Error TooShort
-  elif not (source.Slice(0, 8).SequenceEqual(ReadOnlySpan magic)) then Error BadMagic
+  if source.Length < HeaderLength then
+    Error TooShort
+  elif not(source.Slice(0, 8).SequenceEqual(ReadOnlySpan magic)) then
+    Error BadMagic
   else
 
-  let version = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(8, 4))
+    let version = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(8, 4))
 
-  if version <> FormatVersion then Error(UnsupportedVersion version)
-  else
-
-  let kindCode = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(12, 4))
-
-  match SegmentKind.ofCode kindCode with
-  | ValueNone -> Error(UnknownSegmentKind kindCode)
-  | ValueSome kind ->
-    let payloadLength = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(40, 8))
-
-    if uint64 fileLength <> uint64 HeaderLength + payloadLength then
-      Error(LengthMismatch(payloadLength, fileLength))
+    if version <> FormatVersion then
+      Error(UnsupportedVersion version)
     else
-      checkInvariants
-        kind
-        { Kind = kind
-          PrimaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(16, 8))
-          SecondaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(24, 8))
-          RecordLength = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(32, 4))
-          PayloadLength = payloadLength }
+
+      let kindCode = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(12, 4))
+
+      match SegmentKind.ofCode kindCode with
+      | ValueNone -> Error(UnknownSegmentKind kindCode)
+      | ValueSome kind ->
+        let payloadLength = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(40, 8))
+
+        if uint64 fileLength <> uint64 HeaderLength + payloadLength then
+          Error(LengthMismatch(payloadLength, fileLength))
+        else
+          checkInvariants
+            kind
+            { Kind = kind
+              PrimaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(16, 8))
+              SecondaryCount = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(24, 8))
+              RecordLength = BinaryPrimitives.ReadUInt32LittleEndian(source.Slice(32, 4))
+              PayloadLength = payloadLength }
 
 // --- レコード レイアウト -----------------------------------------------------
 // いずれも 64 バイト固定長。フィールドを追加する場合は予約領域を使い、
@@ -249,6 +267,32 @@ module FileRecord =
 
   [<Literal>]
   let ContentHashLength = 32
+
+/// Optional v1 lexical lookup, suffix ".lookup"; no change to the v3 base segments.
+/// All integers are little endian. Payload: 32-byte prelude, 24-byte keys,
+/// 8-byte postings, UTF-8 key blob. Header counts are keys and postings.
+/// Prelude: version/u32, nodeCount/u32, fileCount/u32, stringCount/u32,
+/// blobBytes/u64, normalKeyCount/u32, reserved/u32.
+/// Keys: blobOffset/u64, byteLength/u32, postingStart/u32, postingCount/u32,
+/// reserved/u32. Normal NFC keys precede NFC invariant-folded keys; each region
+/// is strictly StringComparer.Ordinal sorted. Postings: node/u32, target/u32
+/// (0=name, 1=qualifiedName, 2=path), sorted by node then target within each key.
+/// Key bytes and posting ranges are contiguous, without unused trailing data.
+module Lookup =
+  [<Literal>]
+  let MaxKeyBytes = 1_048_576
+
+  [<Literal>]
+  let Version = 1u
+
+  [<Literal>]
+  let PreludeLength = 32
+
+  [<Literal>]
+  let KeyLength = 24
+
+  [<Literal>]
+  let PostingLength = 8
 
 /// 未解決の参照候補。固定長を保ち、可変長は文字列 blob への参照にする。
 ///
