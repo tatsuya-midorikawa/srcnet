@@ -51,6 +51,34 @@ let files (name: string) =
     |> Seq.sortWith (fun (struct (left, _)) (struct (right, _)) -> String.CompareOrdinal(left, right))
     |> Seq.toArray
 
+/// 巨大な病的入力を用意する。
+///
+/// 内容は決定的な生成規則で決まるため、リポジトリへ載せずに実行時へ作る。数 MiB の
+/// 生成物をリポジトリへ置くと、履歴の大きさに見合う情報がない。生成規則そのものが
+/// リポジトリ内にあるので、外部依存にはならない（docs/testing.md 5）。
+let materializeLarge () =
+  let directory = Path.Combine(Path.GetTempPath(), "srcnet-corpus-large")
+  Directory.CreateDirectory directory |> ignore
+
+  let write (name: string) (build: unit -> byte[]) =
+    let path = Path.Combine(directory, name)
+    if not (File.Exists path) then File.WriteAllBytes(path, build ())
+    path
+
+  [| // 極端に長い 1 行。行長の上限と打ち切りを働かせる。
+     write "long_line.c" (fun () ->
+       let builder = Text.StringBuilder()
+       builder.Append "int x = " |> ignore
+
+       for _ in 1..200_000 do
+         builder.Append "1 + " |> ignore
+
+       builder.Append "1;\n" |> ignore
+       Text.Encoding.UTF8.GetBytes(builder.ToString()))
+     // 極端に多い行。行数の上限と、子が非常に多い構文ノードの走査を働かせる。
+     write "many_lines.c" (fun () ->
+       Text.Encoding.UTF8.GetBytes(String.replicate 200_000 "// line\n")) |]
+
 /// 期待値の更新を要求されているか。
 ///
 /// 期待値は手作業で書き換えず、生成コマンドで更新する（backlog 025）。

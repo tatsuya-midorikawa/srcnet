@@ -1,6 +1,6 @@
 # 移植性と国際化
 
-macOS と Windows を対等な第一級プラットフォームとして扱う。Linux は「解析対象としての Linux カーネル ソース」が主目標であり、実行環境としては副次的に扱う（[ロードマップ](roadmap.md)）。
+macOS と Windows を対等な第一級プラットフォームとして扱う。Linux は「解析対象としての Linux カーネル ソース」が主目標であり、**実行環境としては対応しない**（[設計判断](decisions.md) ADR-10）。動作しないことを意図するものではないが、検証していない以上「対応」とは呼ばない。
 
 本書は [開発規約](../.github/instructions/fsharp-dotnet.instructions.md) の NFR-1（両 OS 動作）と NFR-4（CJK 動作）を、srcnet 固有の具体策へ落としたものである。
 

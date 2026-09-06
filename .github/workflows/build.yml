@@ -5,6 +5,10 @@ on:
         branches: [main]
     pull_request:
         branches: [main]
+    # 大規模コーパスの実測は所要時間が長い。定期実行と手動実行に限る。
+    schedule:
+        - cron: '0 18 * * 0'
+    workflow_dispatch:
 
 permissions:
     contents: read
@@ -14,6 +18,9 @@ env:
     DOTNET_CLI_TELEMETRY_OPTOUT: true
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
     CI: true
+    # 実測に使うコーパスはコミット SHA で固定する。追従は明示的な更新として行う。
+    # v6.6（長期サポート）のタグが指すコミット。
+    LINUX_CORPUS_REF: ce1c54fdff7a8dd0f8b1d0522f4571d1b98b5a11
 
 jobs:
     build-test:
@@ -155,6 +162,105 @@ jobs:
 
             - name: Compare manifests
               run: diff macos/manifest.json windows/manifest.json
+
+
+    corpus-large:
+        # M2 の完了条件の実測。`linux` コーパスの走査と抽出を通し、両 OS の成果物が
+        # バイト単位で一致することを確かめる（docs/testing.md T-1 の 3、T-7）。
+        #
+        # ホスト型ランナーの時間と容量に収まらない可能性があるため、pull request では
+        # 回さず、定期実行と手動実行に限る。収まらないことが確認できた場合は
+        # docs/roadmap.md の未決事項「大規模コーパスを CI で回すための実行基盤」として扱う。
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 120
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-dotnet@v4
+              with:
+                  global-json-file: global.json
+
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
+            - name: Build parser
+              run: python tools/build_native.py --languages c cpp
+
+            - name: Publish CLI
+              run: dotnet publish src/Srcnet.Cli/Srcnet.Cli.fsproj -c Release -o artifacts/cli
+
+            # コーパスはコミット SHA で固定する（docs/testing.md 5）。
+            # キャッシュして毎回の取得を避ける。
+            - name: Restore corpus cache
+              id: corpus-cache
+              uses: actions/cache@v4
+              with:
+                  path: corpus/linux
+                  key: corpus-linux-${{ env.LINUX_CORPUS_REF }}
+
+            - name: Fetch corpus
+              if: steps.corpus-cache.outputs.cache-hit != 'true'
+              run: |
+                  git clone --filter=blob:none --no-checkout https://github.com/torvalds/linux.git corpus/linux
+                  git -C corpus/linux checkout ${{ env.LINUX_CORPUS_REF }}
+
+            - name: Index (POSIX)
+              if: runner.os != 'Windows'
+              run: |
+                  /usr/bin/time -l ./artifacts/cli/srcnet index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json 2> artifacts/index.time
+                  cat artifacts/index.json
+                  cat artifacts/index.time
+
+            - name: Index (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $measured = Measure-Command { ./artifacts/cli/srcnet.exe index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json }
+                  "elapsed_seconds=$($measured.TotalSeconds)" | Out-File artifacts/index.time
+                  Get-Content artifacts/index.json
+
+            - name: Verify
+              if: runner.os != 'Windows'
+              run: ./artifacts/cli/srcnet verify corpus/linux --out artifacts/linux
+
+            - name: Verify (Windows)
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: ./artifacts/cli/srcnet.exe verify corpus/linux --out artifacts/linux
+
+            - name: Upload measurements
+              uses: actions/upload-artifact@v4
+              with:
+                  name: corpus-linux-${{ matrix.os }}
+                  path: |
+                      artifacts/index.json
+                      artifacts/index.time
+                      artifacts/linux/manifest.json
+
+    corpus-large-determinism:
+        # 両 OS の成果物がバイト単位で一致すること（T-1 の 3）。
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        needs: corpus-large
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: corpus-linux-macos-latest
+                  path: macos
+
+            - uses: actions/download-artifact@v4
+              with:
+                  name: corpus-linux-windows-latest
+                  path: windows
+
+            - name: Compare manifests
+              run: diff macos/linux/manifest.json windows/linux/manifest.json
 
     deps-audit:
         # T-3: 製品コードの依存閉包にネットワーク クライアントとモデル ランタイムが

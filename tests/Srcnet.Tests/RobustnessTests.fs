@@ -58,7 +58,12 @@ let private extractFile (relative: string) (full: string) (cancellation: Cancell
 
 [<Fact>]
 let ``病的入力でもクラッシュせず、定めた時間内に終わる`` () =
-  let files = Corpus.files "pathological"
+  // リポジトリ内の固定分と、生成規則から作る巨大な分の両方を通す。
+  let generated =
+    Corpus.materializeLarge ()
+    |> Array.map (fun path -> struct (Path.GetFileName path, path))
+
+  let files = Array.append (Corpus.files "pathological") generated
   Assert.NotEmpty files
 
   for struct (relative, full) in files do
@@ -134,7 +139,7 @@ let ``抽出中の取り消しは定めた時間内に効く`` () =
   use cancellation = new CancellationTokenSource()
   cancellation.Cancel()
 
-  let path = Path.Combine(Corpus.corpusPath "pathological", "many_lines.c")
+  let path = (Corpus.materializeLarge ())[1]
 
   // 取り消し済みのトークンでは、抽出は始まらずに `OperationCanceledException` になる。
   // 中断を内部エラーとして扱わないことが、終了コード 5 の前提である。
