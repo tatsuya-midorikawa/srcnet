@@ -1,9 +1,13 @@
 # corpus=cjk tier=T2
-## big5.c lang=c tier=T0 skipped=Shift_JIS を復号できません
-## euc_jp.c lang=c tier=T0 skipped=Shift_JIS を復号できません
-## euc_kr.c lang=c tier=T0 skipped=Shift_JIS を復号できません
-## gb18030.c lang=c tier=T0 skipped=Shift_JIS を復号できません
-## shift_jis.c lang=c tier=T0 skipped=Shift_JIS を復号できません
+## big5.c lang=c tier=T0 skipped=ambiguous-encoding(Shift_JIS, EUC-JP, GB18030, Big5, EUC-KR)
+## euc_jp.c lang=c tier=T0 skipped=ambiguous-encoding(Shift_JIS, EUC-JP, GB18030, Big5, EUC-KR)
+## euc_kr.c lang=c tier=T0 skipped=ambiguous-encoding(Shift_JIS, EUC-JP, GB18030, Big5, EUC-KR)
+## gb18030.c lang=c tier=T0 skipped=ambiguous-encoding(Shift_JIS, EUC-JP, GB18030, Big5, EUC-KR)
+## iso2022jp.c lang=c tier=T2
+N Note TODO | TODO: 日本語のコメント ord=0 lines=1-1 parent=- flags=- doc=27B
+N Function iso2022_value | iso2022_value ord=0 lines=2-2 parent=- flags=definition doc=36B
+E EXPLAINS TODO: 日本語のコメント -> iso2022_value conf=EXTRACTED stage=2 line=1
+## shift_jis.c lang=c tier=T0 skipped=ambiguous-encoding(Shift_JIS, GB18030)
 ## utf16be.c lang=c tier=T2
 N Note NOTE | NOTE: UTF-16 の日本語コメント ord=0 lines=2-2 parent=- flags=- doc=34B
 N Function 幅 | 幅 ord=0 lines=3-3 parent=- flags=definition doc=43B

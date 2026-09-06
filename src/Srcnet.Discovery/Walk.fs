@@ -35,7 +35,10 @@ type WalkOptions =
     /// 除外する論理パス。生成物の出力先が解析ルート配下にある場合に使う。
     ExcludedPaths: string[]
     /// 抽出の条件。走査の 1 回読みの中で段 4 まで行う（backlog 014）。
-    Extraction: Extractor.ExtractionOptions }
+    Extraction: Extractor.ExtractionOptions
+    /// 符号化が曖昧なファイルに適用する符号化。利用者が明示した場合だけ設定する。
+    /// 候補に含まれない場合は適用しない。docs/decisions.md ADR-5, ADR-9 を参照。
+    AssumeEncoding: Encodings.DetectedEncoding voption }
 
 module WalkOptions =
 
@@ -55,7 +58,8 @@ module WalkOptions =
       Jobs = Environment.ProcessorCount
       ExcludedDirectoryNames = [| ".git"; ".hg"; ".svn" |]
       ExcludedPaths = Array.empty
-      Extraction = Extractor.ExtractionOptions.defaults }
+      Extraction = Extractor.ExtractionOptions.defaults
+      AssumeEncoding = ValueNone }
 
 type DiscoveredFile =
   { Path: LogicalPath
@@ -435,11 +439,16 @@ let run
                   elif summary.Decoded then Model.ExtractedFile.empty extractor.Options.Tier
                   elif discoveredFlags.HasFlag NodeFlags.Binary then
                     Model.ExtractedFile.skipped Model.Structure Model.NotText
+                  elif summary.EncodingCandidates.Length > 1 then
+                    // 候補の先頭を確定値として扱わない。抽出せず、曖昧さを成果物へ残す。
+                    let names =
+                      summary.EncodingCandidates |> Array.map Encodings.name |> String.concat ", "
+
+                    Model.ExtractedFile.skipped Model.Structure (Model.AmbiguousEncoding names)
                   else
-                    // 復号できない符号化では抽出しない。判定した符号化は成果物に残る。
                     Model.ExtractedFile.skipped
                       Model.Structure
-                      (Model.ParseUnavailable $"{Encodings.name summary.Encoding} を復号できません")
+                      (Model.UnsupportedEncoding(Encodings.name summary.Encoding))
 
                 match extraction.Tier with
                 | Model.Syntax -> Interlocked.Increment &syntaxFiles |> ignore
@@ -506,7 +515,8 @@ let run
           if options.Extraction.Tier = Model.Structure then 0L
           else options.Extraction.MaxExtractionBytes
 
-        use reader = new Content.ContentReader(options.MaxFileSizeBytes, retained)
+        use reader =
+          new Content.ContentReader(options.MaxFileSizeBytes, retained, options.AssumeEncoding)
         let extractor = Extractor.Extractor options.Extraction
         let mutable running = true
 

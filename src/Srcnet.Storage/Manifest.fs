@@ -79,7 +79,10 @@ type IndexOptions =
     /// 構文解析器を利用できたか。段階が下がった理由を成果物から説明できるようにする。
     ParserAvailable: bool
     /// 同梱している文法の一覧。言語名の序数昇順。
-    Grammars: GrammarRecord[] }
+    Grammars: GrammarRecord[]
+    /// 符号化が曖昧なファイルへ適用した符号化。指定がなければ空文字列。
+    /// 利用者が持ち込んだ事実であり、成果物の内容を決める条件の一部になる。
+    AssumedEncoding: string }
 
 type DiagnosticCount = { Kind: string; Count: int }
 
@@ -150,6 +153,7 @@ let private serialize (manifest: Manifest) =
   writer.WriteNumber("maxFileSizeBytes", manifest.Options.MaxFileSizeBytes)
   writer.WriteNumber("tier", manifest.Options.Tier)
   writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
+  writer.WriteString("assumedEncoding", manifest.Options.AssumedEncoding)
   writer.WriteStartArray "grammars"
 
   for grammar in manifest.Options.Grammars do
@@ -546,14 +550,18 @@ let private readOptions (element: JsonElement) =
   | Ok followSymbolicLinks, Ok respectIgnoreFiles, Ok maxDepth, Ok maxFileSizeBytes ->
     match requireInt64 element "tier" 0L 3L, requireBoolean element "parserAvailable", readGrammars element with
     | Ok tier, Ok parserAvailable, Ok grammars ->
-      Ok
-        { FollowSymbolicLinks = followSymbolicLinks
-          RespectIgnoreFiles = respectIgnoreFiles
-          MaxDepth = maxDepth
-          MaxFileSizeBytes = maxFileSizeBytes
-          Tier = int tier
-          ParserAvailable = parserAvailable
-          Grammars = grammars }
+      match requireString element "assumedEncoding" with
+      | Error error -> Error error
+      | Ok assumedEncoding ->
+        Ok
+          { FollowSymbolicLinks = followSymbolicLinks
+            RespectIgnoreFiles = respectIgnoreFiles
+            MaxDepth = maxDepth
+            MaxFileSizeBytes = maxFileSizeBytes
+            Tier = int tier
+            ParserAvailable = parserAvailable
+            Grammars = grammars
+            AssumedEncoding = assumedEncoding }
     | Error error, _, _
     | _, Error error, _
     | _, _, Error error -> Error error

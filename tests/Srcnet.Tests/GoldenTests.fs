@@ -77,6 +77,10 @@ let private renderFile (builder: StringBuilder) (relative: string) (language: La
   | ValueSome Model.ParseTimedOut -> builder.Append " skipped=timed-out" |> ignore
   | ValueSome(Model.TooLargeToExtract _) -> builder.Append " skipped=too-large" |> ignore
   | ValueSome(Model.ParseUnavailable detail) -> builder.Append(" skipped=").Append(detail) |> ignore
+  | ValueSome(Model.AmbiguousEncoding candidates) ->
+    builder.Append(" skipped=ambiguous-encoding(").Append(candidates).Append(')') |> ignore
+  | ValueSome(Model.UnsupportedEncoding encoding) ->
+    builder.Append(" skipped=unsupported-encoding(").Append(encoding).Append(')') |> ignore
   | ValueNone -> ()
 
   builder.Append '\n' |> ignore
@@ -183,11 +187,14 @@ let private renderCorpus (name: string) (tier: Model.Tier) =
         elif summary.Decoded then Model.ExtractedFile.empty tier
         elif summaryFlags.HasFlag NodeFlags.Binary then
           Model.ExtractedFile.skipped Model.Structure Model.NotText
+        elif summary.EncodingCandidates.Length > 1 then
+          // 走査と同じ扱いにする。候補の先頭を確定値として扱わない（backlog 022）。
+          let names = summary.EncodingCandidates |> Array.map Encodings.name |> String.concat ", "
+          Model.ExtractedFile.skipped Model.Structure (Model.AmbiguousEncoding names)
         else
-          // 走査と同じ扱いにする。復号できない符号化は抽出しない（backlog 022）。
           Model.ExtractedFile.skipped
             Model.Structure
-            (Model.ParseUnavailable $"{Encodings.name summary.Encoding} を復号できません")
+            (Model.UnsupportedEncoding(Encodings.name summary.Encoding))
 
       renderFile builder relative language extracted
 

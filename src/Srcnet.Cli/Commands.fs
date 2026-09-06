@@ -124,6 +124,10 @@ let private tierOf (value: int) =
 
 let private walkOptions (arguments: Args.IndexArguments) (excluded: string[]) =
   { Walk.WalkOptions.defaults with
+      AssumeEncoding =
+        match arguments.AssumeEncoding with
+        | ValueSome text -> Encodings.tryParse text
+        | ValueNone -> ValueNone
       Extraction =
         { Extractor.ExtractionOptions.defaults with
             Tier = tierOf arguments.Tier }
@@ -273,7 +277,11 @@ let private publishIndex
           MaxFileSizeBytes = options.MaxFileSizeBytes
           Tier = int (Model.Tier.toCode walk.AppliedTier)
           ParserAvailable = walk.ParserAvailable
-          Grammars = grammarRecords }
+          Grammars = grammarRecords
+          AssumedEncoding =
+            match options.AssumeEncoding with
+            | ValueSome encoding -> Encodings.name encoding
+            | ValueNone -> "" }
       Counts =
         { Nodes = result.NodeCount
           Edges = result.EdgeCount
@@ -603,6 +611,7 @@ let private checkDeterminism
             Extraction =
               { Extractor.ExtractionOptions.defaults with
                   Tier = tierOf manifest.Options.Tier }
+            AssumeEncoding = Encodings.tryParse manifest.Options.AssumedEncoding
             // 並列度は所要時間だけを変え、出力を変えないことをここで検証する。
             Jobs = 1
             // 既存の成果物が解析ルート配下にある場合、初回と同じ条件になるよう除外する。

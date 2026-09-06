@@ -172,6 +172,11 @@ type SkipReason =
   | ParseTimedOut
   /// 解析器が木を返さなかった。
   | ParseUnavailable of detail: string
+  /// 符号化が複数の候補に適合し、単一へ確定できなかった。
+  /// 候補の先頭を確定値として扱わないため、抽出は行わない（ADR-5, ADR-9）。
+  | AmbiguousEncoding of candidates: string
+  /// 復号器を持たない符号化である。
+  | UnsupportedEncoding of encoding: string
 
 module SkipReason =
 
@@ -182,6 +187,8 @@ module SkipReason =
     | NoGrammar -> "対応する文法がありません"
     | ParseTimedOut -> "解析が時間の上限を超えました"
     | ParseUnavailable detail -> detail
+    | AmbiguousEncoding candidates -> $"符号化を確定できません (候補: {candidates})"
+    | UnsupportedEncoding encoding -> $"{encoding} を復号できません"
 
 /// 1 ファイル分の抽出結果。
 type ExtractedFile =

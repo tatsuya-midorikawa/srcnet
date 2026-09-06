@@ -60,6 +60,20 @@ let name encoding =
   | Binary -> "binary"
   | Undetermined -> "undetermined"
 
+/// 名前から符号化を引く。利用者が明示した符号化を受け取るために使う。
+/// 比較は序数で行い、ロケールに依存させない。
+let tryParse (text: string) =
+  let all =
+    [| Utf8; Utf8WithBom; Utf16Le; Utf16Be; ShiftJis; EucJp; Iso2022Jp; Gb18030; Big5; EucKr |]
+
+  let normalized = text.Replace("_", "-").ToUpperInvariant()
+
+  all
+  |> Array.tryFind (fun encoding -> (name encoding).ToUpperInvariant().Replace("_", "-") = normalized)
+  |> function
+    | Some encoding -> ValueSome encoding
+    | None -> ValueNone
+
 [<Struct>]
 type Detection =
   { Encoding: DetectedEncoding

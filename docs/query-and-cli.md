@@ -29,7 +29,8 @@ srcnet index <path>
   --incremental          変更ファイルのみ再抽出
   --jobs <n>             並列度（結果には影響しない）
   --memory-limit <size>  ピーク メモリ上限
-  --tier <0|1|2|3>       抽出段階
+  --tier <0|1|2|3>       抽出段階（3 は未実装）
+  --assume-encoding <名> 符号化が曖昧なファイルへ適用する符号化
   --no-gitignore         .gitignore を無視
   --allow-partial        不完全な走査結果での上書きを許可
 

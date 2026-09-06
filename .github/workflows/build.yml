@@ -31,6 +31,16 @@ jobs:
               with:
                   global-json-file: global.json
 
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
+            - name: Check generated tables
+              # 生成物と出典がずれたまま埋め込まれないようにする（ADR-9、backlog 020）。
+              run: |
+                  python tools/generate_grammar_versions.py --check
+                  python tools/generate_encoding_tables.py --check
+
             - name: Restore
               run: dotnet restore srcnet.slnx
 

@@ -7,9 +7,19 @@
     <ItemGroup>
         <Compile Include="Unicode.fs" />
         <Compile Include="Encodings.fs" />
+        <Compile Include="LegacyEncodings.fs" />
         <Compile Include="Decoding.fs" />
         <Compile Include="Sanitize.fs" />
         <Compile Include="Words.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!--
+            レガシー符号化の変換表。tools/generate_encoding_tables.py が生成する。
+            埋め込み資源にすることで、実行時に外部ファイルを読む経路を作らない
+            （docs/security.md C-1、docs/decisions.md ADR-9）。
+        -->
+        <EmbeddedResource Include="tables/*.bin" LogicalName="Srcnet.Text.Tables.%(Filename)%(Extension)" />
     </ItemGroup>
 
 </Project>

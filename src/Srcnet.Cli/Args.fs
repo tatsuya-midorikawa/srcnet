@@ -24,6 +24,8 @@ type IndexArguments =
     MaxDepth: int voption
     /// 抽出段階（0..2）。既定は 2。docs/query-and-cli.md 2.1 を参照。
     Tier: int
+    /// 符号化が曖昧なファイルに適用する符号化の名前。指定がなければ空。
+    AssumeEncoding: string voption
     RespectIgnoreFiles: bool
     FollowSymbolicLinks: bool
     AllowPartial: bool
@@ -259,6 +261,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
     let jobs = optionalInt "--jobs"
     let maxFileSize = optionalSize "--max-file-size"
     let maxDepth = optionalInt "--max-depth"
+    let assumeEncoding = optionalValue "--assume-encoding"
     let noGitignore = reader.Flag "--no-gitignore"
     let followSymlinks = reader.Flag "--follow-symlinks"
     let allowPartial = reader.Flag "--allow-partial"
@@ -313,6 +316,7 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
                 match unwrap tier with
                 | ValueSome value -> value
                 | ValueNone -> DefaultTier
+              AssumeEncoding = assumeEncoding
               RespectIgnoreFiles = not noGitignore
               FollowSymbolicLinks = followSymlinks
               AllowPartial = allowPartial
@@ -370,6 +374,7 @@ let usage =
       "  --max-file-size <size> 1 ファイルの処理上限 (例 64MiB)"
       "  --max-depth <n>        走査する階層の深さ上限"
       "  --tier <0|1|2>         抽出段階 (0 走査のみ / 1 行指向 / 2 構文。既定 2)"
+      "  --assume-encoding <名>  符号化が曖昧なファイルに適用する符号化 (例 EUC-JP)"
       "  --no-gitignore         .gitignore / .srcnetignore を無視する"
       "  --follow-symlinks      シンボリック リンクを追跡する (ルート外は拒否)"
       "  --allow-partial        不完全な走査結果での上書きを許可する"

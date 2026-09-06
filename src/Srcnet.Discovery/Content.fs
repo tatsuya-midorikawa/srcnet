@@ -54,7 +54,7 @@ let private crlf = [| 0x0Duy; 0x0Auy |]
 /// ワーカーごとに 1 つ持つ読み取り器。バッファとハッシュ器を再利用し、
 /// ファイルごとの割り当てをダイジェストの 32 バイトだけに抑える。
 [<Sealed>]
-type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
+type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64, assumedEncoding: Encodings.DetectedEncoding voption) =
   let hasher = new Hashing.Hasher()
   let buffer = ArrayPool<byte>.Shared.Rent ReadBufferBytes
   let prefix = Array.zeroCreate<byte> Encodings.DetectionPrefixBytes
@@ -67,7 +67,10 @@ type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
   let mutable disposed = false
 
   /// 本文を保持しない読み取り器。段階 0（走査のみ）で使う。
-  new(maxFileSizeBytes: int64) = new ContentReader(maxFileSizeBytes, 0L)
+  new(maxFileSizeBytes: int64) = new ContentReader(maxFileSizeBytes, 0L, ValueNone)
+
+  new(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
+    new ContentReader(maxFileSizeBytes, maxRetainedBytes, ValueNone)
 
   member _.MaxFileSizeBytes = maxFileSizeBytes
 
@@ -225,12 +228,30 @@ type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
       let mutable decodedLineCount = lineCount
       decodedIsConverted <- false
 
-      if retaining && retainedLength >= 0 && Decoding.isSupported detection.Encoding then
+      // 曖昧なままの符号化を確定値として扱わない（ADR-5、完了済み 010）。
+      // 利用者が明示した符号化が候補に含まれる場合だけ、その指定で復号する。
+      // 指定は利用者が持ち込んだ事実であって、こちらの推測ではない。
+      let resolved =
+        if not detection.Ambiguous then ValueSome detection.Encoding
+        else
+          match assumedEncoding with
+          | ValueSome assumed when Array.contains assumed detection.Candidates -> ValueSome assumed
+          | ValueSome _
+          | ValueNone -> ValueNone
+
+      let decodeAs =
+        match resolved with
+        | ValueSome encoding when Decoding.isSupported encoding -> ValueSome encoding
+        | ValueSome _
+        | ValueNone -> ValueNone
+
+      if retaining && retainedLength >= 0 && decodeAs.IsSome then
+        let encoding = decodeAs.Value
         let source = ReadOnlySpan(retained, 0, retainedLength)
 
-        if Decoding.isUtf8 detection.Encoding then
+        if Decoding.isUtf8 encoding then
           // BOM を持つ場合だけ、抽出器へ渡す前に取り除く。複製は避ける。
-          let offset = Decoding.bomLengthOf detection.Encoding source
+          let offset = Decoding.bomLengthOf encoding source
 
           if offset > 0 then Array.blit retained offset retained 0 (retainedLength - offset)
 
@@ -243,7 +264,7 @@ type ContentReader(maxFileSizeBytes: int64, maxRetainedBytes: int64) =
             if converted.Length > 0 then ArrayPool<byte>.Shared.Return converted
             converted <- ArrayPool<byte>.Shared.Rent required
 
-          match Decoding.toUtf8 detection.Encoding source (Span converted) with
+          match Decoding.toUtf8 encoding source (Span converted) with
           | Decoding.Converted written ->
             decodedIsConverted <- true
             decodedLength <- written

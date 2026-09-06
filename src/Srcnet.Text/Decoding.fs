@@ -41,11 +41,13 @@ let private bomLength (encoding: Encodings.DetectedEncoding) (source: ReadOnlySp
     else 0
   | _ -> 0
 
-/// UTF-16 を UTF-8 へ変換したときに必要な最大バイト数。
+/// UTF-8 へ変換したときに必要な最大バイト数。
 ///
 /// UTF-16 の 1 コード単位は UTF-8 で最大 3 バイトになる。サロゲート対は 4 バイトだが
-/// 2 コード単位を消費するため、この上限を超えない。
-let maxUtf8Bytes (sourceLength: int) = sourceLength / 2 * 3 + 3
+/// 2 コード単位を消費するため、この上限を超えない。レガシー符号化は 1 バイトが
+/// 最大 3 バイトへ広がる（半角カタカナ）ため、そちらの上限を採る。
+let maxUtf8Bytes (sourceLength: int) =
+  max (sourceLength / 2 * 3) (LegacyEncodings.maxUtf8Bytes sourceLength) + 3
 
 /// 変換なしで UTF-8 として扱えるか。
 let isUtf8 (encoding: Encodings.DetectedEncoding) =
@@ -63,7 +65,7 @@ let isSupported (encoding: Encodings.DetectedEncoding) =
   | Encodings.Iso2022Jp
   | Encodings.Gb18030
   | Encodings.Big5
-  | Encodings.EucKr
+  | Encodings.EucKr -> LegacyEncodings.isSupported encoding
   | Encodings.Binary
   | Encodings.Undetermined -> false
 
@@ -110,7 +112,10 @@ let toUtf8
   | Encodings.Iso2022Jp
   | Encodings.Gb18030
   | Encodings.Big5
-  | Encodings.EucKr
+  | Encodings.EucKr ->
+    // 変換表は同梱している。表を持たない構成では `Unsupported` へ落ちる。
+    let written = LegacyEncodings.decode encoding source destination
+    if written < 0 then Unsupported else Converted written
   | Encodings.Undetermined -> Unsupported
 
 /// 復号済みの UTF-8 バイト列から、改行種別によらない論理的な行数を数える。
