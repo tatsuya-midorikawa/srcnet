@@ -75,6 +75,11 @@ let ``双方向テキスト制御が無害化される`` () =
   Assert.False(sanitized.Contains '\u202C')
 
 [<Fact>]
+let ``アラビア文字マークも両方の端末出力経路で無害化する`` () =
+  Assert.Equal("safe\uFFFDevil", Sanitize.forTerminal "safe\u061Cevil")
+  Assert.Equal("safe\uFFFDevil\n", Sanitize.forTerminalMultiline "safe\u061Cevil\n")
+
+[<Fact>]
 let ``安全な文字列は同じインスタンスを返す`` () =
   let input = "src/parser.c"
   Assert.Same(input, Sanitize.forTerminal input)

@@ -19,10 +19,12 @@ srcnet は構文解析に tree-sitter を再利用する（docs/decisions.md ADR
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -76,29 +78,31 @@ def download(repository: str, version: str, expected_sha256: str) -> Path:
     log(f"取得 {repository} {version}")
     temporary = destination.with_suffix(".partial")
 
-    with urllib.request.urlopen(url, timeout=120) as response:
-        total = 0
-        with open(temporary, "wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    temporary.unlink(missing_ok=True)
-                    raise SystemExit(f"{repository}: 取得サイズが上限を超えました")
-                handle.write(chunk)
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response:
+            total = 0
+            with open(temporary, "wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise SystemExit(f"{repository}: 取得サイズが上限を超えました")
+                    handle.write(chunk)
 
-    actual = sha256_of(temporary)
-    if actual != expected_sha256:
+        actual = sha256_of(temporary)
+        if actual != expected_sha256:
+            raise SystemExit(
+                f"{repository} {version}: チェックサムが一致しません\n"
+                f"  期待 {expected_sha256}\n  実際 {actual}"
+            )
+
+        temporary.replace(destination)
+        return destination
+    finally:
+        # Windows でも書き込みハンドルを閉じてから後片付けする。
         temporary.unlink(missing_ok=True)
-        raise SystemExit(
-            f"{repository} {version}: チェックサムが一致しません\n"
-            f"  期待 {expected_sha256}\n  実際 {actual}"
-        )
-
-    temporary.replace(destination)
-    return destination
 
 
 def extract(archive: Path, into: Path) -> Path:
@@ -112,10 +116,10 @@ def extract(archive: Path, into: Path) -> Path:
             # 展開先を抜け出す名前と、リンクによる脱出を拒否する。
             # docs/security.md C-3 と同じ理由で、取得物も信頼しない。
             target = (into / member.name).resolve()
-            if not str(target).startswith(str(into.resolve())):
+            if not target.is_relative_to(into.resolve()):
                 raise SystemExit(f"{archive.name}: 展開先の外を指す項目があります: {member.name}")
-            if member.issym() or member.islnk():
-                raise SystemExit(f"{archive.name}: リンクを含む書庫は受け付けません: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise SystemExit(f"{archive.name}: 通常ファイルとディレクトリ以外は受け付けません: {member.name}")
 
         # `filter` は Python 3.12 以降でしか使えないため、検証は上の走査で行う。
         tar.extractall(into)
@@ -124,6 +128,29 @@ def extract(archive: Path, into: Path) -> Path:
     if len(entries) != 1:
         raise SystemExit(f"{archive.name}: 想定と異なる構成です")
     return entries[0]
+
+def required_exports(grammars: list[dict]) -> list[str]:
+    symbols = set()
+    for source in (ROOT / "src/Srcnet.Extraction").glob("*.fs"):
+        symbols.update(re.findall(
+            r"^\s*extern\s+\S+\s+(ts_[A-Za-z0-9_]+)\s*\(",
+            source.read_text(encoding="utf-8"), re.MULTILINE
+        ))
+    if not symbols:
+        raise SystemExit("tree-sitter の相互運用宣言が見つかりません")
+    for grammar in grammars:
+        symbol = grammar["symbol"]
+        if not re.fullmatch(r"tree_sitter_[A-Za-z0-9_]+", symbol):
+            raise SystemExit(f"文法の公開シンボル名が不正です: {symbol!r}")
+        symbols.add(symbol)
+    return sorted(symbols)
+
+
+def verify_exports(library: Path, symbols: list[str]) -> None:
+    loaded = ctypes.CDLL(str(library.resolve()))
+    for symbol in symbols:
+        if not hasattr(loaded, symbol):
+            raise SystemExit(f"{library}: 必須の公開シンボルがありません: {symbol}")
 
 
 class Toolchain:
@@ -144,7 +171,7 @@ class Toolchain:
         output.parent.mkdir(parents=True, exist_ok=True)
 
         if self.is_msvc:
-            command = [self.compiler, "/nologo", "/c", "/O2", "/utf-8"]
+            command = [self.compiler, "/nologo", "/c", "/O2", "/utf-8", "/std:c11"]
             command += [f"/I{path}" for path in includes]
             command += [str(source), f"/Fo{output}"]
         else:
@@ -154,11 +181,20 @@ class Toolchain:
 
         subprocess.run(command, check=True)
 
-    def link(self, objects: list[Path], output: Path) -> None:
+    def link(self, objects: list[Path], output: Path, symbols: list[str]) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
 
+        if self.is_windows:
+            definition = output.with_suffix(".def")
+            definition.write_bytes(
+                (f"LIBRARY {LIBRARY_STEM}\nEXPORTS\n" + "".join(f"  {name}\n" for name in symbols))
+                .encode("ascii")
+            )
+
         if self.is_msvc:
-            command = ["link", "/nologo", "/DLL", f"/OUT:{output}"] + [str(o) for o in objects]
+            command = ["link", "/nologo", "/DLL", f"/OUT:{output}", f"/DEF:{definition}"] + [str(o) for o in objects]
+        elif self.is_windows:
+            command = [self.compiler, "-shared", "-o", str(output)] + [str(o) for o in objects] + [str(definition)]
         elif platform.system() == "Darwin":
             command = [self.compiler, "-dynamiclib", "-o", str(output)] + [str(o) for o in objects]
         else:
@@ -252,7 +288,9 @@ def main() -> int:
         log(f"{language} を構築しました")
 
     output = OUTPUT / library_name()
-    toolchain.link(objects, output)
+    symbols = required_exports(grammars)
+    toolchain.link(objects, output, symbols)
+    verify_exports(output, symbols)
 
     (OUTPUT / "languages.json").write_text(
         json.dumps(
@@ -274,4 +312,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     sys.exit(main())

@@ -127,7 +127,7 @@
       <h2>エッジ種別</h2>
       <ul id="edgeKinds"></ul>
       <h2>選択</h2>
-      <div id="selection" class="notice">ノードを選ぶと属性を表示します。</div>
+      <div id="selection" class="notice" role="region" aria-label="選択ノードの詳細" tabindex="-1">ノードを選ぶと属性を表示します。</div>
     </aside>
     <footer id="status" aria-label="グラフの範囲と診断">
       <div class="notice" id="counts"></div>
@@ -159,7 +159,6 @@
         (n.name + " " + n.qualifiedName + " " + (n.path || "")).normalize("NFC").toLowerCase().normalize("NFC"));
       let selected = -1;
       let highlighted = new Set();
-      let foreground = getComputedStyle(document.body).color;
 
       // レイアウトは索引の順序だけで決まる。乱数も入力順への依存も使わない。
       // 起点からの距離ごとに同心円へ並べ、同じ距離の中は配列の順序で置く。
@@ -221,6 +220,8 @@
       }
 
       function draw() {
+        const style = getComputedStyle(document.body);
+        const foreground = style.color;
         context.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
         context.lineWidth = 1;
 
@@ -266,7 +267,7 @@
         }
 
         const withLabels = scale > 0.7 && data.nodes.length <= 1500;
-        context.font = "11px " + getComputedStyle(document.body).fontFamily;
+        context.font = "11px " + style.fontFamily;
 
         for (let index = 0; index < data.nodes.length; index += 1) {
           if (!nodeVisible(index)) continue;
@@ -319,7 +320,7 @@
         return document.createTextNode(String(value));
       }
 
-      function select(index) {
+      function select(index, focusDetails = false) {
         if (index >= 0 && !nodeVisible(index)) index = -1;
         selected = index;
         direction.disabled = index < 0;
@@ -397,7 +398,7 @@
             button.appendChild(badge);
             button.appendChild(text(data.nodes[other].qualifiedName));
             button.addEventListener("click", function () {
-              select(other);
+              select(other, true);
             });
             item.appendChild(button);
             items.appendChild(item);
@@ -416,6 +417,7 @@
         note.textContent = "隣接一覧は埋め込みデータと現在のフィルター内のみです。成果物全体の次数ではありません。";
         panel.appendChild(note);
 
+        if (focusDetails) panel.focus();
         draw();
       }
 
@@ -470,7 +472,7 @@
           button.appendChild(badge);
           button.appendChild(text(node.qualifiedName));
           button.addEventListener("click", function () {
-            select(index);
+            select(index, true);
           });
           item.appendChild(button);
           hits.appendChild(item);
@@ -497,7 +499,9 @@
         document.getElementById("truncation").textContent =
           "打ち切り: " + (data.omittedCountIsLowerBound ? "少なくとも " : "") +
           data.omittedCount + " ノード / " + data.omittedEdgeCount + " エッジを省略。" +
-          (data.traversalTruncated ? " 探索上限に到達。未訪問の子孫数は不明。" : "") +
+          (data.traversalTruncated
+            ? (data.aggregated ? " 概要のエッジ走査上限に到達。未確認のエッジ数は不明。" : " 探索上限に到達。未訪問の子孫数は不明。")
+            : "") +
           (data.searchTruncated ? " 起点検索も打ち切り。" : "") +
           " 表示エッジ上限 " + data.maxExportEdges;
       }
@@ -538,13 +542,15 @@
       let dragging = false;
       let lastX = 0;
       let lastY = 0;
+      let startX = 0;
+      let startY = 0;
       let moved = false;
 
       canvas.addEventListener("pointerdown", function (event) {
         dragging = true;
         moved = false;
-        lastX = event.clientX;
-        lastY = event.clientY;
+        startX = lastX = event.clientX;
+        startY = lastY = event.clientY;
         canvas.classList.add("dragging");
         canvas.setPointerCapture(event.pointerId);
       });
@@ -553,7 +559,7 @@
         if (!dragging) return;
         offsetX += event.clientX - lastX;
         offsetY += event.clientY - lastY;
-        if (Math.abs(event.clientX - lastX) + Math.abs(event.clientY - lastY) > 2) moved = true;
+        if (Math.abs(event.clientX - startX) + Math.abs(event.clientY - startY) > 2) moved = true;
         lastX = event.clientX;
         lastY = event.clientY;
         draw();
@@ -581,6 +587,7 @@
       );
 
       window.addEventListener("resize", resize);
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
       resize();
       select(data.nodes.length > 0 && data.seedIndex >= 0 ? data.seedIndex : -1);
     </script>

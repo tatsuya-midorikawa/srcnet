@@ -107,11 +107,25 @@ let writeError (kind: string) (code: int) (message: string) (json: bool) (reques
     if requestedBudget >= Args.MinBudget && requestedBudget <= Args.MaxBudget then requestedBudget
     else Args.DefaultBudget
 
-  let runes = message.EnumerateRunes() |> Seq.toArray
+  // Only the retained head and tail can reach the output. Bound the scalar
+  // buffer before enumerating a diagnostic that may contain a very large value.
+  let messageTruncated = message.Length > Args.MaxQueryScalars * 2
+  let boundedMessage =
+    if not messageTruncated then message
+    else
+      let head =
+        if Char.IsSurrogatePair(message, Args.MaxQueryScalars - 1) then Args.MaxQueryScalars - 1
+        else Args.MaxQueryScalars
+      let tail = message.Length - Args.MaxQueryScalars
+      let tail = if Char.IsSurrogatePair(message, tail - 1) then tail + 1 else tail
+      message.Substring(0, head) + "\u2026" + message.Substring(tail)
+
+  let runes = boundedMessage.EnumerateRunes() |> Seq.toArray
   let mutable kept = min runes.Length Args.MaxQueryScalars
+  let diagnosticsTruncated () = messageTruncated || kept < runes.Length
 
   let shortened () =
-    if kept = runes.Length then message
+    if not (diagnosticsTruncated ()) then message
     else
       let text = StringBuilder()
       let head = kept / 2
@@ -142,8 +156,8 @@ let writeError (kind: string) (code: int) (message: string) (json: bool) (reques
             writer.WriteStringValue diagnostic
             writer.WriteEndArray()
             writer.WriteNumber("exitCode", code)
-            writeOmissions writer 0L 0L (if kept < runes.Length then 1 else 0) (kept < runes.Length) false
-            writer.WriteBoolean("diagnosticsTruncated", kept < runes.Length)
+            writeOmissions writer 0L 0L (if diagnosticsTruncated () then 1 else 0) (diagnosticsTruncated ()) false
+            writer.WriteBoolean("diagnosticsTruncated", diagnosticsTruncated ())
             writer.WriteNumber("tokenEstimate", tokens)
             writer.WriteString("tokenEstimateMethod", TokenEstimateMethod)
             writer.WriteEndObject())

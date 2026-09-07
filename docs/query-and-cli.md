@@ -2,7 +2,8 @@
 
 ## 1. 方針
 
-srcnet は自然言語を理解しない。クエリは **字句一致 + 構造探索 + 決定的ランキング** で解く。埋め込みも LLM も使わないため、「意味的に近い」ではなく「名前が一致し、グラフ上で近く、中心性が高い」で答える。
+srcnet は自然言語を理解しない。クエリは **字句一致 + 構造探索 + 決定的ランキング** で解く。
+現行は一致の強さ・ノード属性・グラフ上の距離を使い、未実装の中心性を順位へ仮定しない。
 
 この割り切りを利用者に隠さない。曖昧な入力に対しては、推測した単一の答えではなく候補と根拠を返す。
 
@@ -10,13 +11,13 @@ srcnet は自然言語を理解しない。クエリは **字句一致 + 構造�
 
 | コマンド | 用途 |
 | --- | --- |
-| `srcnet index <path>` | インデックス生成（完全 / 増分） |
+| `srcnet index <path>` | 完全インデックス生成。増分は M5 の計画 |
 | `srcnet search <text>` | シンボル・パスの検索 |
 | `srcnet show <node>` | ノードの属性と定義位置 |
 | `srcnet neighbors <node>` | 近傍探索（種別・向き・深さを指定） |
 | `srcnet path <a> <b>` | 2 ノード間の最短経路 |
-| `srcnet impact <files...>` | 変更の影響範囲 |
-| `srcnet explain <node>` | 構造的事実の定型出力 |
+| `srcnet impact <files...>` | 未実装（M6）。変更の影響範囲 |
+| `srcnet explain <node>` | 未実装（M6）。構造的事実の定型出力 |
 | `srcnet context <keywords...>` | 予算内に収めた文脈パック |
 | `srcnet export html` | 監査・探索用の対話的な HTML グラフを出力する |
 | `srcnet stats` | グラフ統計 |
@@ -27,12 +28,12 @@ srcnet は自然言語を理解しない。クエリは **字句一致 + 構造�
 ```text
 srcnet index <path>
   --out <dir>            出力先（既定 <repo>/.srcnet）
-  --incremental          変更ファイルのみ再抽出
   --jobs <n>             並列度（結果には影響しない）
-  --memory-limit <size>  ピーク メモリ上限
-  --tier <0|1|2|3>       抽出段階（3 は未実装）
+  --max-file-size <size> 単一ファイルの処理上限
+  --max-depth <n>        走査の階層上限
+  --tier <0|1|2>         抽出段階（既定 2）
   --assume-encoding <名> 符号化が曖昧なファイルへ適用する符号化
-  --no-gitignore         .gitignore を無視
+  --no-gitignore         .gitignore / .srcnetignore を無視
   --allow-partial        不完全な走査結果での上書きを許可
 
 srcnet search <text>
@@ -51,8 +52,11 @@ srcnet neighbors <node>
 
 共通:
   --json                 機械可読出力
-  --budget <tokens>      封筒全体の出力トークン予算（256..1000000、既定 8000）
+  --out <dir>            生成物の位置
 ```
+
+`--budget` は JSON 照会の出力全体に適用する（256..1000000、既定 8000）。
+`--incremental` / `--memory-limit` / T3 は未実装であり、現行の利用例には指定しない。
 
 `<node>` にはノード ID（16 進 32 桁）か、名前・修飾名の**完全一致**を渡す。一致が複数あるときは
 推測で 1 つに絞らず、候補と診断を返して終了コード 1 で終わる。JSON では候補を `nodes`、
@@ -120,6 +124,9 @@ JSON 照会は失敗時も `stdout` に単一の封筒を返し、終了コー�
 
 ### 5.1 JSON
 
+以下は主要フィールドの例であり、ID・位置・計数値は説明用である。
+現行は `community` / `rank` / 解決済みエッジの `evidence` を生成しない。
+
 ```jsonc
 {
   "schemaVersion": 1,
@@ -132,12 +139,11 @@ JSON 照会は失敗時も `stdout` に単一の封筒を返し、終了コー�
       "qualifiedName": "…",
       "path": "…",
       "lines": [120, 168],
-      "flags": ["definition"],
-      "community": 12
+      "flags": ["definition"]
     }
   ],
   "edges": [
-    { "from": "…", "to": "…", "kind": "CALLS", "confidence": "RESOLVED", "evidence": "same-translation-unit" }
+    { "from": "…", "to": "…", "kind": "DEFINES", "confidence": "EXTRACTED" }
   ],
   "diagnostics": [],
   "truncated": false,
@@ -158,7 +164,8 @@ JSON 照会は失敗時も `stdout` に単一の封筒を返し、終了コー�
 `stdout` を JSON だけに保つためである。テキスト出力では結果を `stdout`、診断を `stderr` へ分ける。
 
 `tokenEstimate` は決定的な近似で、`tokenEstimateMethod` にその方法を明示する。現在の方法は
-`ascii/4 + cjk*1 + other/2` で、実際のトークナイザとは 2 割程度ずれ得る。
+`ascii/4 + cjk*1 + other/2` である。これはモデル固有のトークン数を保証する上限ではない。
+実トークナイザとの差は入力とモデルに依存し、一定の誤差率は検証していない。
 
 ### 5.2 HTML
 
@@ -178,6 +185,8 @@ srcnet export html --root /path/to/repo --query point_area --depth 2 --max-nodes
 - 全体エクスポートは提供しない。`--max-nodes`（既定 800、上限 20000）を超える入力は
   集約または明示的な打ち切りにし、打ち切り件数を画面に常時表示する
 - `--query` と `--node` は同時に指定できない。エッジ上限は 50000 件で、超過件数も表示する
+- 概要の CSR 走査は、表示対象外も含む調査対象 400000 件で打ち切る。次数とノード件数は正確に保ち、
+  未調査のエッジが残る場合は省略数を下限として表示する。隣接行全体の配列は作らない
 - `totalNodes` は常に成果物全体のノード数、`candidateNodes` は表示上限を適用する前の既知の候補数である。
   集約した件数、ノード・エッジの省略件数、探索打ち切りと下限表示を混同しない
 - 選択ノードを基準とする入方向・出方向・両方向の切替を用意する。ノード種別・エッジ種別の
@@ -200,6 +209,8 @@ srcnet export html --root /path/to/repo --query point_area --depth 2 --max-nodes
 人間と AI の両方が読める簡潔な形式で出力する。端末幅に依存する整形は、東アジア文字幅を考慮する（[移植性と国際化](platform-and-i18n.md)）。
 
 ## 6. `explain` の内容
+
+本節は M6 の計画であり、現行 CLI に `explain` コマンドはない。
 
 LLM を使わないため、`explain` は散文を生成せず、構造的事実を定型で並べる。
 

@@ -502,6 +502,9 @@ let ``取り消しは探索の途中でも効く`` () =
     Query.searchExactNames view "Area" false cancellation.Token |> ignore)
   |> ignore
 
+  Assert.ThrowsAny<OperationCanceledException>(fun () -> Query.validateLookup view cancellation.Token)
+  |> ignore
+
 let private readManifest output =
   match Manifest.read output with
   | Ok manifest -> manifest
@@ -581,6 +584,7 @@ let ``invalid file references CSR targets and offsets fail explicitly`` () =
 
   use targetView = invalidTarget.View
   assertCorrupt(fun () -> targetView.Neighbors(0, Contains, Query.Outgoing) |> ignore)
+  assertCorrupt(fun () -> targetView.NeighborAt(0, Contains, false, 0) |> ignore)
 
   use invalidOffset = new Indexed("micro")
 
@@ -589,6 +593,7 @@ let ``invalid file references CSR targets and offsets fail explicitly`` () =
 
   use offsetView = invalidOffset.View
   assertCorrupt(fun () -> offsetView.Neighbors(0, Contains, Query.Outgoing) |> ignore)
+  assertCorrupt(fun () -> offsetView.NeighborCount(0, Contains, false) |> ignore)
 
   let seedOnly =
     Query.neighbors offsetView 0 [| Contains |] Query.Outgoing 0 CancellationToken.None
@@ -639,6 +644,9 @@ let ``invalid caller indices and disposed views do not return sentinels`` () =
       (fun () -> view.String -1 |> ignore)
       (fun () -> view.FilePathRef Format.NodeRecord.NoFile |> ignore)
       (fun () -> view.Neighbors(-1, Contains, Query.Outgoing) |> ignore)
+      (fun () -> view.NeighborCount(-1, Contains, false) |> ignore)
+      (fun () -> view.NeighborAt(0, Contains, false, -1) |> ignore)
+      (fun () -> view.NeighborAt(0, Contains, false, Int32.MaxValue) |> ignore)
       (fun () ->
         Query.neighbors view 0 [| Contains |] Query.Outgoing -1 CancellationToken.None
         |> ignore)
@@ -655,9 +663,13 @@ let ``invalid caller indices and disposed views do not return sentinels`` () =
   (view :> IDisposable).Dispose()
   Assert.NotEmpty retainedName
 
-  match (Assert.Throws<Query.QueryException>(fun () -> view.String retainedNode.NameRef |> ignore) :> exn) with
-  | Query.QueryException Query.ViewDisposed -> ()
-  | other -> failwith $"Expected disposed view, got {other}"
+  for action in
+    [ (fun () -> view.String retainedNode.NameRef |> ignore)
+      (fun () -> view.NeighborCount(0, Contains, false) |> ignore)
+      (fun () -> view.NeighborAt(0, Contains, false, 0) |> ignore) ] do
+    match (Assert.Throws<Query.QueryException>(Action action) :> exn) with
+    | Query.QueryException Query.ViewDisposed -> ()
+    | other -> failwith $"Expected disposed view, got {other}"
 
 [<Fact>]
 let ``file nodes are found from the dense schema without scanning names`` () =
@@ -673,6 +685,33 @@ let ``file nodes are found from the dense schema without scanning names`` () =
       Assert.Equal(File, file.Kind)
       Assert.Equal(uint32 index, file.FileIndex)
       Assert.Equal(view.FilePathRef(uint32 index), file.QualifiedNameRef)
+
+[<Fact>]
+let ``publication replaces a manifest held by a delete-sharing reader`` () =
+  use indexed = new Indexed("micro")
+  let original = readManifest indexed.Output
+  let replacement = { original with Complete = not original.Complete }
+
+  use held =
+    new FileStream(
+      Path.Combine(indexed.Output, Manifest.FileName),
+      FileMode.Open,
+      FileAccess.Read,
+      FileShare.ReadWrite ||| FileShare.Delete
+    )
+
+  let before = Array.zeroCreate<byte>(int held.Length)
+  held.ReadExactly(Span before)
+  writeManifest indexed.Output replacement
+  Assert.Equal(replacement, readManifest indexed.Output)
+
+  held.Position <- 0L
+  let after = Array.zeroCreate<byte>(int held.Length)
+  held.ReadExactly(Span after)
+  Assert.Equal<byte[]>(before, after)
+
+  use view = indexed.View
+  Assert.Equal(replacement, view.Manifest)
 
 [<Fact>]
 let ``one thousand opens during publication never mix mapped generations`` () =
@@ -762,6 +801,10 @@ let ``legacy artifacts refuse search and explicit lookup rebuilding needs no sou
     | Query.QueryException Query.SearchIndexRequired -> ()
     | other -> failwith $"Expected unsupported index-less exact search, got {other}"
 
+    match (Assert.Throws<Query.QueryException>(fun () -> Query.validateLookup view CancellationToken.None) :> exn) with
+    | Query.QueryException Query.SearchIndexRequired -> ()
+    | other -> failwith $"Expected unsupported index-less validation, got {other}"
+
     Assert.Equal(0, (view.Node 0).Index)
 
   let directory = Path.GetDirectoryName(segmentPath indexed.Output "nodes")
@@ -805,12 +848,13 @@ let ``corrupt lexical keys postings and UTF8 fail as typed query errors`` varian
 
   use view = indexed.View
   assertCorrupt(fun () -> Query.search view "shapes.c" false CancellationToken.None |> ignore)
+  assertCorrupt(fun () -> Query.validateLookup view CancellationToken.None)
 
   if variant > 0 then
     assertCorrupt(fun () -> Query.searchExactNames view "shapes.c" false CancellationToken.None |> ignore)
 
 /// Small, source-free graphs let the oracle cover arbitrary directed edges, not just CONTAINS trees.
-type private TestGraph(names: string[], connections: struct (int * int * EdgeKind)[]) =
+type internal TestGraph(names: string[], connections: struct (int * int * EdgeKind)[]) =
   let output =
     Path.Combine(Path.GetTempPath(), "srcnet-query-graph-" + Guid.NewGuid().ToString "N")
 
@@ -970,6 +1014,131 @@ type private TestGraph(names: string[], connections: struct (int * int * EdgeKin
     member _.Dispose() = Directory.Delete(output, true)
 
 [<Fact>]
+let ``scalar adjacency access matches forward reverse and absent rows`` () =
+  let edges =
+    [| struct (0, 1, Contains)
+       struct (0, 2, Contains)
+       struct (2, 1, Contains)
+       struct (2, 2, Contains)
+       struct (2, 3, Calls) |]
+
+  use graph = new TestGraph([| "a"; "b"; "c" |], edges)
+  use view = graph.View
+
+  for index in 0 .. view.NodeCount - 1 do
+    for kind in [| Contains; Calls; Includes |] do
+      for incoming in [| false; true |] do
+        let direction = if incoming then Query.Incoming else Query.Outgoing
+        let expected = view.Neighbors(index, kind, direction)
+        Assert.Equal(expected.Length, view.NeighborCount(index, kind, incoming))
+
+        for position in 0 .. expected.Length - 1 do
+          Assert.Equal(expected[position], view.NeighborAt(index, kind, incoming, position))
+
+        match
+          (Assert.Throws<Query.QueryException>(fun () ->
+            view.NeighborAt(index, kind, incoming, expected.Length) |> ignore)
+          :> exn)
+        with
+        | Query.QueryException(Query.InvalidArgument _) -> ()
+        | other -> failwith $"Expected invalid adjacency position, got {other}"
+
+[<Fact>]
+let ``full lookup validation covers path postings and preserves view ownership`` () =
+  use indexed = new Indexed("micro")
+  use view = indexed.View
+  Query.validateLookup view CancellationToken.None
+  Assert.NotEmpty((Query.searchExactNames view "shapes.c" false CancellationToken.None).Hits)
+
+[<Theory>]
+[<InlineData(false, 0)>]
+[<InlineData(true, 0)>]
+[<InlineData(false, 1)>]
+[<InlineData(true, 1)>]
+[<InlineData(false, 2)>]
+[<InlineData(true, 2)>]
+[<InlineData(false, 3)>]
+[<InlineData(true, 3)>]
+[<InlineData(false, 4)>]
+[<InlineData(true, 4)>]
+[<InlineData(false, 5)>]
+[<InlineData(true, 5)>]
+let ``full lookup validation checks every normal and folded key and posting`` folded variant =
+  use graph = new TestGraph([| "aaaa"; "bbbb" |], Array.empty)
+
+  mutate graph.Output "lookup" (fun bytes ->
+    let keys = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8)))
+    let postings = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 24, 8)))
+    let prelude = Format.HeaderLength
+    let normal = int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, prelude + 24, 4)))
+    let key = prelude + Format.Lookup.PreludeLength + (if folded then normal else 0) * Format.Lookup.KeyLength
+    let blob = prelude + Format.Lookup.PreludeLength + keys * Format.Lookup.KeyLength + postings * Format.Lookup.PostingLength
+    let offset = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, key, 8)))
+    let first = int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, key + 12, 4)))
+    let posting = prelude + Format.Lookup.PreludeLength + keys * Format.Lookup.KeyLength + first * Format.Lookup.PostingLength
+
+    match variant with
+    | 0 -> BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, key + 20, 4), 1u)
+    | 1 -> bytes[blob + offset] <- 0xFFuy
+    | 2 -> Array.Copy(bytes, posting, bytes, posting + Format.Lookup.PostingLength, Format.Lookup.PostingLength)
+    | 3 -> BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, posting, 4), 0u)
+    | 4 -> BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, posting + 4, 4), 3u)
+    | _ ->
+      let swap first second length =
+        for index in 0 .. length - 1 do
+          let saved = bytes[first + index]
+          bytes[first + index] <- bytes[second + index]
+          bytes[second + index] <- saved
+
+      swap (blob + offset) (blob + offset + 4) 4
+      swap posting (posting + 2 * Format.Lookup.PostingLength) (2 * Format.Lookup.PostingLength))
+
+  use view = graph.View
+  assertCorrupt(fun () -> Query.validateLookup view CancellationToken.None)
+
+[<Fact>]
+let ``full lookup validation detects structurally valid missing postings`` () =
+  use graph = new TestGraph([| "aaaa"; "bbbb" |], Array.empty)
+  let path = segmentPath graph.Output "lookup"
+  let original = File.ReadAllBytes path
+  let keys = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 16, 8)))
+  let postings = BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 24, 8))
+  let firstKey = Format.HeaderLength + Format.Lookup.PreludeLength
+  let postingBase = firstKey + keys * Format.Lookup.KeyLength
+  let bytes = Array.zeroCreate<byte>(original.Length - Format.Lookup.PostingLength)
+  Array.Copy(original, bytes, postingBase)
+  Array.Copy(original, postingBase + Format.Lookup.PostingLength, bytes, postingBase, bytes.Length - postingBase)
+  BinaryPrimitives.WriteUInt64LittleEndian(Span(bytes, 24, 8), postings - 1UL)
+  BinaryPrimitives.WriteUInt64LittleEndian(Span(bytes, 40, 8), uint64(bytes.Length - Format.HeaderLength))
+
+  for index in 0 .. keys - 1 do
+    let field =
+      firstKey + index * Format.Lookup.KeyLength + (if index = 0 then 16 else 12)
+
+    let value = BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, field, 4))
+    BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, field, 4), value - 1u)
+
+  File.WriteAllBytes(path, bytes)
+  let manifest = readManifest graph.Output
+
+  let segments =
+    manifest.Segments
+    |> Array.map(fun segment ->
+      if segment.Name.EndsWith(".lookup", StringComparison.Ordinal) then
+        { segment with
+            ByteLength = int64 bytes.Length
+            Checksum = Convert.ToHexStringLower(Srcnet.Core.Hashing.hash(ReadOnlySpan bytes)) }
+      else
+        segment)
+
+  writeManifest graph.Output { manifest with Segments = segments }
+  use view = graph.View
+  let remaining = Query.searchExactNames view "aaaa" false CancellationToken.None
+  Assert.Equal(Query.QualifiedName, (Assert.Single remaining.Hits).Target)
+  Assert.False remaining.Truncated
+  assertCorrupt(fun () -> Query.validateLookup view CancellationToken.None)
+
+[<Fact>]
 let ``lookup indexes NFC and invariant folding for stored names and all match strengths`` () =
   use graph =
     new TestGraph(
@@ -982,6 +1151,7 @@ let ``lookup indexes NFC and invariant folding for stored names and all match st
     )
 
   use view = graph.View
+  Query.validateLookup view CancellationToken.None
 
   let find text ignoreCase =
     (Query.search view text ignoreCase CancellationToken.None).Hits
@@ -1328,6 +1498,20 @@ let ``bidirectional search finds a six-hop leaf beyond the old 200k forward cap`
 
   use view = graph.View
 
+  Query.validateLookup view CancellationToken.None
+  view.NeighborCount(0, Contains, false) |> ignore
+  view.NeighborAt(0, Contains, false, 0) |> ignore
+  view.NeighborAt(0, Contains, false, first - 1) |> ignore
+  let before = GC.GetAllocatedBytesForCurrentThread()
+  let degree = view.NeighborCount(0, Contains, false)
+  let firstTarget = view.NeighborAt(0, Contains, false, 0)
+  let lastTarget = view.NeighborAt(0, Contains, false, first - 1)
+  let allocated = GC.GetAllocatedBytesForCurrentThread() - before
+  Assert.Equal(first, degree)
+  Assert.Equal(1, firstTarget)
+  Assert.Equal(first, lastTarget)
+  Assert.InRange(allocated, 0L, 65_536L)
+
   let result =
     Query.shortestPath view 0 (count - 1) [| Contains |] Query.Outgoing 6 CancellationToken.None
 
@@ -1427,6 +1611,61 @@ let ``path node cap is strict across both frontiers and reports known omissions`
   Assert.Equal(1, result.OmittedCount)
   Assert.True result.OmittedCountIsLowerBound
   Assert.NotEmpty result.Diagnostics
+
+[<Fact>]
+let ``proved shortest paths do not exhaust the rest of a dense layer`` () =
+  let half = 640
+  let count = half * 2 + 2
+
+  let edges =
+    [| for left in 2 .. half + 1 do
+         yield struct (0, left, Contains)
+
+         for right in half + 2 .. count - 1 do
+           yield struct (left, right, Contains)
+
+       for right in half + 2 .. count - 1 do
+         yield struct (right, 1, Contains) |]
+
+  use graph =
+    new TestGraph(Array.init (count - 1) (fun index -> $"n{index:D4}"), edges)
+
+  use view = graph.View
+
+  let route: Query.EdgeView[] =
+    [| { From = 0
+         To = 2
+         Kind = Contains }
+       { From = 2
+         To = half + 2
+         Kind = Contains }
+       { From = half + 2
+         To = 1
+         Kind = Contains } |]
+
+  for source, target, direction in
+    [ 0, 1, Query.Outgoing
+      1, 0, Query.Incoming
+      0, 1, Query.Both
+      1, 0, Query.Both ] do
+    let result =
+      Query.shortestPath view source target [| Contains |] direction 3 CancellationToken.None
+
+    let expected =
+      if source = 0 then [| 0; 2; half + 2; 1 |]
+      else [| 1; half + 2; 2; 0 |]
+
+    let expectedEdges = if source = 0 then route else Array.rev route
+
+    match result.Path with
+    | ValueNone -> failwith $"Discarded a proved shortest route: {result.Diagnostics}"
+    | ValueSome path -> Assert.Equal<int[]>(expected, path)
+
+    Assert.Equal<Query.EdgeView[]>(expectedEdges, result.Edges)
+    Assert.False result.Truncated
+    Assert.Equal(0, result.OmittedCount)
+    Assert.False result.OmittedCountIsLowerBound
+    Assert.Empty result.Diagnostics
 
 [<Fact>]
 let ``dense disconnected graphs stop at the edge cap without claiming no route`` () =

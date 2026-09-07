@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Storage/Manifest.fs:55-75`, `src/Srcnet.Extraction/Grammars.fs:150-169`, `src/Srcnet.Storage/Verify.fs`, `native/build/languages.json`
 - 依存: 019
-- 参照: [抽出](../docs/extraction.md) 3.2, [設計判断](../docs/decisions.md) ADR-3, [テスト](../docs/testing.md) T-1, T-3
+- 参照: [抽出](../../docs/extraction.md) 3.2, [設計判断](../../docs/decisions.md) ADR-3, [テスト](../../docs/testing.md) T-1, T-3
 
 ## 背景
 
@@ -17,7 +17,7 @@
   - `Tier`: 実際に適用した抽出段階
   - `ParserAvailable`: 構文解析器を利用できたか
   - `Grammars`: 言語名・版・SHA-256 の配列。言語名の序数昇順で並べる
-- 文法の版は**コンパイル時に埋め込んだ固定値**から取る。`native/build/languages.json` を実行時に読む経路は作らない。対象リポジトリからも構成ファイルからも読み込まない（[セキュリティ](../docs/security.md) C-1）
+- 文法の版は**コンパイル時に埋め込んだ固定値**から取る。`native/build/languages.json` を実行時に読む経路は作らない。対象リポジトリからも構成ファイルからも読み込まない（[セキュリティ](../../docs/security.md) C-1）
 - 埋め込む値は `native/sources.json` を唯一の出典とし、構築時に生成する
 - `verify` で、成果物に記録された文法の版と、現在の実行ファイルの文法の版を突き合わせる。違う場合は「再生成すれば結果が変わり得る」ことを診断する。失敗にはしない
 - JSON への書き出しは安定した順序で行い、決定性を壊さない

@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Extraction/`（新規）, `src/Srcnet.Text/Words.fs`
 - 依存: 014
-- 参照: [抽出](../docs/extraction.md) 2, 6, [グラフ モデル](../docs/graph-model.md) 1, 2
+- 参照: [抽出](../../docs/extraction.md) 2, 6, [グラフ モデル](../../docs/graph-model.md) 1, 2
 
 ## 背景
 
@@ -24,7 +24,7 @@ T1 は T2 の代替ではなく前段である。未対応言語や構文誤り�
 
 ## 設計上の注意
 
-- T1 は tree-sitter に依存しない。解析器が無い環境でも同じ結果を出す（[設計判断](../docs/decisions.md) ADR-3 の代償 3）
+- T1 は tree-sitter に依存しない。解析器が無い環境でも同じ結果を出す（[設計判断](../../docs/decisions.md) ADR-3 の代償 3）
 - 文字列リテラルやコメント内の `#include` らしき行を拾わないための最低限の状態は持つ。ただし完全なプリプロセスは行わない
 - CJK 識別子を含む行でも語の境界を壊さない。バイト単位ではなく Unicode スカラー値で扱う
 

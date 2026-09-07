@@ -65,54 +65,46 @@ let value (path: LogicalPath) = path.Value
 
 let isRoot (path: LogicalPath) = path.Value.Length = 0
 
-/// 対になっていないサロゲートを含むか。
-///
-/// `String.Normalize` はこうした文字列に対して `ArgumentException` を投げる。
-/// 正規化の前に弾かなければ、不正な名前のファイルが 1 つあるだけで走査全体が
-/// 例外で停止する。NTFS 上では実際に起こり得る入力である。
-let private hasUnpairedSurrogate (text: string) =
-  let mutable found = false
-  let mutable i = 0
-
-  while not found && i < text.Length do
-    let c = text[i]
-
-    if Char.IsHighSurrogate c then
-      if i + 1 >= text.Length || not (Char.IsLowSurrogate text[i + 1]) then found <- true else i <- i + 1
-    elif Char.IsLowSurrogate c then found <- true
-
-    i <- i + 1
-
-  found
-
 let private hasControlCharacter (text: string) =
   let mutable found = false
   let mutable i = 0
 
   while not found && i < text.Length do
     let c = text[i]
-    if c < ' ' || c = '\u007F' then found <- true
+
+    if c < ' ' || c = '\u007F' then
+      found <- true
+
     i <- i + 1
 
   found
 
 /// 単一セグメントとして妥当かを検査する。区切り文字は含められない。
 let private validateSegment (segment: string) =
-  if segment.Length = 0 then Error EmptySegment
-  elif segment = "." || segment = ".." then Error ParentTraversal
-  elif segment.IndexOf('/') >= 0 || segment.IndexOf('\\') >= 0 then Error SeparatorInName
-  elif hasControlCharacter segment then Error ControlCharacter
-  elif hasUnpairedSurrogate segment then Error InvalidUnicode
-  else Ok()
+  if segment.Length = 0 then
+    Error EmptySegment
+  elif segment = "." || segment = ".." then
+    Error ParentTraversal
+  elif segment.IndexOf('/') >= 0 || segment.IndexOf('\\') >= 0 then
+    Error SeparatorInName
+  elif hasControlCharacter segment then
+    Error ControlCharacter
+  elif Unicode.hasUnpairedSurrogate segment then
+    Error InvalidUnicode
+  else
+    Ok()
 
 let private countSegments (path: string) =
-  if path.Length = 0 then 0
+  if path.Length = 0 then
+    0
   else
     let mutable count = 1
     let mutable i = 0
 
     while i < path.Length do
-      if path[i] = '/' then count <- count + 1
+      if path[i] = '/' then
+        count <- count + 1
+
       i <- i + 1
 
     count
@@ -120,49 +112,64 @@ let private countSegments (path: string) =
 /// 生のリポジトリ相対パスを正規化して論理パスにする。
 /// 区切りを `/` に統一し、NFC 正規化し、ルート外への参照を拒否する。
 let tryCreate (raw: string) : Result<LogicalPath, PathError> =
-  if raw.Length = 0 then Ok root
-  elif raw[0] = '/' || raw[0] = '\\' then Error NotRelative
-  elif raw.Length >= 2 && raw[1] = ':' then Error NotRelative
+  if raw.Length = 0 then
+    Ok root
+  elif raw[0] = '/' || raw[0] = '\\' then
+    Error NotRelative
+  elif raw.Length >= 2 && raw[1] = ':' then
+    Error NotRelative
   else
 
-  let unified = if raw.IndexOf('\\') >= 0 then raw.Replace('\\', '/') else raw
+    let unified =
+      if raw.IndexOf('\\') >= 0 then
+        raw.Replace('\\', '/')
+      else
+        raw
 
-  if hasUnpairedSurrogate unified then Error InvalidUnicode
-  else
+    if Unicode.hasUnpairedSurrogate unified then
+      Error InvalidUnicode
+    else
 
-  let normalized = Unicode.normalize unified
-  let segments = normalized.Split '/'
+      let normalized = Unicode.normalize unified
+      let segments = normalized.Split '/'
 
-  if segments.Length > MaxDepth then Error TooDeep
-  else
+      if segments.Length > MaxDepth then
+        Error TooDeep
+      else
 
-  let mutable error = ValueNone
-  let mutable index = 0
+        let mutable error = ValueNone
+        let mutable index = 0
 
-  while error.IsNone && index < segments.Length do
-    match validateSegment segments[index] with
-    | Error e -> error <- ValueSome e
-    | Ok() -> index <- index + 1
+        while error.IsNone && index < segments.Length do
+          match validateSegment segments[index] with
+          | Error e -> error <- ValueSome e
+          | Ok() -> index <- index + 1
 
-  match error with
-  | ValueSome e -> Error e
-  | ValueNone -> Ok(Path normalized)
+        match error with
+        | ValueSome e -> Error e
+        | ValueNone -> Ok(Path normalized)
 
 /// 論理パスへ 1 セグメントを追加する。セグメント側も NFC 正規化する。
 let append (parent: LogicalPath) (segment: string) : Result<LogicalPath, PathError> =
-  if hasUnpairedSurrogate segment then Error InvalidUnicode
+  if Unicode.hasUnpairedSurrogate segment then
+    Error InvalidUnicode
   else
 
-  let normalized = Unicode.normalize segment
+    let normalized = Unicode.normalize segment
 
-  match validateSegment normalized with
-  | Error e -> Error e
-  | Ok() ->
-    let parentValue = parent.Value
+    match validateSegment normalized with
+    | Error e -> Error e
+    | Ok() ->
+      let parentValue = parent.Value
 
-    if countSegments parentValue >= MaxDepth then Error TooDeep
-    elif parentValue.Length = 0 then Ok(Path normalized)
-    else Ok(Path(String.Concat(parentValue, "/", normalized)))
+      if parentValue.Length = 0 && normalized.Length >= 2 && normalized[1] = ':' then
+        Error NotRelative
+      elif countSegments parentValue >= MaxDepth then
+        Error TooDeep
+      elif parentValue.Length = 0 then
+        Ok(Path normalized)
+      else
+        Ok(Path(String.Concat(parentValue, "/", normalized)))
 
 /// 最後のセグメント。ルートに対しては空文字列を返す。
 let fileName (path: LogicalPath) =
@@ -174,10 +181,15 @@ let fileName (path: LogicalPath) =
 let parent (path: LogicalPath) =
   let value = path.Value
 
-  if value.Length = 0 then ValueNone
+  if value.Length = 0 then
+    ValueNone
   else
     let index = value.LastIndexOf '/'
-    if index < 0 then ValueSome root else ValueSome(Path(value.Substring(0, index)))
+
+    if index < 0 then
+      ValueSome root
+    else
+      ValueSome(Path(value.Substring(0, index)))
 
 let depth (path: LogicalPath) = countSegments path.Value
 
@@ -186,8 +198,10 @@ let extension (path: LogicalPath) =
   let name = fileName path
   let index = name.LastIndexOf '.'
 
-  if index <= 0 || index = name.Length - 1 then ""
-  else Unicode.caseFold (name.Substring(index + 1))
+  if index <= 0 || index = name.Length - 1 then
+    ""
+  else
+    Unicode.caseFold(name.Substring(index + 1))
 
 /// 物理パスへ変換する。
 ///
@@ -196,11 +210,14 @@ let extension (path: LogicalPath) =
 let toPhysical (physicalRoot: string) (path: LogicalPath) =
   let value = path.Value
 
-  if value.Length = 0 then physicalRoot
+  if value.Length = 0 then
+    physicalRoot
   else
     let native =
-      if IO.Path.DirectorySeparatorChar = '/' then value
-      else value.Replace('/', IO.Path.DirectorySeparatorChar)
+      if IO.Path.DirectorySeparatorChar = '/' then
+        value
+      else
+        value.Replace('/', IO.Path.DirectorySeparatorChar)
 
     IO.Path.Combine(physicalRoot, native)
 

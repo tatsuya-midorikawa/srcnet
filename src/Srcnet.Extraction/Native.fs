@@ -11,6 +11,10 @@ module internal Srcnet.Extraction.Native
 open System
 open System.Runtime.InteropServices
 
+// Restrict .NET's native probing instead of searching the indexed working directory.
+[<assembly: DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory)>]
+do ()
+
 /// 構築される共有ライブラリの基底名。実際のファイル名は OS ごとに
 /// `libsrcnet_treesitter.dylib` / `libsrcnet_treesitter.so` / `srcnet_treesitter.dll` になる。
 [<Literal>]
@@ -101,6 +105,9 @@ extern TSNode ts_node_child(TSNode node, uint32 index)
 
 [<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
 extern TSNode ts_node_named_child(TSNode node, uint32 index)
+
+[<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
+extern TSNode ts_node_parent(TSNode node)
 
 [<DllImport(Library, CallingConvention = CallingConvention.Cdecl)>]
 extern TSNode ts_node_child_by_field_name(TSNode node, nativeint name, uint32 nameLength)

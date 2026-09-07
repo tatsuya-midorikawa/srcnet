@@ -24,7 +24,7 @@ $ python3 tools/build_native.py --check               # 取得と検証のみ
 必要なもの:
 
 - Python 3.9 以降
-- C コンパイラ（`clang` / `gcc` / `cl`。`CC` 環境変数で指定できる）
+- C11 コンパイラ（`clang` / `gcc` / `cl`。`CC` 環境変数で指定できる。`cl` は Developer Command Prompt から実行する）
 - 初回のみ、GitHub への到達性
 
 生成物:
@@ -38,6 +38,9 @@ $ python3 tools/build_native.py --check               # 取得と検証のみ
 
 `build/`、`.cache/`、`.build/` はいずれも版管理の対象外である。
 `Srcnet.Extraction` は `build/` の共有ライブラリを出力ディレクトリへ複製する。
+Windows では F# の相互運用宣言と選択した文法から `.def` を生成し、必要な関数を DLL へ
+明示的に公開する。構築後は各 OS で実際にライブラリを開き、必須の公開シンボルが揃っていることを確認する。
+ツールの標準出力・標準エラーは UTF-8 に固定し、リダイレクト時も日本語を出力できる。
 
 ## 構築しない場合
 

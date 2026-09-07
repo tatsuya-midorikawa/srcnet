@@ -62,6 +62,7 @@
 | --- | --- |
 | 巨大な単一ファイル（4 GiB 超を含む） | 診断付きで継続、またはスキップ。クラッシュしない |
 | 深いディレクトリ階層、長いパス | 上限に達しても診断して継続 |
+| 空ディレクトリだけの巨大なツリー | ディレクトリ数にも `MaxEntries` を適用し、不完全な走査として報告 |
 | シンボリック リンクの循環 | 検出して終了。無限走査しない |
 | 極端に長い 1 行、深い入れ子構文 | 上限で打ち切り、指数的劣化なし |
 | 壊れた符号化、不正なバイト列 | 置換して継続 |
@@ -103,18 +104,27 @@ ANSI エスケープの検証は、リポジトリから端末表示を偽装で
 
 | ジョブ | OS | 実行契機 | 内容 |
 | --- | --- | --- | --- |
-| build-test | macOS, Windows | 全 PR | Release ビルド、全テスト、フォーマット、静的解析 |
+| build-test | macOS, Windows | 全 PR | 生成表の一致、Python ビルドツールの回帰、Release ビルド、全テスト、コンパイラ警告をエラー化 |
 | parser | macOS, Windows | 全 PR | 固定した取得元の検証、tree-sitter の構築、解析器ありでのテスト |
-| determinism | macOS, Windows | 全 PR | T-1、両 OS 成果物の突き合わせ |
+| determinism | macOS, Windows | 全 PR | 同じ入力を並列度 1 / 8 で生成し、全ファイルを比較、`verify --deterministic` |
+| cross-platform-determinism | 補助比較 | 全 PR | 各 OS で検査済みのセグメントの SHA-256 を含むマニフェストの比較 |
 | query-contract | macOS, Windows | 全 PR | 有界 JSON、異常系、HTML の生成と Chrome / Edge のオフライン操作 |
 | query-cross-platform | 補助比較 | 全 PR | 上記ジョブの JSON / HTML をバイト単位で比較 |
-| corpus-small | macOS, Windows | 全 PR | `micro` / `medium` / `cjk` / `pathological` |
-| bench-small | macOS, Windows | 全 PR | 小規模ベンチマークと回帰検出 |
-| corpus-large | macOS, Windows | 定期 | `linux` / `chromium` |
-| soak | macOS, Windows | 定期 | 長時間実行、リーク検出 |
+| corpus-large | macOS, Windows | 定期 / 手動 | 固定 SHA の `linux` の取得、生成・検査、測定記録 |
+| corpus-large-determinism | 補助比較 | 定期 / 手動 | 大規模コーパスの検査済みマニフェスト比較 |
 | deps-audit | いずれか | 全 PR + 定期 | 依存の脆弱性検査、依存閉包の検査（T-3） |
 
 macOS と Windows の両方が必須である。一方でも未検証または失敗なら完了扱いにしない。
+
+上表は `.github/workflows/build.yml` の実在するジョブである。`micro` / `cjk` /
+`pathological` は全テストに含まれる。`medium` の固定、`chromium` の定期 T2 生成、
+`bench-small` / `soak`、CI の formatter 実行と性能回帰閾値は未構成であり、今後の計画とする。
+`.editorconfig` に書式設定があるだけで formatter を実行したことにはならない。
+
+`.github/scripts/determinism_contract.py` は OS 共通の実行経路で、生成の終了コード 0 / 4 を
+受け入れつつ `complete: true` を必須にする。入力エラーや異常終了を成功扱いにせず、
+相対パスとファイル内容の双方を比較する。病的入力の診断で macOS のシェルだけが停止したり、
+PowerShell が途中の失敗を見逃したりしない。
 
 Linux は対応実行環境に含めない（[設計判断](decisions.md) ADR-10）。Linux ランナーは、大規模コーパスの取得と補助的な検証のために利用してよいが、合否判定には使わない。取得したコーパスに対する索引と検証は macOS / Windows のランナーで行う。
 
@@ -124,6 +134,10 @@ Linux は対応実行環境に含めない（[設計判断](decisions.md) ADR-10
 省略内訳、エラー JSON、テキスト出力、決定性を検証する。`QueryTests` は小グラフの完全探索を
 基準に有向最短経路と安全上限を照合し、破損・UTF-8 窓境界・大きな辞書末尾の部分一致を検証する。
 `ExportTests` は全体件数、集約・探索・出力上限の区別、出力の原子性と破損時の既存ファイル保持を扱う。
+
+`IndexTests` / `ArtifactTests` は、チェックサムだけでは捉えられない形式・件数・UTF-8 の破損、
+同サイズの壊れた世代の再利用拒否、書き込み排他、無関係なファイルを残す世代の片付けも検証する。
+`tests/tools` の標準 `unittest` は、書庫の境界・特殊エントリとレガシー端末符号化での UTF-8 出力を扱う。
 
 `.github/scripts/query_contract.py` は外部依存なしで固定コーパスと比較用 JSON / HTML を生成する。
 `.github/scripts/browser_contract.mjs` は Node の標準 WebSocket とブラウザーの CDP を使い、

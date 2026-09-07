@@ -11,6 +11,7 @@ open System.Collections.Generic
 open System.IO
 open System.Threading
 open Srcnet.Core.Paths
+open Srcnet.Text
 
 /// 1 つの無視ファイルから読み込む規則数の上限。
 ///
@@ -87,8 +88,12 @@ type Decision =
 let private parseClass (pattern: string) (start: int) =
   // `[` の次から `]` までを読む。閉じ括弧がなければクラスとして扱わない。
   let mutable index = start
-  let negated = index < pattern.Length && (pattern[index] = '!' || pattern[index] = '^')
-  if negated then index <- index + 1
+
+  let negated =
+    index < pattern.Length && (pattern[index] = '!' || pattern[index] = '^')
+
+  if negated then
+    index <- index + 1
 
   let ranges = List<struct (char * char)>()
   let mutable closed = false
@@ -104,14 +109,21 @@ let private parseClass (pattern: string) (start: int) =
       first <- false
       let low = pattern[index]
 
-      if index + 2 < pattern.Length && pattern[index + 1] = '-' && pattern[index + 2] <> ']' then
+      if
+        index + 2 < pattern.Length
+        && pattern[index + 1] = '-'
+        && pattern[index + 2] <> ']'
+      then
         ranges.Add(struct (low, pattern[index + 2]))
         index <- index + 3
       else
         ranges.Add(struct (low, low))
         index <- index + 1
 
-  if closed then ValueSome(struct (ranges.ToArray(), negated, index)) else ValueNone
+  if closed then
+    ValueSome(struct (ranges.ToArray(), negated, index))
+  else
+    ValueNone
 
 let private tokenize (segment: string) =
   let tokens = List<GlobToken>()
@@ -152,7 +164,8 @@ let private matchClass (ranges: struct (char * char)[]) (negated: bool) (c: char
   let mutable inside = false
 
   for struct (low, high) in ranges do
-    if c >= low && c <= high then inside <- true
+    if c >= low && c <= high then
+      inside <- true
 
   inside <> negated
 
@@ -184,7 +197,8 @@ let private matchGlob (tokens: GlobToken[]) (text: string) =
       starText <- starText + 1
       t <- starToken + 1
       s <- starText
-    else failed <- true
+    else
+      failed <- true
 
   while not failed && t < tokens.Length && tokens[t] = AnyRun do
     t <- t + 1
@@ -215,7 +229,7 @@ let private matchSegments (rules: SegmentRule[]) (segments: string[]) (offset: i
     previous[0] <- true
 
     for j in 1..ruleCount do
-      previous[j] <- previous[j - 1] && rules[j - 1] = AnyDepth
+      previous[j] <- previous[j - 1] && rules[j - 1] = AnyDepth && (j < ruleCount || j = 1)
 
     for i in 1..segmentCount do
       let segment = segments[offset + i - 1]
@@ -224,6 +238,8 @@ let private matchSegments (rules: SegmentRule[]) (segments: string[]) (offset: i
       for j in 1..ruleCount do
         current[j] <-
           match rules[j - 1] with
+          // 末尾の `/**` はそのディレクトリ自身ではなく、1 階層以上下の項目に一致する。
+          | AnyDepth when j = ruleCount && j > 1 -> previous[j - 1] || previous[j]
           | AnyDepth -> current[j - 1] || previous[j]
           | rule -> previous[j - 1] && matchSegment rule segment
 
@@ -243,55 +259,74 @@ let private trimTrailingSpaces (line: string) =
 
   if last = line.Length then line else line.Substring(0, last)
 
-let private parseLine (line: string) : Rule voption =
-  let trimmed = trimTrailingSpaces line
-
-  if trimmed.Length = 0 || trimmed[0] = '#' then ValueNone
-  else
-
-  let negated = trimmed[0] = '!'
-  let body = if negated then trimmed.Substring 1 else trimmed
-
-  // `\#` や `\!` のエスケープを解く。
-  let body =
-    if body.Length >= 2 && body[0] = '\\' && (body[1] = '#' || body[1] = '!') then body.Substring 1
-    else body
-
-  if body.Length = 0 then ValueNone
-  elif body.StartsWith("../", StringComparison.Ordinal) || body = ".." then
-    // ルート外を参照するパターンは受け付けない。docs/security.md C-3 を参照。
+let private parseLine (firstLine: bool) (line: string) : Rule voption =
+  if Unicode.hasUnpairedSurrogate line then
     ValueNone
   else
 
-  let directoryOnly = body.EndsWith('/')
-  let body = if directoryOnly then body.TrimEnd '/' else body
+    let line =
+      if firstLine && line.Length > 0 && line[0] = '\uFEFF' then
+        line.Substring 1
+      else
+        line
 
-  if body.Length = 0 then ValueNone
-  else
+    let trimmed = Unicode.normalize(trimTrailingSpaces line)
 
-  let anchored = body.IndexOf '/' >= 0
-  let body = if body.StartsWith('/') then body.Substring 1 else body
-  let parts = body.Split '/'
+    if trimmed.Length = 0 || trimmed[0] = '#' then
+      ValueNone
+    else
 
-  let rules =
-    parts
-    |> Array.choose (fun part ->
-      if part.Length = 0 then None
-      elif part = "**" then Some AnyDepth
-      elif hasWildcard part then Some(GlobSegment(tokenize part))
-      else Some(LiteralSegment part))
+      let negated = trimmed[0] = '!'
+      let body = if negated then trimmed.Substring 1 else trimmed
 
-  if rules.Length = 0 then ValueNone
-  else
+      // `\#` や `\!` のエスケープを解く。
+      let body =
+        if body.Length >= 2 && body[0] = '\\' && (body[1] = '#' || body[1] = '!') then
+          body.Substring 1
+        else
+          body
 
-  // `/` を含まないパターンは任意の階層で一致する。先頭に `**` を補って表現を一本化する。
-  let segments =
-    if anchored then rules else Array.append [| AnyDepth |] rules
+      if body.Length = 0 then
+        ValueNone
+      elif body.StartsWith("../", StringComparison.Ordinal) || body = ".." then
+        // ルート外を参照するパターンは受け付けない。docs/security.md C-3 を参照。
+        ValueNone
+      else
 
-  ValueSome
-    { Negated = negated
-      DirectoryOnly = directoryOnly
-      Segments = segments }
+        let directoryOnly = body.EndsWith('/')
+        let body = if directoryOnly then body.TrimEnd '/' else body
+
+        if body.Length = 0 then
+          ValueNone
+        else
+
+          let anchored = body.IndexOf '/' >= 0
+          let body = if body.StartsWith('/') then body.Substring 1 else body
+          let parts = body.Split '/'
+
+          let rules =
+            parts
+            |> Array.choose(fun part ->
+              if part.Length = 0 then None
+              elif part = "**" then Some AnyDepth
+              elif hasWildcard part then Some(GlobSegment(tokenize part))
+              else Some(LiteralSegment part))
+
+          if rules.Length = 0 then
+            ValueNone
+          else
+
+            // `/` を含まないパターンは任意の階層で一致する。先頭に `**` を補って表現を一本化する。
+            let segments =
+              if anchored then
+                rules
+              else
+                Array.append [| AnyDepth |] rules
+
+            ValueSome
+              { Negated = negated
+                DirectoryOnly = directoryOnly
+                Segments = segments }
 
 /// 無視ファイルの内容から規則集合を構築する。
 /// `baseDepth` は無視ファイルが置かれたディレクトリの階層の深さ。
@@ -299,14 +334,17 @@ let private parseLine (line: string) : Rule voption =
 let parse (baseDepth: int) (lines: string seq) =
   let rules = List<Rule>()
   let mutable truncation = ValueNone
+  let mutable firstLine = true
 
   for line in lines do
-    if rules.Count >= MaxRulesPerFile then
-      if truncation.IsNone then truncation <- ValueSome RuleCountExceeded
-    else
-      match parseLine line with
-      | ValueSome rule -> rules.Add rule
-      | ValueNone -> ()
+    match parseLine firstLine line with
+    | ValueSome _ when rules.Count >= MaxRulesPerFile ->
+      if truncation.IsNone then
+        truncation <- ValueSome RuleCountExceeded
+    | ValueSome rule -> rules.Add rule
+    | ValueNone -> ()
+
+    firstLine <- false
 
   { BaseDepth = baseDepth
     Rules = rules.ToArray()
@@ -328,53 +366,70 @@ let read (baseDepth: int) (stream: Stream) (cancellation: CancellationToken) =
     let mutable lineLength = 0
     let mutable totalBytes = 0
     let mutable reading = true
+    let mutable firstLine = true
+    let mutable pendingCarriageReturn = false
 
     let commit () =
-      // 末尾の CR を取り除き、CRLF と LF のどちらでも同じ規則になるようにする。
-      let effective =
-        if lineLength > 0 && line[lineLength - 1] = 0x0Duy then lineLength - 1 else lineLength
-
-      if rules.Count >= MaxRulesPerFile then
-        if truncation.IsNone then truncation <- ValueSome RuleCountExceeded
-        reading <- false
-      elif effective > 0 then
+      if lineLength > 0 then
         // 無効な UTF-8 は置換文字へ変換する。規則が壊れていても走査は続けられる。
-        let text = Text.Encoding.UTF8.GetString(ReadOnlySpan(line, 0, effective))
+        let text = Text.Encoding.UTF8.GetString(ReadOnlySpan(line, 0, lineLength))
 
-        match parseLine text with
+        match parseLine firstLine text with
+        | ValueSome _ when rules.Count >= MaxRulesPerFile ->
+          if truncation.IsNone then
+            truncation <- ValueSome RuleCountExceeded
+
+          reading <- false
         | ValueSome rule -> rules.Add rule
         | ValueNone -> ()
 
+      firstLine <- false
       lineLength <- 0
 
     while reading do
       cancellation.ThrowIfCancellationRequested()
-      let read = stream.Read(Span(buffer, 0, buffer.Length))
+      let remaining = MaxFileBytes - totalBytes
+      // 上限ちょうどの EOF と超過を区別するため、最大 1 バイトだけ先を見る。
+      let read = stream.Read(Span(buffer, 0, min buffer.Length (remaining + 1)))
 
-      if read = 0 then reading <- false
+      if read = 0 then
+        reading <- false
       else
-        totalBytes <- totalBytes + read
+        let accepted = min read remaining
+        totalBytes <- totalBytes + accepted
         let mutable index = 0
 
-        while reading && index < read do
+        while reading && index < accepted do
           let b = buffer[index]
           index <- index + 1
 
-          if b = 0x0Auy then commit ()
-          elif lineLength >= MaxLineBytes then
-            // 行として成立しない長さに達した。以降の規則も信用できないため打ち切る。
-            if truncation.IsNone then truncation <- ValueSome LineLengthExceeded
-            reading <- false
+          if b = 0x0Auy && pendingCarriageReturn then
+            pendingCarriageReturn <- false
+          elif b = 0x0Auy || b = 0x0Duy then
+            commit()
+            pendingCarriageReturn <- b = 0x0Duy
           else
-            line[lineLength] <- b
-            lineLength <- lineLength + 1
+            pendingCarriageReturn <- false
 
-        if reading && totalBytes >= MaxFileBytes then
-          if truncation.IsNone then truncation <- ValueSome ByteLimitExceeded
+            if lineLength >= MaxLineBytes then
+              // 行として成立しない長さに達した。以降の規則も信用できないため打ち切る。
+              if truncation.IsNone then
+                truncation <- ValueSome LineLengthExceeded
+
+              reading <- false
+            else
+              line[lineLength] <- b
+              lineLength <- lineLength + 1
+
+        if reading && read > accepted then
+          if truncation.IsNone then
+            truncation <- ValueSome ByteLimitExceeded
+
           reading <- false
 
     // 改行で終わらないファイルの最終行も規則として扱う。打ち切り時は捨てる。
-    if truncation.IsNone && lineLength > 0 then commit ()
+    if truncation.IsNone && lineLength > 0 then
+      commit()
 
     { BaseDepth = baseDepth
       Rules = rules.ToArray()
@@ -387,7 +442,8 @@ let isEmpty (ruleSet: RuleSet) = ruleSet.Rules.Length = 0
 
 /// 単一の規則集合に対する判定。同一ファイル内では後の規則が優先するため、逆順に走査する。
 let private applyRuleSet (ruleSet: RuleSet) (segments: string[]) (isDirectory: bool) =
-  if ruleSet.BaseDepth >= segments.Length then NotMatched
+  if ruleSet.BaseDepth >= segments.Length then
+    NotMatched
   else
     let mutable decision = NotMatched
     let mutable index = ruleSet.Rules.Length - 1
@@ -395,7 +451,10 @@ let private applyRuleSet (ruleSet: RuleSet) (segments: string[]) (isDirectory: b
     while decision = NotMatched && index >= 0 do
       let rule = ruleSet.Rules[index]
 
-      if (not rule.DirectoryOnly || isDirectory) && matchSegments rule.Segments segments ruleSet.BaseDepth then
+      if
+        (not rule.DirectoryOnly || isDirectory)
+        && matchSegments rule.Segments segments ruleSet.BaseDepth
+      then
         decision <- if rule.Negated then Reincluded else Ignored
 
       index <- index - 1

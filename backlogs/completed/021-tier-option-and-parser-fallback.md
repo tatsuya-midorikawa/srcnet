@@ -3,11 +3,11 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Cli/Args.fs:15-24`, `src/Srcnet.Cli/Commands.fs:109-129,255-312`, `src/Srcnet.Extraction/Parsing.fs:45-70`
 - 依存: 015, 017, 020
-- 参照: [クエリと CLI](../docs/query-and-cli.md) 2.1, 2.2, [設計判断](../docs/decisions.md) ADR-3
+- 参照: [クエリと CLI](../../docs/query-and-cli.md) 2.1, 2.2, [設計判断](../../docs/decisions.md) ADR-3
 
 ## 背景
 
-[クエリと CLI](../docs/query-and-cli.md) 2.1 は `srcnet index` に `--tier <0|1|2|3>` を定めているが、`Args.IndexArguments` に対応する項目がない。
+[クエリと CLI](../../docs/query-and-cli.md) 2.1 は `srcnet index` に `--tier <0|1|2|3>` を定めているが、`Args.IndexArguments` に対応する項目がない。
 
 また ADR-3 の代償 3 のとおり、構文解析器が無い環境では構造グラフ（M1）相当へ縮退して走査自体は成立させる必要がある。この縮退が利用者から見て明示されないと、「成果物が小さいのは対象が小さいからか、解析器が無いからか」を区別できない。
 

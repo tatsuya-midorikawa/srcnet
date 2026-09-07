@@ -110,6 +110,10 @@ let private withView
       ValueSome $"--budget は {Args.MinBudget}..{Args.MaxBudget} で指定してください"
     elif depth |> ValueOption.exists (fun value -> value < 0 || value > Args.MaxQueryDepth) then
       ValueSome $"--depth は 0..{Args.MaxQueryDepth} で指定してください"
+    elif isNull(box texts) then
+      ValueSome "照会文字列に null は指定できません"
+    elif texts.Length = 0 then
+      ValueSome "照会文字列が指定されていません"
     elif texts.Length > Args.MaxContextKeywords then
       ValueSome $"キーワードは {Args.MaxContextKeywords} 個までです"
     else

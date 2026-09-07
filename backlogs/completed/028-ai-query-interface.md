@@ -3,7 +3,7 @@
 - 種別: 実装 / M4
 - 対象: `src/Srcnet.Storage/Reader.fs`, `src/Srcnet.Storage/`, `src/Srcnet.Cli/Args.fs`, `src/Srcnet.Cli/Commands.fs`, `tests/Srcnet.Tests/`, `docs/query-and-cli.md`
 - 依存: 019
-- 参照: [クエリと CLI](../docs/query-and-cli.md) 1-5, [ストレージ](../docs/storage.md) 4, 7, 8, [ロードマップ](../docs/roadmap.md) M4
+- 参照: [クエリと CLI](../../docs/query-and-cli.md) 1-5, [ストレージ](../../docs/storage.md) 4, 7, 8, [ロードマップ](../../docs/roadmap.md) M4
 
 ## 背景
 
@@ -50,4 +50,4 @@
 - 同じ成果物と引数から、macOS と Windows でバイト単位に同じ JSON が出る
 - CJK のファイル名と識別子について、完全一致・前方一致・部分一致のテストが通る
 - 破損セグメント、未知の NodeId、過大な深さ、再索引との競合を明示的な診断として返し、クラッシュや無限探索を起こさない
-- warm 状態の照会時間とピーク RSS を [性能](../docs/performance.md) の目標に照らして記録する
+- warm 状態の照会時間とピーク RSS を [性能](../../docs/performance.md) の目標に照らして記録する

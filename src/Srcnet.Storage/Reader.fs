@@ -10,9 +10,35 @@ module Srcnet.Storage.Reader
 #nowarn "9"
 
 open System
+open System.Buffers
 open System.IO
 open System.IO.MemoryMappedFiles
+open System.Threading
 open Microsoft.FSharp.NativeInterop
+open Srcnet.Core
+
+/// Hash an immutable segment in bounded chunks, including during generation reuse.
+let internal checksum (path: string) (cancellation: CancellationToken) =
+  use hasher = new Hashing.Hasher()
+  let buffer = ArrayPool<byte>.Shared.Rent 262144
+
+  try
+    use stream =
+      new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read ||| FileShare.Delete, 1, FileOptions.SequentialScan)
+
+    let mutable reading = true
+
+    while reading do
+      cancellation.ThrowIfCancellationRequested()
+      let read = stream.Read(Span buffer)
+      if read = 0 then reading <- false
+      else hasher.Update(ReadOnlySpan(buffer, 0, read))
+
+    let digest = Array.zeroCreate<byte> Hashing.HashLength
+    hasher.Finish(Span digest)
+    Convert.ToHexStringLower digest
+  finally
+    ArrayPool<byte>.Shared.Return buffer
 
 type OpenError =
   | SegmentNotFound of path: string
@@ -48,11 +74,17 @@ type MappedSegment
     ReadOnlySpan<byte>(NativePtr.toVoidPtr(NativePtr.add pointer Format.HeaderLength), length - Format.HeaderLength)
 
   static member Open(path: string) : Result<MappedSegment, OpenError> =
-    if not (File.Exists path) then Error(SegmentNotFound path)
-    else
+    let length =
+      try
+        if File.Exists path then Ok(FileInfo(path).Length)
+        else Error(SegmentNotFound path)
+      with
+      | :? IOException as ex -> Error(OpenFailed(path, ex.Message))
+      | :? UnauthorizedAccessException -> Error(OpenFailed(path, "読み取り権限がありません"))
 
-    let byteLength = FileInfo(path).Length
-
+    match length with
+    | Error error -> Error error
+    | Ok byteLength ->
     // 単一の Span で扱える上限を超える場合は、黙って切り詰めず明示的に失敗させる。
     // 分割ビューによる読み取りはセグメントが 2 GiB を超える規模で必要になる。
     if byteLength > int64 Int32.MaxValue then Error(SegmentTooLarge(path, byteLength))

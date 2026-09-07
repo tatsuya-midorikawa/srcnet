@@ -3,7 +3,7 @@
 - 種別: テスト / M2
 - 対象: `tests/Srcnet.Tests/`, `.github/workflows/`
 - 依存: 015, 017, 018, 019
-- 参照: [ロードマップ](../docs/roadmap.md) M2 完了条件, [テスト](../docs/testing.md) 2, 5, T-1, T-4
+- 参照: [ロードマップ](../../docs/roadmap.md) M2 完了条件, [テスト](../../docs/testing.md) 2, 5, T-1, T-4
 
 ## 背景
 

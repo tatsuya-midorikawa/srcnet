@@ -13,6 +13,26 @@ open System.Text
 /// 正規化の判定と実行を丸ごと省ける。大半のソースはこの経路を通る。
 let inline isAscii (text: string) = Ascii.IsValid text
 
+/// 正規化できない、対になっていないサロゲートを含むか。
+let hasUnpairedSurrogate (text: string) =
+  let mutable found = false
+  let mutable i = 0
+
+  while not found && i < text.Length do
+    let c = text[i]
+
+    if Char.IsHighSurrogate c then
+      if i + 1 >= text.Length || not(Char.IsLowSurrogate text[i + 1]) then
+        found <- true
+      else
+        i <- i + 1
+    elif Char.IsLowSurrogate c then
+      found <- true
+
+    i <- i + 1
+
+  found
+
 /// NFC へ正規化する。ASCII と既に NFC の文字列は入力をそのまま返し、割り当てを避ける。
 let normalize (text: string) =
   if text.Length = 0 || Ascii.IsValid text then text
@@ -160,8 +180,10 @@ let private isWideScalar (scalar: int) =
     let mid = lo + ((hi - lo) >>> 1)
     let struct (s, e) = wideRanges[mid]
 
-    if scalar < s then hi <- mid - 1
-    elif scalar > e then lo <- mid + 1
+    if scalar < s then
+      hi <- mid - 1
+    elif scalar > e then
+      lo <- mid + 1
     else
       found <- true
       lo <- hi + 1
@@ -172,8 +194,10 @@ let private isWideScalar (scalar: int) =
 let scalarWidth (rune: Rune) =
   let scalar = rune.Value
 
-  if scalar = 0 then 0
-  elif scalar < 0x20 || (scalar >= 0x7F && scalar < 0xA0) then 0
+  if scalar = 0 then
+    0
+  elif scalar < 0x20 || (scalar >= 0x7F && scalar < 0xA0) then
+    0
   else
     match Rune.GetUnicodeCategory rune with
     | UnicodeCategory.NonSpacingMark
@@ -204,8 +228,10 @@ let graphemeCount (text: string) =
 /// 表示桁数が `maxWidth` を超えないよう、書記素クラスタ境界で切り詰める。
 /// UTF-16 コード単位や UTF-8 バイトで切ると、CJK と絵文字で不正な境界が生じる。
 let truncateToWidth (maxWidth: int) (text: string) =
-  if maxWidth <= 0 then ""
-  elif text.Length = 0 then text
+  if maxWidth <= 0 then
+    ""
+  elif text.Length = 0 then
+    text
   else
     let mutable width = 0
     let mutable index = 0
@@ -218,7 +244,8 @@ let truncateToWidth (maxWidth: int) (text: string) =
       for rune in text.AsSpan(index, length).EnumerateRunes() do
         clusterWidth <- clusterWidth + scalarWidth rune
 
-      if width + clusterWidth > maxWidth then cut <- index
+      if width + clusterWidth > maxWidth then
+        cut <- index
       else
         width <- width + clusterWidth
         index <- index + length

@@ -5,6 +5,7 @@
 module Srcnet.Cli.Commands
 
 open System
+open System.Buffers
 open System.IO
 open System.Runtime.ExceptionServices
 open System.Text
@@ -273,6 +274,7 @@ let private publishIndex
   (repository: RepositoryId)
   (options: Walk.WalkOptions)
   (walk: Walk.WalkResult)
+  (allowPartial: bool)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
   : Result<Manifest.Manifest, IndexFailure> =
@@ -281,6 +283,15 @@ let private publishIndex
   match Artifact.prepareRoot outputDirectory with
   | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
   | Ok trustedOutput ->
+
+  match Manifest.acquireWriter trustedOutput with
+  | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
+  | Ok lease ->
+  use lease = lease
+
+  if not walk.Complete && not allowPartial && (Manifest.read trustedOutput |> Result.isOk) then
+    Error(PartialRefused "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください")
+  else
 
   let input: Writer.IndexInput =
     { Repository = repository
@@ -343,7 +354,7 @@ let private publishIndex
       Segments = Manifest.qualify generation result.Segments
       Diagnostics = diagnosticCounts diagnostics }
 
-  match Manifest.publish trustedOutput generation manifest with
+  match Manifest.publishWithCancellation trustedOutput generation manifest cancellation with
   | Error error ->
     Manifest.discardStaging trustedOutput
     Error(OutputRejected(Artifact.PathError.describe error))
@@ -362,16 +373,9 @@ let private buildIndex
   task {
     let! walk = Walk.run rootFullPath options diagnostics cancellation
 
-    if not walk.Complete && not allowPartial && (Manifest.read outputDirectory |> Result.isOk) then
-      return
-        Error(
-          PartialRefused
-            "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください"
-        )
-    else
-      return
-        publishIndex outputDirectory repository options walk diagnostics cancellation
-        |> Result.map (fun manifest -> struct (manifest, walk.Tiers))
+    return
+      publishIndex outputDirectory repository options walk allowPartial diagnostics cancellation
+      |> Result.map (fun manifest -> struct (manifest, walk.Tiers))
   }
 
 /// 生成結果を報告し、終了コードを決める。
@@ -486,14 +490,18 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
     return reportIndex arguments diagnostics outcome
   }
 
-let stats (arguments: Args.StatsArguments) : int =
+let statsWithCancellation (arguments: Args.StatsArguments) (cancellation: CancellationToken) : int =
   let outputDirectory = locateArtifact arguments.OutputDirectory arguments.RootPath
 
   // マニフェストとセグメントを別々に開くと、その間に公開が完了したとき、
   // 旧世代の件数と新世代の集計を混ぜた結果を正常終了で返してしまう。
   let observed =
     Manifest.readStable outputDirectory (fun manifest ->
-      struct (manifest, Stats.readFileStatistics outputDirectory manifest, Stats.readReferenceStatistics outputDirectory manifest))
+      struct (
+        manifest,
+        Stats.readFileStatisticsWithCancellation outputDirectory manifest cancellation,
+        Stats.readReferenceStatisticsWithCancellation outputDirectory manifest cancellation
+      ))
 
   match observed with
   | Error error ->
@@ -583,6 +591,8 @@ let stats (arguments: Args.StatsArguments) : int =
 
       if manifest.Counts.Files = 0 then ExitCode.NoResults else ExitCode.Success
 
+let stats (arguments: Args.StatsArguments) = statsWithCancellation arguments CancellationToken.None
+
 /// 成果物ディレクトリ内のファイルを、相対パス昇順で列挙する。
 ///
 /// 生成中の一時領域と、退役待ちの旧世代は現行の内容ではないため除く。旧世代は
@@ -603,6 +613,8 @@ let private artifactFiles (directory: string) (generation: string voption) =
     |> Seq.map (fun path -> Path.GetRelativePath(directory, path).Replace('\\', '/'))
     |> Seq.filter (fun relative ->
       not (relative.StartsWith(Manifest.StagingDirectory, StringComparison.Ordinal))
+      && relative <> ".writer.lock"
+      && relative <> "graph.html"
       && not (isRetiredGeneration relative))
     |> Seq.sortWith (fun left right -> String.CompareOrdinal(left, right))
     |> Seq.toArray
@@ -617,6 +629,7 @@ let private compareArtifacts
   (originalGeneration: string voption)
   (rebuilt: string)
   (rebuiltGeneration: string voption)
+  (cancellation: CancellationToken)
   =
   let mismatches = ResizeArray<string>()
   let left = artifactFiles original originalGeneration
@@ -631,11 +644,29 @@ let private compareArtifacts
     mismatches.Add $"再生成した成果物にだけ {name} があります"
 
   for name in Set.intersect leftSet rightSet do
-    let leftBytes = File.ReadAllBytes(Path.Combine(original, name.Replace('/', Path.DirectorySeparatorChar)))
-    let rightBytes = File.ReadAllBytes(Path.Combine(rebuilt, name.Replace('/', Path.DirectorySeparatorChar)))
+    cancellation.ThrowIfCancellationRequested()
+    let relative = name.Replace('/', Path.DirectorySeparatorChar)
+    use leftFile = new FileStream(Path.Combine(original, relative), FileMode.Open, FileAccess.Read, FileShare.Read ||| FileShare.Delete)
+    use rightFile = new FileStream(Path.Combine(rebuilt, relative), FileMode.Open, FileAccess.Read, FileShare.Read ||| FileShare.Delete)
+    let leftBuffer = ArrayPool<byte>.Shared.Rent 65536
+    let rightBuffer = ArrayPool<byte>.Shared.Rent 65536
 
-    if not (leftBytes.AsSpan().SequenceEqual(ReadOnlySpan rightBytes)) then
-      mismatches.Add $"{name} がバイト単位で一致しません"
+    try
+      let mutable equal = leftFile.Length = rightFile.Length
+      let mutable remaining = leftFile.Length
+
+      while equal && remaining > 0L do
+        cancellation.ThrowIfCancellationRequested()
+        let count = int (min remaining 65536L)
+        leftFile.ReadExactly(Span(leftBuffer, 0, count))
+        rightFile.ReadExactly(Span(rightBuffer, 0, count))
+        equal <- ReadOnlySpan(leftBuffer, 0, count).SequenceEqual(ReadOnlySpan(rightBuffer, 0, count))
+        remaining <- remaining - int64 count
+
+      if not equal then mismatches.Add $"{name} がバイト単位で一致しません"
+    finally
+      ArrayPool<byte>.Shared.Return leftBuffer
+      ArrayPool<byte>.Shared.Return rightBuffer
 
   // 検出順が集合演算の走査順に依存しないよう、報告は序数順に固定する。
   let ordered = mismatches.ToArray()
@@ -690,6 +721,7 @@ let private checkDeterminism
               (Manifest.generationIn manifest)
               temporary
               (Manifest.generationIn rebuilt)
+              cancellation
           )
     finally
       if Directory.Exists temporary then
@@ -711,7 +743,7 @@ let verify (arguments: Args.VerifyArguments) (cancellation: CancellationToken) :
 
     let! determinism =
       task {
-        if not arguments.Deterministic then return ValueNone
+        if not arguments.Deterministic || not report.IsValid then return ValueNone
         else
           match arguments.RootPath with
           | ValueNone ->
@@ -761,12 +793,12 @@ let verify (arguments: Args.VerifyArguments) (cancellation: CancellationToken) :
       for issue in determinismIssues do
         Terminal.resultLine $"問題: {issue}"
 
-      if arguments.Deterministic && determinismIssues.Length = 0 then
+      if arguments.Deterministic && report.IsValid && determinismIssues.Length = 0 then
         Terminal.outLine "決定性: 二度の生成で成果物がバイト単位で一致しました"
 
       if report.IsValid && determinismIssues.Length = 0 then Terminal.outLine "整合性: 問題ありません"
 
     return
-      if report.IsValid && determinismIssues.Length = 0 then ExitCode.Success
+      if report.IsValid && report.Issues.Length = 0 && determinismIssues.Length = 0 then ExitCode.Success
       else ExitCode.CompletedWithDiagnostics
   }

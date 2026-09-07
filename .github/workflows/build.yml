@@ -17,10 +17,11 @@ env:
     DOTNET_NOLOGO: true
     DOTNET_CLI_TELEMETRY_OPTOUT: true
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+    PYTHONUTF8: '1'
     CI: true
     # 実測に使うコーパスはコミット SHA で固定する。追従は明示的な更新として行う。
     # v6.6（長期サポート）のタグが指すコミット。
-    LINUX_CORPUS_REF: ce1c54fdff7a8dd0f8b1d0522f4571d1b98b5a11
+    LINUX_CORPUS_REF: ffc253263a1375a65fa6c9f62a893e9767fbebfa
 
 jobs:
     build-test:
@@ -47,6 +48,9 @@ jobs:
               run: |
                   python tools/generate_grammar_versions.py --check
                   python tools/generate_encoding_tables.py --check
+
+            - name: Test build tooling
+              run: python -m unittest discover -s tests/tools -v
 
             - name: Restore
               run: dotnet restore srcnet.slnx
@@ -111,38 +115,27 @@ jobs:
               with:
                   global-json-file: global.json
 
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
             - name: Publish CLI
               run: dotnet publish src/Srcnet.Cli/Srcnet.Cli.fsproj -c Release -o artifacts/cli
 
             - name: Index twice and compare (POSIX)
               if: runner.os != 'Windows'
-              run: |
-                  ./artifacts/cli/srcnet index . --out artifacts/index-a --jobs 1
-                  ./artifacts/cli/srcnet index . --out artifacts/index-b --jobs 8
-                  diff -r artifacts/index-a artifacts/index-b
-                  ./artifacts/cli/srcnet verify . --out artifacts/index-a --deterministic
+              run: python .github/scripts/determinism_contract.py --cli artifacts/cli/srcnet --root . --out artifacts/determinism
 
             - name: Index twice and compare (Windows)
               if: runner.os == 'Windows'
-              shell: pwsh
-              run: |
-                  ./artifacts/cli/srcnet.exe index . --out artifacts/index-a --jobs 1
-                  ./artifacts/cli/srcnet.exe index . --out artifacts/index-b --jobs 8
-                  $a = Get-ChildItem -Recurse -File artifacts/index-a | Sort-Object FullName
-                  $b = Get-ChildItem -Recurse -File artifacts/index-b | Sort-Object FullName
-                  if ($a.Count -ne $b.Count) { throw "セグメント数が一致しません" }
-                  for ($i = 0; $i -lt $a.Count; $i++) {
-                      $left = (Get-FileHash $a[$i].FullName -Algorithm SHA256).Hash
-                      $right = (Get-FileHash $b[$i].FullName -Algorithm SHA256).Hash
-                      if ($left -ne $right) { throw "$($a[$i].Name) が一致しません" }
-                  }
-                  ./artifacts/cli/srcnet.exe verify . --out artifacts/index-a --deterministic
+              run: python .github/scripts/determinism_contract.py --cli artifacts/cli/srcnet.exe --root . --out artifacts/determinism
 
             - name: Upload manifest for cross-OS comparison
               uses: actions/upload-artifact@v4
               with:
                   name: manifest-${{ matrix.os }}
-                  path: artifacts/index-a/manifest.json
+                  path: artifacts/determinism/index-a/manifest.json
+                  if-no-files-found: error
 
     cross-platform-determinism:
         # T-1 の 3: macOS で生成した成果物と Windows で生成した成果物が一致すること。
@@ -290,28 +283,41 @@ jobs:
               uses: actions/cache@v4
               with:
                   path: corpus/linux
-                  key: corpus-linux-${{ env.LINUX_CORPUS_REF }}
+                  key: corpus-linux-${{ runner.os }}-${{ env.LINUX_CORPUS_REF }}
 
             - name: Fetch corpus
               if: steps.corpus-cache.outputs.cache-hit != 'true'
               run: |
-                  git clone --filter=blob:none --no-checkout https://github.com/torvalds/linux.git corpus/linux
+                  git clone --config core.autocrlf=false --config core.longpaths=true --filter=blob:none --no-checkout https://github.com/torvalds/linux.git corpus/linux
                   git -C corpus/linux checkout ${{ env.LINUX_CORPUS_REF }}
+
+            - name: Verify corpus revision and checkout
+              shell: bash
+              run: |
+                  test "$(git -C corpus/linux rev-parse HEAD)" = "$LINUX_CORPUS_REF"
+                  git -C corpus/linux diff --exit-code HEAD
 
             - name: Index (POSIX)
               if: runner.os != 'Windows'
               run: |
-                  /usr/bin/time -l ./artifacts/cli/srcnet index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json 2> artifacts/index.time
+                  status=0
+                  /usr/bin/time -l ./artifacts/cli/srcnet index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json 2> artifacts/index.time || status=$?
                   cat artifacts/index.json
                   cat artifacts/index.time
+                  if [ "$status" -ne 0 ] && [ "$status" -ne 4 ]; then exit "$status"; fi
+                  python -c "import json; assert json.load(open('artifacts/index.json', encoding='utf-8'))['complete']"
 
             - name: Index (Windows)
               if: runner.os == 'Windows'
               shell: pwsh
               run: |
-                  $measured = Measure-Command { ./artifacts/cli/srcnet.exe index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json }
+                  $measured = Measure-Command {
+                    ./artifacts/cli/srcnet.exe index corpus/linux --out artifacts/linux --tier 2 --json > artifacts/index.json
+                    if ($LASTEXITCODE -notin @(0, 4)) { throw "Index failed: $LASTEXITCODE" }
+                  }
                   "elapsed_seconds=$($measured.TotalSeconds)" | Out-File artifacts/index.time
                   Get-Content artifacts/index.json
+                  if (!(Get-Content artifacts/index.json -Raw | ConvertFrom-Json).complete) { throw "Incomplete corpus scan" }
 
             - name: Verify
               if: runner.os != 'Windows'
@@ -368,4 +374,6 @@ jobs:
               run: python3 .github/scripts/check_dependency_closure.py artifacts/cli/srcnet.deps.json
 
             - name: Vulnerability scan
-              run: dotnet list srcnet.slnx package --vulnerable --include-transitive
+              run: |
+                  dotnet restore srcnet.slnx --force-evaluate -p:NuGetAudit=true -p:NuGetAuditMode=all -p:NuGetAuditLevel=low
+                  dotnet list srcnet.slnx package --vulnerable --include-transitive

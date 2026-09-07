@@ -9,6 +9,7 @@
 module Srcnet.Extraction.SyntaxTree
 
 open System
+open System.Threading
 
 /// 木の走査で許容する最大の深さ。
 /// 極端に深い入れ子を持つ入力で stack を使い切らないための上限である。
@@ -17,23 +18,23 @@ open System
 let MaxWalkDepth = 512
 
 /// 構文木。破棄すると配下のノードは使用できなくなる。
+/// Queries and disposal must not overlap; each extraction worker owns its tree.
 [<Sealed>]
 type Tree internal (handle: nativeint, sourceLength: int) =
-  let mutable disposed = false
+  let mutable disposed = 0
 
   member internal _.Handle =
-    ObjectDisposedException.ThrowIf(disposed, typeof<Tree>)
+    ObjectDisposedException.ThrowIf(Volatile.Read(&disposed) <> 0, typeof<Tree>)
     handle
 
   member internal _.SourceLength = sourceLength
 
-  member _.IsDisposed = disposed
+  member _.IsDisposed = Volatile.Read(&disposed) <> 0
 
   interface IDisposable with
 
     member _.Dispose() =
-      if not disposed then
-        disposed <- true
+      if Interlocked.Exchange(&disposed, 1) = 0 then
         Native.ts_tree_delete handle
 
 /// 構文ノード。所属する木への参照を持ち、木より長く生存できない。
@@ -62,10 +63,10 @@ type Node =
   /// tree-sitter が範囲外を返すことは想定していないが、未検証の値を
   /// そのままオフセットとして使わないという原則をここでも守る。
   member this.StartByte =
-    min (int (Native.ts_node_start_byte this.Checked)) this.Owner.SourceLength
+    int (min (Native.ts_node_start_byte this.Checked) (uint32 this.Owner.SourceLength))
 
   member this.EndByte =
-    let value = min (int (Native.ts_node_end_byte this.Checked)) this.Owner.SourceLength
+    let value = int (min (Native.ts_node_end_byte this.Checked) (uint32 this.Owner.SourceLength))
     max value this.StartByte
 
   /// 1 起点の行番号。tree-sitter は 0 起点で返す。
@@ -76,6 +77,12 @@ type Node =
   member this.ChildCount = int (Native.ts_node_child_count this.Checked)
 
   member this.NamedChildCount = int (Native.ts_node_named_child_count this.Checked)
+
+  member internal this.Parent =
+    let parent = Native.ts_node_parent this.Checked
+
+    if Native.toBool(Native.ts_node_is_null parent) then ValueNone
+    else ValueSome { Owner = this.Owner; Handle = parent }
 
   /// `index` 番目の子。範囲外は `ValueNone`。
   member this.Child(index: int) =
@@ -132,7 +139,8 @@ type Node =
   /// 子をすべて舐める用途では全体が二乗になる。子が数十万に達するファイル
   /// （コメント行だけが延々と続くなど）はこの差で実用にならない。
   /// カーソルによる「最初の子 → 次の兄弟」の連鎖は 1 回の走査を線形に保つ。
-  member this.NamedChildren() : Node[] =
+  member this.NamedChildren(cancellation: CancellationToken) : Node[] =
+    cancellation.ThrowIfCancellationRequested()
     let count = this.NamedChildCount
 
     if count = 0 then Array.empty
@@ -146,6 +154,7 @@ type Node =
           let mutable more = true
 
           while more do
+            cancellation.ThrowIfCancellationRequested()
             let current = Native.ts_tree_cursor_current_node &cursor
 
             if Native.toBool(Native.ts_node_is_named current) then
@@ -156,6 +165,9 @@ type Node =
         children.ToArray()
       finally
         Native.ts_tree_cursor_delete &cursor
+
+  member this.NamedChildren() : Node[] =
+    this.NamedChildren CancellationToken.None
 
   /// ソースからこのノードに対応するバイト列を切り出す。
   /// 範囲は検証済みなので、呼び出し側で再度の境界検査は要らない。

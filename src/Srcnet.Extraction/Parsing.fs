@@ -68,6 +68,29 @@ let supports (language: Language) =
     | ValueSome _ -> true
     | ValueNone -> false
 
+// tree-sitter counts LF, whereas the decoding and T1 contracts also accept CR.
+// Replace bare CR only in a private copy, preserving every original byte offset.
+let private normalizeLineBreaks (source: byte[]) (length: int) (cancellation: CancellationToken) =
+  let mutable parsed = source
+  let mutable position = 0
+
+  while position < length && not cancellation.IsCancellationRequested do
+    let next = ReadOnlySpan(source, position, length - position).IndexOf '\r'B
+
+    if next < 0 then position <- length
+    else
+      let index = position + next
+
+      if index + 1 = length || source[index + 1] <> '\n'B then
+        if Object.ReferenceEquals(parsed, source) then
+          parsed <- ReadOnlySpan(source, 0, length).ToArray()
+
+        parsed[index] <- '\n'B
+
+      position <- index + 1
+
+  if cancellation.IsCancellationRequested then ValueNone else ValueSome parsed
+
 /// UTF-8 のソースを解析して構文木を返す。
 ///
 /// `length` は `source` のうち実際に内容が入っている長さ。バッファを再利用する
@@ -83,6 +106,7 @@ let parseRange
   (cancellation: CancellationToken)
   : Result<SyntaxTree.Tree, ParseFailure> =
 
+  ArgumentNullException.ThrowIfNull source
   if length < 0 || length > source.Length then invalidArg (nameof length) "解析長がバッファ長を超えています"
   elif length > MaxSourceBytes then Error(SourceTooLarge length)
   elif cancellation.IsCancellationRequested then Error Cancelled
@@ -104,39 +128,51 @@ let parseRange
   | Ok ValueNone -> Error(GrammarUnavailable language)
   | Ok(ValueSome grammar) ->
 
+  match normalizeLineBreaks source length cancellation with
+  | ValueNone -> Error Cancelled
+  | ValueSome parsedSource ->
+
   let parser = Native.ts_parser_new ()
 
   if parser = 0n then Error(ParserUnavailable "解析器を確保できません")
   else
 
-  // 取り消しフラグは native 側が読む size_t で、解析中に別スレッドから 1 を書く。
-  let flag = Marshal.AllocHGlobal IntPtr.Size
-  Marshal.WriteIntPtr(flag, 0n)
-  let pinned = GCHandle.Alloc(source, GCHandleType.Pinned)
-  let registration = cancellation.Register(fun () -> Marshal.WriteIntPtr(flag, 1n))
-
   try
-    if not (Native.toBool(Native.ts_parser_set_language(parser, grammar))) then
-      Error(ParserUnavailable "文法の版が解析器と一致しません")
-    else
+    // Each allocation is protected before acquiring the next resource.
+    let flag = Marshal.AllocHGlobal IntPtr.Size
 
-    Native.ts_parser_set_timeout_micros(parser, timeoutMicroseconds)
-    Native.ts_parser_set_cancellation_flag(parser, flag)
+    try
+      Marshal.WriteIntPtr(flag, 0n)
+      let pinned = GCHandle.Alloc(parsedSource, GCHandleType.Pinned)
 
-    let tree =
-      Native.ts_parser_parse_string(parser, 0n, pinned.AddrOfPinnedObject(), uint32 length)
+      try
+        use registration = cancellation.Register(fun () -> Marshal.WriteIntPtr(flag, 1n))
 
-    if tree = 0n then
-      // 木が返らないのは取り消しか時間切れのいずれか。区別して報告する。
-      if cancellation.IsCancellationRequested then Error Cancelled else Error TimedOut
-    else
-      Ok(new SyntaxTree.Tree(tree, length))
+        if not (Native.toBool(Native.ts_parser_set_language(parser, grammar))) then
+          Error(ParserUnavailable "文法の版が解析器と一致しません")
+        else
+          Native.ts_parser_set_timeout_micros(parser, timeoutMicroseconds)
+          Native.ts_parser_set_cancellation_flag(parser, flag)
+
+          let tree =
+            Native.ts_parser_parse_string(parser, 0n, pinned.AddrOfPinnedObject(), uint32 length)
+
+          if cancellation.IsCancellationRequested then
+            if tree <> 0n then Native.ts_tree_delete tree
+            Error Cancelled
+          elif tree = 0n then
+            if timeoutMicroseconds = 0UL then Error ParseFailed else Error TimedOut
+          else
+            Ok(new SyntaxTree.Tree(tree, length))
+      finally
+        pinned.Free()
+    finally
+      // The registration has been disposed, so no callback can touch this flag.
+      try
+        Native.ts_parser_set_cancellation_flag(parser, 0n)
+      finally
+        Marshal.FreeHGlobal flag
   finally
-    // 登録を先に解除してから、フラグの領域を解放する。逆順にすると
-    // 解放済み領域へ書き込む競合が起こり得る。
-    registration.Dispose()
-    pinned.Free()
-    Marshal.FreeHGlobal flag
     Native.ts_parser_delete parser
 
 /// UTF-8 のソース全体を解析して構文木を返す。
@@ -146,6 +182,7 @@ let parse
   (timeoutMicroseconds: uint64)
   (cancellation: CancellationToken)
   : Result<SyntaxTree.Tree, ParseFailure> =
+  ArgumentNullException.ThrowIfNull source
   parseRange language source source.Length timeoutMicroseconds cancellation
 
 /// 既定の上限で解析する。

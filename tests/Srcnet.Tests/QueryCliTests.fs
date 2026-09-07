@@ -3,6 +3,7 @@ module Srcnet.Tests.QueryCliTests
 open System
 open System.IO
 open System.Text.Json
+open System.Threading
 open Xunit
 open Srcnet.Cli
 
@@ -171,4 +172,67 @@ let ``CJK and escaped metadata use the same serialized token count`` () =
       Assert.True(code = 0 || code = 1, errors)
       Assert.Equal("", errors)
       assertBudget 512 5 json
+  }
+
+[<Fact>]
+let ``null query text and null or empty keyword arrays are rejected before opening artifacts`` () =
+  use workspace = new Workspace()
+  let limits: Args.QueryLimits = { Limit = Args.DefaultLimit; Budget = Args.DefaultBudget }
+  let output = ValueSome workspace.Path
+  Assert.Equal(
+    Commands.ExitCode.UserError,
+    QueryCommands.search
+      { OutputDirectory = output; RootPath = ValueNone; Text = null
+        IgnoreCase = false; Limits = limits; Json = true }
+      CancellationToken.None)
+  Assert.Equal(
+    Commands.ExitCode.UserError,
+    QueryCommands.show
+      { OutputDirectory = output; RootPath = ValueNone; Node = null; Limits = limits; Json = true }
+      CancellationToken.None)
+  Assert.Equal(
+    Commands.ExitCode.UserError,
+    QueryCommands.neighbors
+      { OutputDirectory = output; RootPath = ValueNone; Node = null; Edges = Array.empty
+        Direction = "both"; Depth = 1; Limits = limits; Json = true }
+      CancellationToken.None)
+  Assert.Equal(
+    Commands.ExitCode.UserError,
+    QueryCommands.path
+      { OutputDirectory = output; RootPath = ValueNone; From = "from"; To = null
+        Edges = Array.empty; Direction = "both"; Depth = 1; Limits = limits; Json = true }
+      CancellationToken.None)
+  for keywords in [| null; Array.empty; [| null |] |] do
+    Assert.Equal(
+      Commands.ExitCode.UserError,
+      QueryCommands.context
+        { OutputDirectory = output; RootPath = ValueNone; Keywords = keywords
+          Depth = 1; Limits = limits; Json = true }
+        CancellationToken.None)
+
+[<Fact>]
+let ``error diagnostics do not materialize unbounded scalar arrays`` () =
+  QueryCommands.writeError "search" Commands.ExitCode.UserError "warmup" true |> ignore
+  let message = String('x', 1_000_000)
+  let before = GC.GetAllocatedBytesForCurrentThread()
+  let code = QueryCommands.writeError "search" Commands.ExitCode.UserError message true
+  let allocated = GC.GetAllocatedBytesForCurrentThread() - before
+  Assert.Equal(Commands.ExitCode.UserError, code)
+  Assert.InRange(allocated, 0L, 1_048_576L)
+
+[<Fact>]
+let ``long error diagnostics preserve Unicode scalar boundaries and report omissions`` () =
+  task {
+    let command = "x" + String.replicate 6000 "\ud83d\ude00"
+    let! struct (code, json, errors) = Corpus.runCli [ command; "--json"; "--budget"; "256" ]
+    Assert.Equal(Commands.ExitCode.UserError, code)
+    Assert.Equal("", errors)
+    assertBudget 256 0 json
+    use document = JsonDocument.Parse json
+    let root = document.RootElement
+    Assert.True(root.GetProperty("diagnosticsTruncated").GetBoolean())
+    Assert.Equal(1, root.GetProperty("omittedDiagnosticCount").GetInt32())
+    let diagnostic = (root.GetProperty("diagnostics")[0]).GetString()
+    Assert.DoesNotContain("\uFFFD", diagnostic)
+    Assert.EndsWith("\ud83d\ude00", diagnostic)
   }

@@ -92,7 +92,13 @@ let language (path: LogicalPath) =
   | true, known -> known
   | false, _ ->
     // `Kconfig.debug` のような接尾辞付きの構成ファイルを拾う。
-    if name.StartsWith("Kconfig", StringComparison.Ordinal) then Kconfig
+    if name.StartsWith("Kconfig.", StringComparison.Ordinal) then
+      Kconfig
+    // `.C` と `.H` は C++ の慣用拡張子なので、ケース フォールドする前に区別する。
+    elif name.Length > 2 && name.EndsWith(".C", StringComparison.Ordinal) then
+      Cpp
+    elif name.Length > 2 && name.EndsWith(".H", StringComparison.Ordinal) then
+      CppHeader
     else
       match byExtension.TryGetValue(extension path) with
       | true, known -> known
@@ -102,7 +108,13 @@ let language (path: LogicalPath) =
 /// Chromium と Linux カーネルで実際に使われている名前を対象にする。
 let private vendorDirectories =
   HashSet<string>(
-    [ "third_party"; "thirdparty"; "vendor"; "vendored"; "node_modules"; "external"; "externals" ],
+    [ "third_party"
+      "thirdparty"
+      "vendor"
+      "vendored"
+      "node_modules"
+      "external"
+      "externals" ],
     StringComparer.Ordinal
   )
 
@@ -122,10 +134,13 @@ let pathFlags (path: LogicalPath) =
     let isLastSegment = index = segments.Length - 1
 
     if not isLastSegment then
-      if vendorDirectories.Contains segment then flags <- flags ||| NodeFlags.Vendored
-      if testDirectories.Contains segment then flags <- flags ||| NodeFlags.Test
+      if vendorDirectories.Contains segment then
+        flags <- flags ||| NodeFlags.Vendored
 
-  let name = Unicode.caseFold (fileName path)
+      if testDirectories.Contains segment then
+        flags <- flags ||| NodeFlags.Test
+
+  let name = Unicode.caseFold(fileName path)
 
   if
     name.StartsWith("test_", StringComparison.Ordinal)

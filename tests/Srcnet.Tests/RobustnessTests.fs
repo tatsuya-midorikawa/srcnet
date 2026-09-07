@@ -242,3 +242,107 @@ let ``fuzz: 連続実行でハンドルとメモリが増え続けない`` () =
     after < baseline + 32L * 1024L * 1024L,
     $"400 回の抽出で常駐量が {baseline} → {after} バイトへ増えました"
   )
+
+[<Fact>]
+let ``T1 と T2 の併合後もファイルごとのシンボル上限を守る`` () =
+  if Extractor.supportsSyntax Language.C then
+    let source =
+      Encoding.UTF8.GetBytes(
+        String.replicate (Model.Limits.MaxSymbolsPerFile / 2 + 1) "// NOTE: item\nint item;\n"
+      )
+
+    let extractor = Extractor.Extractor options
+    let result = extractor.Extract(Language.C, "merged.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+    Assert.Equal(Model.Limits.MaxSymbolsPerFile, result.Symbols.Length)
+    Assert.True result.Truncated
+    Assert.NotEqual(NodeFlags.None, result.FileFlags &&& NodeFlags.ExtractionTruncated)
+    Assert.All(result.References, fun reference -> Assert.InRange(reference.Source, -1, result.Symbols.Length - 1))
+
+[<Fact>]
+let ``取り込みと根拠コメントを併合しても参照上限を守る`` () =
+  if Extractor.supportsSyntax Language.C then
+    let source =
+      Encoding.UTF8.GetBytes(
+        "#include \"calls.h\"\n// NOTE: calls\nvoid f() {"
+        + String.replicate Model.Limits.MaxReferencesPerFile "g();"
+        + "}\n"
+      )
+
+    let extractor = Extractor.Extractor options
+    let result = extractor.Extract(Language.C, "calls.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+    Assert.Equal(Model.Syntax, result.Tier)
+    Assert.Equal(Model.Limits.MaxReferencesPerFile, result.References.Length)
+    Assert.True result.Truncated
+    Assert.NotEqual(NodeFlags.None, result.FileFlags &&& NodeFlags.ExtractionTruncated)
+
+[<Fact>]
+let ``連続した根拠コメントは一つの走査で直後の定義へ結び付く`` () =
+  let count = Model.Limits.MaxSymbolsPerFile - 1
+  let source = Encoding.UTF8.GetBytes(String.replicate count "// NOTE: item\n" + "struct Target {};\n")
+  let extractor = Extractor.Extractor { options with Tier = Model.LineOriented }
+  let watch = Stopwatch.StartNew()
+  let result = extractor.Extract(Language.C, "notes.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+  Assert.Equal(count, result.References.Length)
+  Assert.All(result.References, fun reference -> Assert.Equal("Target", reference.Target))
+  Assert.True(watch.Elapsed < PerFileBudget)
+
+[<Fact>]
+let ``すべての抽出段階が取り消しを伝播する`` () =
+  use cancellation = new CancellationTokenSource()
+  cancellation.Cancel()
+  let source = Encoding.UTF8.GetBytes "struct X {};\n"
+
+  for tier in [ Model.Structure; Model.LineOriented; Model.Syntax ] do
+    let extractor = Extractor.Extractor { options with Tier = tier }
+
+    Assert.ThrowsAny<OperationCanceledException>(fun () ->
+      extractor.Extract(Language.C, "cancel.c", source, source.Length, NodeFlags.None, cancellation.Token) |> ignore)
+    |> ignore
+
+  Assert.ThrowsAny<OperationCanceledException>(fun () ->
+    LineScan.runWithCancellation Language.C (ReadOnlySpan source) NodeFlags.None cancellation.Token |> ignore)
+  |> ignore
+
+  if Parsing.supports Language.C then
+    match Parsing.parseDefault Language.C source CancellationToken.None with
+    | Error failure -> failwith (Parsing.ParseFailure.describe failure)
+    | Ok tree ->
+      use tree = tree
+
+      Assert.ThrowsAny<OperationCanceledException>(fun () ->
+        CSyntax.runWithCancellation Language.C "cancel.c" source tree NodeFlags.None cancellation.Token |> ignore)
+      |> ignore
+
+      Assert.ThrowsAny<OperationCanceledException>(fun () ->
+        let root = SyntaxTree.root tree
+        root.NamedChildren(cancellation.Token) |> ignore)
+      |> ignore
+
+[<Fact>]
+let ``走査行数の上限でもファイル全体の行数を保持する`` () =
+  let count = Model.Limits.MaxLines + 1
+  let source = Array.create count '\n'B
+  let result = LineScan.run Language.C (ReadOnlySpan source) NodeFlags.None
+  Assert.True result.Truncated
+  Assert.Equal(count, result.LineCount)
+
+[<Fact>]
+let ``条件の深さ上限を超えた枝を外側の条件で誤って抽出しない`` () =
+  if Extractor.supportsSyntax Language.C then
+    let depth = Model.Limits.MaxConditionDepth + 1
+    let source =
+      Encoding.UTF8.GetBytes(
+        "int before;\n"
+        + String.replicate depth "#if FLAG\n"
+        + "int beyond;\n"
+        + String.replicate depth "#endif\n"
+        + "int after;\n"
+      )
+
+    let extractor = Extractor.Extractor options
+    let result = extractor.Extract(Language.C, "deep.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+    let names = result.Symbols |> Array.map _.Name
+    Assert.Contains("before", names)
+    Assert.Contains("after", names)
+    Assert.DoesNotContain("beyond", names)
+    Assert.True result.Truncated

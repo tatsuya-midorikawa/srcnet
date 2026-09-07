@@ -3,17 +3,17 @@
 - 種別: テスト / M2
 - 対象: `tests/Srcnet.Tests/ExtractionTests.fs`, `src/Srcnet.Extraction/Parsing.fs:16-22,75-136`, `src/Srcnet.Extraction/SyntaxTree.fs:15-17,132-147`
 - 依存: 015, 017, 018
-- 参照: [テスト](../docs/testing.md) T-5, T-6, [セキュリティ](../docs/security.md) 4, C-4
+- 参照: [テスト](../../docs/testing.md) T-5, T-6, [セキュリティ](../../docs/security.md) 4, C-4
 
 ## 背景
 
-tree-sitter を採用した代償として、製品成果物にネイティブ コードが入り、メモリ安全性の検証責任が生じる（[設計判断](../docs/decisions.md) ADR-3）。[テスト](../docs/testing.md) T-6 は相互運用境界の fuzz を必須としている。
+tree-sitter を採用した代償として、製品成果物にネイティブ コードが入り、メモリ安全性の検証責任が生じる（[設計判断](../../docs/decisions.md) ADR-3）。[テスト](../../docs/testing.md) T-6 は相互運用境界の fuzz を必須としている。
 
 `SyntaxTree` は寿命・範囲・null を型と実行時検査で守っているが、抽出器を通した経路としての検証がまだない。上限（解析時間 `DefaultTimeoutMicroseconds`、走査深さ `MaxWalkDepth`）に達したときの振る舞いも検証されていない。
 
 ## やること
 
-- 病的入力の固定コーパスを本リポジトリ内に持つ（外部依存にしない。[テスト](../docs/testing.md) 5）
+- 病的入力の固定コーパスを本リポジトリ内に持つ（外部依存にしない。[テスト](../../docs/testing.md) 5）
   - 極端に長い 1 行、深い入れ子（括弧、`#ifdef`、テンプレート）、巨大ファイル
   - 壊れた符号化、BOM のみ、NUL 混在、途中で切れた UTF-8
   - 構文誤りを含むソース、閉じない文字列リテラル、閉じないコメント
@@ -27,7 +27,7 @@ tree-sitter を採用した代償として、製品成果物にネイティブ �
 
 ## 完了条件
 
-- [テスト](../docs/testing.md) T-5 の表の各行に対応するテストがあり、いずれもクラッシュ・フリーズしない
+- [テスト](../../docs/testing.md) T-5 の表の各行に対応するテストがあり、いずれもクラッシュ・フリーズしない
 - fuzz が既定の実行時間内で異常終了せず、失敗時に入力を再現できる
 - 上限による打ち切りが診断として現れ、黙って結果が欠けない
 - macOS と Windows の両方で実行される

@@ -95,6 +95,18 @@ let prepareRoot (directory: string) : Result<string, PathError> =
 let resolveRoot (directory: string) =
   Path.TrimEndingDirectorySeparator(Path.GetFullPath directory)
 
+/// Publish a completed sibling temporary file without deleting an open destination.
+/// The caller validates paths and owns the temporary file until this succeeds.
+let replaceFile (temporary: string) (destination: string) =
+  if File.Exists destination then
+    File.Replace(temporary, destination, null)
+  else
+    try
+      File.Move(temporary, destination)
+    with :? IOException when File.Exists destination ->
+      // Another exporter may have completed the first publication concurrently.
+      File.Replace(temporary, destination, null)
+
 let private isHexLower (c: char) = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 /// セグメント ファイル名に許可する文字。区切り、ドライブ名、代替データ ストリーム、

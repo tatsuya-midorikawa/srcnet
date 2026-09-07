@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Extraction/`（新規）, `src/Srcnet.Discovery/Walk.fs:56-74`, `src/Srcnet.Discovery/Content.fs:52-193`, `src/Srcnet.Cli/Commands.fs:144-197`
 - 依存: なし
-- 参照: [抽出](../docs/extraction.md) 2, [ロードマップ](../docs/roadmap.md) M2, [テスト](../docs/testing.md) T-1
+- 参照: [抽出](../../docs/extraction.md) 2, [ロードマップ](../../docs/roadmap.md) M2, [テスト](../../docs/testing.md) T-1
 
 ## 背景
 

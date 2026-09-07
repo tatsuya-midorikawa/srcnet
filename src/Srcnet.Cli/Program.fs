@@ -42,7 +42,7 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
 
       return Commands.ExitCode.Success
     | Ok(Args.Index arguments) -> return! Commands.index arguments cancellation
-    | Ok(Args.Stats arguments) -> return Commands.stats arguments
+    | Ok(Args.Stats arguments) -> return Commands.statsWithCancellation arguments cancellation
     | Ok(Args.Verify arguments) -> return! Commands.verify arguments cancellation
     | Ok(Args.Search arguments) -> return QueryCommands.search arguments cancellation
     | Ok(Args.Show arguments) -> return QueryCommands.show arguments cancellation

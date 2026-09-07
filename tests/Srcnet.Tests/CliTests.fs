@@ -52,6 +52,21 @@ let ``フラグの次の位置引数は消費しない`` () =
   Assert.True parsed.FollowSymbolicLinks
 
 [<Fact>]
+let ``値を取らないフラグへのインライン値を黙って有効化しない`` () =
+  for command, flag in
+    [ [ "index"; "repo" ], "--follow-symlinks"
+      [ "index"; "repo" ], "--no-gitignore"
+      [ "index"; "repo" ], "--allow-partial"
+      [ "search"; "name" ], "--ignore-case"
+      [ "search"; "name" ], "--json"
+      [ "verify" ], "--deterministic" ] do
+    for value in [ "false"; "true"; "" ] do
+      Assert.Equal(
+        Error(Args.InvalidValue(flag, value)),
+        parse (command @ [ $"{flag}={value}" ])
+      )
+
+[<Fact>]
 let ``未知のオプションは誤りとして報告する`` () =
   Assert.Equal(Error(Args.UnknownOption "--bogus"), parse [ "index"; "repo"; "--bogus" ])
 

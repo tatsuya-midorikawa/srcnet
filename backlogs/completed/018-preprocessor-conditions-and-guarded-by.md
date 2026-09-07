@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Extraction/`（新規）, `src/Srcnet.Core/Graph.fs:10-27,86-105,282-306`
 - 依存: 017
-- 参照: [抽出](../docs/extraction.md) 4.1, [グラフ モデル](../docs/graph-model.md) 1, 2
+- 参照: [抽出](../../docs/extraction.md) 4.1, [グラフ モデル](../../docs/graph-model.md) 1, 2
 
 ## 背景
 

@@ -104,14 +104,19 @@ module Limits =
   [<Literal>]
   let GeneratedMarkerScanBytes = 8_192
 
+/// Keep truncated text valid UTF-16, including supplementary CJK identifiers.
+let internal truncateText (limit: int) (text: string) =
+  if text.Length <= limit then text
+  else
+    let length =
+      if limit > 0 && System.Char.IsHighSurrogate text[limit - 1] then limit - 1
+      else limit
+
+    text.Substring(0, length)
+
 /// 名前として受け入れる文字列へ整える。NFC 正規化し、上限で切り詰める。
 let internal normalizeName (raw: string) =
-  if raw.Length = 0 then ""
-  else
-    let normalized = Srcnet.Text.Unicode.normalize raw
-
-    if normalized.Length <= Limits.MaxNameLength then normalized
-    else normalized.Substring(0, Limits.MaxNameLength)
+  Srcnet.Text.Unicode.normalize raw |> truncateText Limits.MaxNameLength
 
 /// 原文中のバイト範囲。`Start = End` は「範囲なし」を表す。
 [<Struct; StructuralEquality; StructuralComparison>]

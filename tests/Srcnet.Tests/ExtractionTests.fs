@@ -6,6 +6,8 @@
 module Srcnet.Tests.ExtractionTests
 
 open System
+open System.Reflection
+open System.Runtime.InteropServices
 open System.Text
 open System.Threading
 open Xunit
@@ -13,6 +15,12 @@ open Srcnet.Core.Graph
 open Srcnet.Extraction
 
 let private utf8 (text: string) = Encoding.UTF8.GetBytes text
+
+let private extractText tier language text =
+  let source = utf8 text
+  let options = { Extractor.ExtractionOptions.defaults with Tier = tier }
+  let extractor = Extractor.Extractor options
+  extractor.Extract(language, "regression.cc", source, source.Length, NodeFlags.None, CancellationToken.None)
 
 let private cSource =
   utf8
@@ -352,3 +360,226 @@ let ``F# のシグネチャ ファイルを誤りなく解析できる`` () =
         use tree = tree
         let root = SyntaxTree.root tree
         Assert.False(root.HasError, $"解析に失敗しました: {sample}")
+
+[<Fact>]
+let ``T1 はコメントで区切られた取り込みと定義を保持する`` () =
+  let result =
+    extractText
+      Model.LineOriented
+      Language.C
+      "/* header */ #include \"first.h\"\n#include /* path */ \"second.h\"\n# /* directive */ include <third.h>\n#define /* name */ VALUE 1\nstruct /* name */ Point {};\n"
+
+  Assert.Equal<string[]>([| "first.h"; "second.h"; "third.h" |], result.References |> Array.map _.Target)
+  Assert.Equal<string[]>([| "VALUE"; "Point" |], result.Symbols |> Array.map _.Name)
+  Assert.All(result.References, fun reference -> Assert.True(reference.EndByte > reference.StartByte))
+
+[<Fact>]
+let ``生成物マーカーの探索は先頭バイト数の上限を超えない`` () =
+  let prefix = "// " + String(' ', Model.Limits.GeneratedMarkerScanBytes)
+  let result = extractText Model.LineOriented Language.C (prefix + "DO NOT EDIT\nstruct P {};\n")
+  Assert.Equal(NodeFlags.None, result.FileFlags &&& NodeFlags.Generated)
+
+[<Fact>]
+let ``名前と根拠コメントの上限はサロゲートペアを分断しない`` () =
+  let name = String('x', Model.Limits.MaxNameLength - 1) + "\U00020000"
+  let note = String('x', Model.Limits.MaxNoteTextLength - 1) + "\U00020000"
+  let result = extractText Model.LineOriented Language.C $"// NOTE: {note}\nstruct {name} {{}};\n"
+  let strictUtf8 = UTF8Encoding(false, true)
+
+  for symbol in result.Symbols do
+    Assert.True(symbol.QualifiedName.Length <= Model.Limits.MaxNameLength)
+    Assert.True(symbol.Name.Length <= Model.Limits.MaxNameLength)
+    strictUtf8.GetBytes symbol.QualifiedName |> ignore
+    strictUtf8.GetBytes symbol.Name |> ignore
+
+[<Fact>]
+let ``elif と else は先行するすべての枝を除外する`` () =
+  if Parsing.supports Language.C then
+    let result =
+      extractText Model.Syntax Language.C
+        "#if A\nint a;\n#elif B\nint b;\n#elif C\nint c;\n#else\nint d;\n#endif\n"
+
+    Assert.Equal<string[]>(
+      [| "A"; "!(A) && (B)"; "!(A) && !(B) && (C)"; "!(A) && !(B) && !(C)" |],
+      result.Symbols |> Array.map _.Condition
+    )
+
+[<Fact>]
+let ``条件の合成は演算子の優先順位と elifndef の否定を保つ`` () =
+  if Parsing.supports Language.Cpp then
+    let result =
+      extractText Model.Syntax Language.Cpp
+        "#if A || B\n#if C\nint nested;\n#endif\n#endif\n#if X\nint a;\n#elifndef Y\nint b;\n#endif\n"
+
+    let find name = result.Symbols |> Array.filter (fun symbol -> symbol.Name = name) |> Assert.Single
+    Assert.Equal("(A || B) && (C)", (find "nested").Condition)
+    Assert.Equal("!(X) && (!defined(Y))", (find "b").Condition)
+
+[<Fact>]
+let ``関数ポインタと複数の宣言子を実際の種別で抽出する`` () =
+  if Parsing.supports Language.Cpp then
+    let result =
+      extractText Model.Syntax Language.Cpp
+        "typedef int *Pointer, (*Callback)(int); struct X { int a, b; int (*callback)(int), method(); }; int (*global_callback)(int); int *returns_pointer(); int (*returns_callback())(int);\n"
+
+    for name, kind in
+      [ "Pointer", Type
+        "Callback", Type
+        "a", Field
+        "b", Field
+        "callback", Field
+        "method", Function
+        "global_callback", Variable
+        "returns_pointer", Function
+        "returns_callback", Function ] do
+      let symbol = result.Symbols |> Array.filter (fun symbol -> symbol.Name = name) |> Assert.Single
+      Assert.Equal(kind, symbol.Kind)
+
+[<Fact>]
+let ``名前空間の変数と修飾された宣言を欠落させない`` () =
+  if Parsing.supports Language.Cpp then
+    let result =
+      extractText Model.Syntax Language.Cpp
+        "namespace n { extern int declared; int defined; static int local; static int helper(); } int n::function(); extern int external; extern int initialized = 1; void f() { int local; static int retained; }\n"
+
+    for qualified, declaration in
+      [ "n::declared", true
+        "n::defined", false
+        "regression.cc::n::local", false
+        "regression.cc::n::helper", true
+        "n::function", true
+        "external", true
+        "initialized", false
+        "f::retained", false ] do
+      let symbol =
+        result.Symbols |> Array.filter (fun symbol -> symbol.QualifiedName = qualified) |> Assert.Single
+
+      Assert.Equal(declaration, ((symbol.Flags &&& NodeFlags.DeclarationOnly) <> NodeFlags.None))
+      Assert.Equal(not declaration, ((symbol.Flags &&& NodeFlags.Definition) <> NodeFlags.None))
+
+    Assert.DoesNotContain(result.Symbols, fun symbol -> symbol.QualifiedName = "f::local")
+
+[<Fact>]
+let ``無名名前空間だけが内部リンケージを引き継ぐ`` () =
+  if Parsing.supports Language.Cpp then
+    let result =
+      extractText Model.Syntax Language.Cpp
+        "namespace n { namespace { int hidden(); int value; } struct X { static int member() { return 1; } }; int visible(); }\n"
+
+    for qualified in [ "regression.cc::n::hidden"; "regression.cc::n::value" ] do
+      let symbol =
+        result.Symbols |> Array.filter (fun symbol -> symbol.QualifiedName = qualified) |> Assert.Single
+      Assert.NotEqual(NodeFlags.None, symbol.Flags &&& NodeFlags.InternalLinkage)
+
+    for qualified in [ "n::X::member"; "n::visible" ] do
+      let symbol =
+        result.Symbols |> Array.filter (fun symbol -> symbol.QualifiedName = qualified) |> Assert.Single
+      Assert.Equal(NodeFlags.None, symbol.Flags &&& NodeFlags.InternalLinkage)
+
+[<Fact>]
+let ``匿名構造体の typedef はフィールドの親になる`` () =
+  if Parsing.supports Language.C then
+    let result = extractText Model.Syntax Language.C "typedef struct { int x, y; } Point;\n"
+    let index, point =
+      result.Symbols |> Array.indexed |> Array.filter (fun (_, symbol) -> symbol.Name = "Point") |> Assert.Single
+
+    Assert.Equal(Type, point.Kind)
+
+    for name in [ "x"; "y" ] do
+      let field = result.Symbols |> Array.filter (fun symbol -> symbol.Name = name) |> Assert.Single
+      Assert.Equal(index, field.Parent)
+      Assert.Equal("Point::" + name, field.QualifiedName)
+
+[<Fact>]
+let ``マクロ形式の include 候補を T1 と T2 の両方で保持する`` () =
+  for tier in [ Model.LineOriented; Model.Syntax ] do
+    let result =
+      extractText tier Language.C "#include HEADER_FILE\n#include SELECT(\"header.h\")\n"
+
+    Assert.Equal<string[]>(
+      [| "HEADER_FILE"; "SELECT(\"header.h\")" |],
+      result.References |> Array.map _.Target
+    )
+
+[<Fact>]
+let ``前方宣言と型の使用を区別する`` () =
+  if Parsing.supports Language.Cpp then
+    let result =
+      extractText Model.Syntax Language.Cpp
+        "struct S; enum E : int; struct S *value; enum E color;\n#ifdef FEATURE\nclass C;\n#endif\n"
+
+    for name in [ "S"; "E"; "C" ] do
+      let symbol =
+        result.Symbols |> Array.filter (fun symbol -> symbol.Kind = Type && symbol.Name = name) |> Assert.Single
+
+      Assert.NotEqual(NodeFlags.None, symbol.Flags &&& NodeFlags.DeclarationOnly)
+      Assert.Equal(NodeFlags.None, symbol.Flags &&& NodeFlags.Definition)
+
+    let referenced =
+      result.References |> Array.filter (fun reference -> reference.Kind = References) |> Array.map _.Target
+
+    Assert.Equal<string[]>([| "S"; "E" |], referenced)
+
+[<Fact>]
+let ``構成マクロの既定値をインクルードガードと誤認しない`` () =
+  if Parsing.supports Language.C then
+    let result =
+      extractText Model.Syntax Language.C
+        "#ifndef FEATURE\n#define FEATURE 1\nint optional;\n#endif\n"
+
+    Assert.All(result.Symbols, fun symbol -> Assert.Equal("!defined(FEATURE)", symbol.Condition))
+
+    let nested =
+      extractText Model.Syntax Language.CHeader
+        "#ifdef OUTER\n#ifndef FEATURE\n#define FEATURE 1\nint optional;\n#endif\n#endif\n"
+
+    Assert.All(
+      nested.Symbols,
+      fun symbol -> Assert.Equal("(defined(OUTER)) && (!defined(FEATURE))", symbol.Condition)
+    )
+
+[<Fact>]
+let ``数値や文字定数を構成シンボルとして抽出しない`` () =
+  if Parsing.supports Language.C then
+    let result =
+      extractText Model.Syntax Language.C
+        "#if VERSION >= 0x10UL && LETTER == 'A' && ENABLED\nint optional;\n#endif\n"
+
+    Assert.Equal<string[]>(
+      [| "ENABLED"; "LETTER"; "VERSION" |],
+      result.References |> Array.filter (fun reference -> reference.Kind = GuardedBy) |> Array.map _.Target
+    )
+
+[<Fact>]
+let ``条件の識別子も NFC と補助面の文字を保持する`` () =
+  if Parsing.supports Language.C then
+    let result =
+      extractText Model.Syntax Language.C
+        "#if defined(CAFe\u0301) && defined(CONFIG_\U00020000)\nint optional;\n#endif\n"
+
+    Assert.Equal<string[]>(
+      [| "CAF\u00E9"; "CONFIG_\U00020000" |],
+      result.References |> Array.filter (fun reference -> reference.Kind = GuardedBy) |> Array.map _.Target
+    )
+
+[<Fact>]
+let ``単独の CR 改行でも解析と行番号が一致し原文を変更しない`` () =
+  if Parsing.supports Language.C then
+    let source = utf8 "#define VALUE 1\rint second;\r\nint third;\n"
+    let original = Array.copy source
+    let extractor = Extractor.Extractor Extractor.ExtractionOptions.defaults
+    let result = extractor.Extract(Language.C, "lines.c", source, source.Length, NodeFlags.None, CancellationToken.None)
+    Assert.Equal<byte[]>(original, source)
+    Assert.Equal(ValueSome 3, result.LineCount)
+
+    for name, line in [ "VALUE", 1; "second", 2; "third", 3 ] do
+      let symbol = result.Symbols |> Array.filter (fun symbol -> symbol.Name = name) |> Assert.Single
+      Assert.Equal(line, symbol.StartLine)
+      Assert.InRange(symbol.StartByte, 0, source.Length)
+      Assert.InRange(symbol.EndByte, symbol.StartByte, source.Length)
+
+[<Fact>]
+let ``構文解析ライブラリは製品アセンブリの場所だけから読み込む`` () =
+  let paths = typeof<SyntaxTree.Tree>.Assembly.GetCustomAttribute<DefaultDllImportSearchPathsAttribute>()
+  Assert.NotNull paths
+  Assert.Equal(DllImportSearchPath.AssemblyDirectory, paths.Paths)

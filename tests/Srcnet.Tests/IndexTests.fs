@@ -1005,3 +1005,235 @@ let ``リンクである staging へは書き出さない`` () =
     | Ok _ -> Assert.False(Artifact.isLink staging)
     | Error(Artifact.LinkRejected _) -> ()
     | Error error -> failwith $"想定と異なる拒否理由です: {Artifact.PathError.describe error}"
+
+let private rewriteSegment
+  (output: string)
+  (manifest: Manifest.Manifest)
+  (suffix: string)
+  (edit: byte[] -> byte[])
+  =
+  let segments =
+    manifest.Segments
+    |> Array.map (fun descriptor ->
+      if not (descriptor.Name.EndsWith(suffix, StringComparison.Ordinal)) then descriptor
+      else
+        let path = Path.Combine(output, descriptor.Name.Replace('/', Path.DirectorySeparatorChar))
+        let bytes = File.ReadAllBytes path |> edit
+        File.WriteAllBytes(path, bytes)
+
+        { descriptor with
+            ByteLength = int64 bytes.Length
+            Checksum = Convert.ToHexStringLower(Hashing.hash (ReadOnlySpan bytes)) })
+
+  match Manifest.write output { manifest with Segments = segments } with
+  | Ok() -> ()
+  | Error error -> failwith (Artifact.PathError.describe error)
+
+let private assertInvalidArtifact output =
+  match Verify.run output CancellationToken.None with
+  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Ok report -> Assert.False(report.IsValid, "Corrupt artifact was accepted")
+
+[<Fact>]
+let ``verify rejects missing string descriptors even when the file remains`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  let segments = manifest.Segments |> Array.filter (fun item -> not (item.Name.EndsWith(".strings", StringComparison.Ordinal)))
+
+  match Manifest.write output.Path { manifest with Segments = segments } with
+  | Error error -> failwith (Artifact.PathError.describe error)
+  | Ok() -> assertInvalidArtifact output.Path
+
+[<Fact>]
+let ``verify rejects a checksummed segment with the wrong kind`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+
+  rewriteSegment output.Path manifest ".nodes" (fun bytes ->
+    let length = uint64 (bytes.Length - Format.HeaderLength)
+
+    Format.writeHeader
+      (Span bytes)
+      { Kind = Format.Strings
+        PrimaryCount = uint64 manifest.Counts.Nodes
+        SecondaryCount = length
+        RecordLength = 0u
+        PayloadLength = length }
+
+    bytes)
+
+  assertInvalidArtifact output.Path
+
+[<Fact>]
+let ``verify rejects node counts that disagree with the manifest`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+
+  rewriteSegment output.Path manifest ".nodes" (fun bytes ->
+    let shortened = bytes[.. bytes.Length - Format.RecordLength - 1]
+
+    Format.writeHeader
+      (Span shortened)
+      { Kind = Format.Nodes
+        PrimaryCount = uint64 (manifest.Counts.Nodes - 1)
+        SecondaryCount = 0UL
+        RecordLength = uint32 Format.RecordLength
+        PayloadLength = uint64 (shortened.Length - Format.HeaderLength) }
+
+    shortened)
+
+  assertInvalidArtifact output.Path
+
+[<Fact>]
+let ``verify rejects string tables whose first offset is not zero`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+
+  rewriteSegment output.Path manifest ".stroffsets" (fun bytes ->
+    for index in 0 .. manifest.Counts.Strings do
+      let offset = Span(bytes, Format.HeaderLength + index * 8, 8)
+      if Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian offset = 0UL then
+        Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(offset, 1UL)
+    bytes)
+
+  assertInvalidArtifact output.Path
+
+[<Fact>]
+let ``verify rejects invalid UTF8 even when its checksum matches`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  rewriteSegment output.Path manifest ".strings" (fun bytes ->
+    bytes[Format.HeaderLength] <- 0xFFuy
+    bytes)
+  assertInvalidArtifact output.Path
+
+[<Fact>]
+let ``manifest structural counts cannot wrap around Int32`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  indexedWorkspace workspace output |> ignore
+
+  tamperManifest output.Path (fun text ->
+    text.Replace("\"files\": 1", "\"files\": 2147483647")
+        .Replace("\"directories\": 0", "\"directories\": 2147483647"))
+
+  match Manifest.read output.Path with
+  | Error(Manifest.Malformed _) -> ()
+  | other -> failwith $"Accepted overflowing structural counts: {other}"
+
+[<Fact>]
+let ``republishing does not silently reuse same-sized corrupt data`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  let target = Path.Combine(output.Path, manifest.Segments[0].Name.Replace('/', Path.DirectorySeparatorChar))
+  let bytes = File.ReadAllBytes target
+  bytes[bytes.Length - 1] <- bytes[bytes.Length - 1] ^^^ 0xFFuy
+  File.WriteAllBytes(target, bytes)
+
+  match Manifest.generationIn manifest with
+  | ValueNone -> failwith "Expected a generation"
+  | ValueSome generation ->
+    Assert.True(Manifest.publish output.Path generation manifest |> Result.isError)
+
+[<Fact>]
+let ``publication does not delete unrelated entries in the segments directory`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  indexedWorkspace workspace output |> ignore
+  let unrelated = Path.Combine(output.Path, Artifact.SegmentDirectory, "notes.txt")
+  File.WriteAllText(unrelated, "keep")
+  workspace.Write("b.c", "int b;\n")
+  indexInto workspace output.Path 1 |> ignore
+  Assert.Equal("keep", File.ReadAllText unrelated)
+
+[<Fact>]
+let ``statistics reject negative sizes and unknown encoding codes`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  rewriteSegment output.Path manifest ".files" (fun bytes ->
+    Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(
+      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8), -1L)
+    bytes)
+  Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError)
+
+  rewriteSegment output.Path manifest ".files" (fun bytes ->
+    Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(
+      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8), 0L)
+    Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
+      Span(bytes, Format.HeaderLength + Format.FileRecord.EncodingOffset, 2), UInt16.MaxValue)
+    bytes)
+  Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError)
+
+[<Fact>]
+let ``statistics observe cancellation even for empty tables`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexInto workspace output.Path 1
+  use cancellation = new CancellationTokenSource()
+  cancellation.Cancel()
+
+  Assert.Throws<OperationCanceledException>(fun () ->
+    Stats.readFileStatisticsWithCancellation output.Path manifest cancellation.Token |> ignore)
+  |> ignore
+  Assert.Throws<OperationCanceledException>(fun () ->
+    Stats.readReferenceStatisticsWithCancellation output.Path manifest cancellation.Token |> ignore)
+  |> ignore
+
+[<Fact>]
+let ``a grammar version difference is advisory rather than corruption`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  let recorded: Manifest.GrammarRecord =
+    { Language = "c"; Version = "different"; Sha256 = String('0', 64) }
+
+  match Manifest.write output.Path { manifest with Options = { manifest.Options with Grammars = [| recorded |] } } with
+  | Error error -> failwith (Artifact.PathError.describe error)
+  | Ok() ->
+    match Verify.run output.Path CancellationToken.None with
+    | Error error -> failwith (Manifest.ManifestError.describe error)
+    | Ok report ->
+      Assert.True report.IsValid
+      Assert.Contains(report.Issues, function Verify.GrammarVersionDiffers _ -> true | _ -> false)
+
+[<Fact>]
+let ``manifest kind totals and CSR roles cannot hide graph edges`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  let repeated = Array.append manifest.Counts.EdgeKinds [| manifest.Counts.EdgeKinds[0] |]
+  let missingReverse =
+    manifest.Segments
+    |> Array.filter (fun descriptor -> not (descriptor.Name.EndsWith(".redges.CONTAINS", StringComparison.Ordinal)))
+
+  for modified in
+    [ { manifest with Counts = { manifest.Counts with EdgeKinds = Array.empty } }
+      { manifest with Counts = { manifest.Counts with NodeKinds = Array.empty } }
+      { manifest with Counts = { manifest.Counts with EdgeKinds = repeated } }
+      { manifest with Segments = missingReverse } ] do
+    match Manifest.write output.Path modified with
+    | Error error -> failwith (Artifact.PathError.describe error)
+    | Ok() ->
+      match Manifest.read output.Path with
+      | Error(Manifest.Malformed _) -> ()
+      | other -> failwith $"Inconsistent kind metadata was accepted: {other}"
+      Assert.True(Query.GraphView.Open output.Path |> Result.isError)
+
+[<Fact>]
+let ``verify validates every lookup posting rather than only its checksum`` () =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  let manifest = indexedWorkspace workspace output
+  rewriteSegment output.Path manifest ".lookup" (fun bytes ->
+    let keys = Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8))
+    let first = Format.HeaderLength + Format.Lookup.PreludeLength + int keys * Format.Lookup.KeyLength
+    Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), 3u)
+    bytes)
+  assertInvalidArtifact output.Path

@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Storage/Format.fs:29-46,179-219`, `src/Srcnet.Storage/Writer.fs:162-490`, `src/Srcnet.Extraction/`（新規）
 - 依存: 014
-- 参照: [抽出](../docs/extraction.md) 5, [ストレージ](../docs/storage.md) 3, [グラフ モデル](../docs/graph-model.md) 3
+- 参照: [抽出](../../docs/extraction.md) 5, [ストレージ](../../docs/storage.md) 3, [グラフ モデル](../../docs/graph-model.md) 3
 
 ## 背景
 
@@ -19,7 +19,7 @@ M2 が「抽出した事実」をどこにも残さないと、M3 は同じフ�
   - 対象の生テキストへの文字列参照（修飾名、短い名前、取り込みの綴りのいずれか）
   - 修飾ヒント（囲みスコープ、名前空間、取り込み閉包を引くための材料）
   - 言語、バイト範囲、行番号
-  - 根拠段階の初期値（[抽出](../docs/extraction.md) 5.2 の段階番号。未解決は 0）
+  - 根拠段階の初期値（[抽出](../../docs/extraction.md) 5.2 の段階番号。未解決は 0）
 - `Format.SegmentKind` に参照候補の種別を追加し、`<id>.refs` として書き出す。固定長レコード + 文字列 blob 参照とし、64 バイト境界の整列と件数の不変条件検査（`Format.checkInvariants` 相当）を既存と同じ方式で持つ
 - 並びは決定的にする。ソート キーは「発生元の密インデックス → エッジ種別コード → バイト位置」とする
 - 解決前の確度は `EXTRACTED` とする。`RESOLVED` / `AMBIGUOUS` へ変わるのは M3

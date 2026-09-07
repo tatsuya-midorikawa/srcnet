@@ -105,7 +105,7 @@ def main():
                 query=dict(kind="node", value=nodes[2]["id"], depth=2),
                 totalNodes=101, candidateNodes=10, groupedNodeCount=0, aggregated=False,
                 truncated=True, omittedCount=6, omittedCountIsLowerBound=False,
-                omittedEdgeCount=0, traversalTruncated=False, searchTruncated=False,
+                omittedEdgeCount=0, maxExportEdges=50000, traversalTruncated=False, searchTruncated=False,
                 seedIndex=2, nodes=nodes,
                 edges=[dict(**{"from": 0, "to": 1}, kind="CONTAINS"),
                        dict(**{"from": 1, "to": 2}, kind="DEFINES"),

@@ -149,8 +149,7 @@ let private aggregate (view: Query.GraphView) (maxNodes: int) (cancellation: Can
   let nodes =
     kept
     |> Array.map(fun index ->
-      let node =
-        toExport view read index 0 (view.Neighbors(index, Contains, Query.Outgoing).Length)
+      let node = toExport view read index 0 (view.NeighborCount(index, Contains, false))
 
       { node with
           Distance =
@@ -161,29 +160,46 @@ let private aggregate (view: Query.GraphView) (maxNodes: int) (cancellation: Can
 
   let edges = List<Query.EdgeView>()
   let mutable omittedEdges = 0
+  let mutable examined = 0
+  let mutable truncated = false
+  let mutable index = 0
 
-  for index in 0 .. view.NodeCount - 1 do
+  while index < view.NodeCount && not truncated do
     if index &&& 0xFFFF = 0 then
       cancellation.ThrowIfCancellationRequested()
 
     let kind = (view.Node index).Kind
 
     if kind = Repository || kind = Directory then
-      for target in view.Neighbors(index, Contains, Query.Outgoing) do
-        let targetKind = (view.Node target).Kind
+      let count = view.NeighborCount(index, Contains, false)
+      let mutable position = 0
 
-        if targetKind = Directory || targetKind = Repository then
-          if
-            keptSet.Contains index
-            && keptSet.Contains target
-            && edges.Count < MaxExportEdges
-          then
-            edges.Add
-              { From = index
-                To = target
-                Kind = Contains }
-          else
-            omittedEdges <- omittedEdges + 1
+      while position < count && not truncated do
+        if examined >= Query.MaxExploredEdges then
+          truncated <- true
+        else
+          if examined &&& 1023 = 0 then
+            cancellation.ThrowIfCancellationRequested()
+
+          let target = view.NeighborAt(index, Contains, false, position)
+          examined <- examined + 1
+          position <- position + 1
+          let targetKind = (view.Node target).Kind
+
+          if targetKind = Directory || targetKind = Repository then
+            if
+              keptSet.Contains index
+              && keptSet.Contains target
+              && edges.Count < MaxExportEdges
+            then
+              edges.Add
+                { From = index
+                  To = target
+                  Kind = Contains }
+            else
+              omittedEdges <- omittedEdges + 1
+
+    index <- index + 1
 
   { Nodes = nodes
     Edges = edges.ToArray()
@@ -191,9 +207,13 @@ let private aggregate (view: Query.GraphView) (maxNodes: int) (cancellation: Can
     GroupedNodes = view.NodeCount - total
     OmittedCount = total - nodes.Length
     OmittedEdgeCount = omittedEdges
-    TraversalTruncated = false
-    LowerBound = false
-    Diagnostics = Array.empty }
+    TraversalTruncated = truncated
+    LowerBound = truncated
+    Diagnostics =
+      if truncated then
+        [| $"概要のエッジ走査が上限 {Query.MaxExploredEdges} 件に達しました。省略エッジ数は下限です" |]
+      else
+        Array.empty }
 
 /// 起点を中心にした部分グラフ。深さと件数の両方で範囲を限る。
 let private aroundSeed
@@ -384,15 +404,21 @@ let private writeAtomically (destination: string) (payload: string) (cancellatio
 
   rejectLinks destination
   cancellation.ThrowIfCancellationRequested()
-  let temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp"
+
+  let directory =
+    match Path.GetDirectoryName destination with
+    | null
+    | "" -> "."
+    | parent -> parent
+
+  // Appending a suffix to a valid destination can exceed the file-name limit.
+  let temporary =
+    Path.Combine(directory, "srcnet-" + Guid.NewGuid().ToString("N") + ".tmp")
+
   let mutable owned = false
 
   try
-    match Path.GetDirectoryName destination with
-    | null -> ()
-    | parent ->
-      if parent <> "" then
-        Directory.CreateDirectory parent |> ignore
+    Directory.CreateDirectory directory |> ignore
 
     do
       use stream =
@@ -405,7 +431,7 @@ let private writeAtomically (destination: string) (payload: string) (cancellatio
 
     cancellation.ThrowIfCancellationRequested()
     rejectLinks destination
-    File.Move(temporary, destination, true)
+    Artifact.replaceFile temporary destination
     owned <- false
   finally
     if owned then

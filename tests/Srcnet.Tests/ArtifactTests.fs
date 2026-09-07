@@ -153,3 +153,31 @@ let ``リンクをリンクとして検出する`` () =
 
   if trySymbolicLink fileLink fileTarget false then
     Assert.True(Artifact.isLink fileLink)
+
+[<Fact>]
+let ``only one writer can own an artifact and the lease is reusable`` () =
+  use scratch = new Scratch()
+  let acquire () =
+    match Manifest.acquireWriter scratch.Path with
+    | Ok lease -> lease
+    | Error error -> failwith (Artifact.PathError.describe error)
+
+  do
+    use first = acquire()
+    Assert.True(Manifest.acquireWriter scratch.Path |> Result.isError)
+
+  use next = acquire()
+  Assert.True(File.Exists(Path.Combine(scratch.Path, ".writer.lock")))
+
+[<Fact>]
+let ``linked manifests are rejected instead of reading outside the artifact`` () =
+  use scratch = new Scratch()
+  use outside = new Scratch()
+  let target = Path.Combine(outside.Path, "manifest.json")
+  File.WriteAllText(target, """{"manifestVersion":999}""")
+  let link = Path.Combine(scratch.Path, Manifest.FileName)
+
+  if trySymbolicLink link target false then
+    match Manifest.read scratch.Path with
+    | Error(Manifest.Malformed _) -> ()
+    | other -> failwith $"Manifest link was followed: {other}"

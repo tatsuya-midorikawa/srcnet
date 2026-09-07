@@ -185,7 +185,11 @@ let tryReadHeader (source: ReadOnlySpan<byte>) (fileLength: int64) : Result<Head
       | ValueSome kind ->
         let payloadLength = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(40, 8))
 
-        if uint64 fileLength <> uint64 HeaderLength + payloadLength then
+        if
+          fileLength < 0L
+          || payloadLength > uint64 (Int64.MaxValue - int64 HeaderLength)
+          || uint64 fileLength <> uint64 HeaderLength + payloadLength
+        then
           Error(LengthMismatch(payloadLength, fileLength))
         else
           checkInvariants

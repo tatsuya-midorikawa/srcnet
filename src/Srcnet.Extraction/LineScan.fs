@@ -9,8 +9,10 @@
 module Srcnet.Extraction.LineScan
 
 open System
+open System.Buffers
 open System.Collections.Generic
 open System.Text
+open System.Threading
 open Srcnet.Core.Graph
 open Srcnet.Text
 open Srcnet.Extraction.Model
@@ -380,6 +382,7 @@ type ScanResult =
 type private LineLayout =
   { CodeStart: int
     CodeEnd: int
+    MaskedCode: bool
     CommentStart: int
     CommentEnd: int }
 
@@ -393,11 +396,13 @@ let private layoutOf
   (blockComments: bool)
   (strings: bool)
   (inBlockComment: bool)
+  (code: Span<byte>)
   =
   let length = line.Length
   let mutable blockOpen = inBlockComment
-  let mutable codeStart = if inBlockComment then length else 0
+  let mutable blockStart = if inBlockComment then 0 else -1
   let mutable codeEnd = length
+  let mutable maskedCode = false
   let mutable commentStart = if inBlockComment then 0 else -1
   let mutable commentEnd = if inBlockComment then length else -1
   let mutable index = 0
@@ -409,11 +414,10 @@ let private layoutOf
     if blockOpen then
       if b = '*'B && index + 1 < length && line[index + 1] = '/'B then
         blockOpen <- false
-        commentEnd <- index + 2
-        // コメントが行内で閉じた場合、残りはコードとして扱う。
-        if codeStart >= length then
-          codeStart <- index + 2
-          codeEnd <- length
+        if commentStart = blockStart then commentEnd <- index + 2
+        if not maskedCode then line.CopyTo code
+        code.Slice(blockStart, index + 2 - blockStart).Fill ' 'B
+        maskedCode <- true
 
         index <- index + 2
       else index <- index + 1
@@ -424,12 +428,12 @@ let private layoutOf
         index <- index + 1
     elif blockComments && b = '/'B && index + 1 < length && line[index + 1] = '*'B then
       blockOpen <- true
+      blockStart <- index
 
       if commentStart < 0 then
         commentStart <- index
         commentEnd <- length
 
-      if codeEnd > index && index >= codeStart then codeEnd <- index
       index <- index + 2
     elif strings && (b = '"'B || b = '\''B) then
       quote <- b
@@ -447,13 +451,19 @@ let private layoutOf
           commentStart <- index
           commentEnd <- length
 
-        if codeEnd > index && index >= codeStart then codeEnd <- index
+        codeEnd <- index
         index <- length
       else index <- index + 1
 
+  if blockOpen then
+    if not maskedCode then line.CopyTo code
+    code.Slice(blockStart, length - blockStart).Fill ' 'B
+    maskedCode <- true
+
   let layout =
-    { CodeStart = min codeStart length
-      CodeEnd = max (min codeEnd length) (min codeStart length)
+    { CodeStart = 0
+      CodeEnd = codeEnd
+      MaskedCode = maskedCode
       CommentStart = commentStart
       CommentEnd = if commentStart < 0 then -1 else min commentEnd length }
 
@@ -462,7 +472,13 @@ let private layoutOf
 /// テキスト ファイルを行単位で走査し、取り込み・定義候補・根拠コメントを抽出する。
 ///
 /// `source` は復号済みの UTF-8 バイト列。結果の位置は `source` 内のバイト位置である。
-let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeFlags) : ScanResult =
+let private runCore
+  (language: Language)
+  (source: ReadOnlySpan<byte>)
+  (inheritedFlags: NodeFlags)
+  (cancellation: CancellationToken)
+  (codeBuffer: byte[])
+  : ScanResult =
   let symbols = List<ExtractedSymbol>()
   let references = List<ExtractedReference>()
   let rules = definitionRules language
@@ -485,6 +501,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
   let mutable inBlockComment = false
 
   while position < source.Length && lineNumber < Limits.MaxLines do
+    cancellation.ThrowIfCancellationRequested()
     let remaining = source.Slice position
     let breakIndex = remaining.IndexOfAny('\n'B, '\r'B)
     let rawLength = if breakIndex < 0 then remaining.Length else breakIndex
@@ -510,7 +527,9 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
     let line = remaining.Slice(0, scanLength)
     lineNumber <- lineNumber + 1
 
-    let struct (layout, blockOpen) = layoutOf line markers blockComments strings inBlockComment
+    let struct (layout, blockOpen) =
+      layoutOf line markers blockComments strings inBlockComment (Span(codeBuffer, 0, scanLength))
+
     inBlockComment <- blockOpen
 
     let codeStart = layout.CodeStart
@@ -526,7 +545,8 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
       && layout.CommentStart >= 0
     then
       let folded =
-        Unicode.caseFold (textOf source (lineStart + layout.CommentStart) (lineStart + layout.CommentEnd))
+        let finish = min (lineStart + layout.CommentEnd) Limits.GeneratedMarkerScanBytes
+        Unicode.caseFold (textOf source (lineStart + layout.CommentStart) finish)
 
       let mutable markerIndex = 0
 
@@ -545,9 +565,7 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
           let raw = textOf source (lineStart + bodyFrom) (lineStart + layout.CommentEnd)
           let trimmed = raw.TrimEnd([| ' '; '\t'; '*'; '/'; '\r' |])
 
-          let body =
-            if trimmed.Length <= Limits.MaxNoteTextLength then trimmed
-            else trimmed.Substring(0, Limits.MaxNoteTextLength)
+          let body = truncateText Limits.MaxNoteTextLength trimmed
 
           let qualified = if body = "" then tag else tag + ": " + body
 
@@ -566,7 +584,10 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
               Condition = "" }
 
     if hasCode then
-      let code = line.Slice(0, codeEnd)
+      let code =
+        if layout.MaskedCode then ReadOnlySpan(codeBuffer, 0, codeEnd)
+        else line.Slice(0, codeEnd)
+
       let first = skipBlanks code codeStart
 
       // --- 取り込み ---
@@ -591,7 +612,12 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
 
             let spelling =
               match importRule.Style with
-              | Preprocessor
+              | Preprocessor ->
+                let start = skipBlanks code after
+
+                if start < code.Length && (code[start] = '"'B || code[start] = '<'B) then
+                  quotedSpelling code start
+                else bareSpelling code start
               | Quoted -> quotedSpelling code after
               | Dotted -> dottedSpelling code after
               | ScopedPath -> scopedSpelling code after
@@ -804,4 +830,23 @@ let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeF
     References = references.ToArray()
     Generated = generated
     Truncated = truncated
-    LineCount = lineNumber }
+    LineCount = if position < source.Length then Decoding.countLines source else lineNumber }
+
+let runWithCancellation
+  (language: Language)
+  (source: ReadOnlySpan<byte>)
+  (inheritedFlags: NodeFlags)
+  (cancellation: CancellationToken)
+  =
+  cancellation.ThrowIfCancellationRequested()
+  let buffer = ArrayPool<byte>.Shared.Rent(min source.Length Limits.MaxLineBytes)
+
+  try
+    let result = runCore language source inheritedFlags cancellation buffer
+    cancellation.ThrowIfCancellationRequested()
+    result
+  finally
+    ArrayPool<byte>.Shared.Return buffer
+
+let run (language: Language) (source: ReadOnlySpan<byte>) (inheritedFlags: NodeFlags) =
+  runWithCancellation language source inheritedFlags CancellationToken.None

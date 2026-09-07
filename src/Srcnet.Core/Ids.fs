@@ -68,13 +68,18 @@ module NodeId =
     BinaryPrimitives.WriteUInt64BigEndian(destination.Slice 8, id.Low)
 
   let private hexValue (c: char) =
-    if c >= '0' && c <= '9' then ValueSome(int c - int '0')
-    elif c >= 'a' && c <= 'f' then ValueSome(int c - int 'a' + 10)
-    elif c >= 'A' && c <= 'F' then ValueSome(int c - int 'A' + 10)
-    else ValueNone
+    if c >= '0' && c <= '9' then
+      ValueSome(int c - int '0')
+    elif c >= 'a' && c <= 'f' then
+      ValueSome(int c - int 'a' + 10)
+    elif c >= 'A' && c <= 'F' then
+      ValueSome(int c - int 'A' + 10)
+    else
+      ValueNone
 
   let tryParse (text: string) =
-    if text.Length <> 32 then ValueNone
+    if text.Length <> 32 then
+      ValueNone
     else
       let mutable high = 0UL
       let mutable low = 0UL
@@ -84,10 +89,15 @@ module NodeId =
         match hexValue text[i] with
         | ValueNone -> ok <- false
         | ValueSome digit ->
-          if i < 16 then high <- (high <<< 4) ||| uint64 digit
-          else low <- (low <<< 4) ||| uint64 digit
+          if i < 16 then
+            high <- (high <<< 4) ||| uint64 digit
+          else
+            low <- (low <<< 4) ||| uint64 digit
 
-      if ok then ValueSome { High = high; Low = low } else ValueNone
+      if ok then
+        ValueSome { High = high; Low = low }
+      else
+        ValueNone
 
 /// 解析ルートの論理名。絶対パスを含めないことで、成果物が実行環境に依存しなくなる。
 [<Struct; StructuralEquality; StructuralComparison>]
@@ -107,6 +117,7 @@ module RepositoryId =
     | Empty
     | ContainsSeparator
     | ContainsControlCharacter
+    | InvalidUnicode
     | TooLong
 
   /// 生成物のファイル名には使わないが、識別子として扱いやすい長さに制限する。
@@ -118,21 +129,33 @@ module RepositoryId =
     | Empty -> "リポジトリ ID が空です"
     | ContainsSeparator -> "リポジトリ ID にパス区切りを含められません"
     | ContainsControlCharacter -> "リポジトリ ID に制御文字を含められません"
+    | InvalidUnicode -> "リポジトリ ID に対になっていないサロゲートを含められません"
     | TooLong -> "リポジトリ ID が長すぎます"
 
   let tryCreate (raw: string) =
-    let normalized = Unicode.normalize raw
-
-    if normalized.Length = 0 then Error Empty
-    elif normalized.Length > MaxLength then Error TooLong
-    elif normalized.IndexOf('/') >= 0 || normalized.IndexOf('\\') >= 0 then Error ContainsSeparator
+    if Unicode.hasUnpairedSurrogate raw then
+      Error InvalidUnicode
     else
-      let mutable hasControl = false
 
-      for c in normalized do
-        if c < ' ' || c = '\u007F' then hasControl <- true
+      let normalized = Unicode.normalize raw
 
-      if hasControl then Error ContainsControlCharacter else Ok(RepositoryId normalized)
+      if normalized.Length = 0 then
+        Error Empty
+      elif normalized.Length > MaxLength then
+        Error TooLong
+      elif normalized.IndexOf('/') >= 0 || normalized.IndexOf('\\') >= 0 then
+        Error ContainsSeparator
+      else
+        let mutable hasControl = false
+
+        for c in normalized do
+          if c < ' ' || c = '\u007F' then
+            hasControl <- true
+
+        if hasControl then
+          Error ContainsControlCharacter
+        else
+          Ok(RepositoryId normalized)
 
   let value (id: RepositoryId) = id.Value
 
@@ -158,27 +181,32 @@ type NodeIdBuilder() =
       buffer <- grown
 
   let appendByte (value: byte) =
-    ensureCapacity (length + 1)
+    ensureCapacity(length + 1)
     buffer[length] <- value
     length <- length + 1
 
   let appendUInt32 (value: uint32) =
-    ensureCapacity (length + 4)
+    ensureCapacity(length + 4)
     BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, length, 4), value)
     length <- length + 4
 
   let appendLengthPrefixed (text: string) =
     let maxBytes = Encoding.UTF8.GetMaxByteCount text.Length
-    ensureCapacity (length + 4 + maxBytes)
-    let written = Encoding.UTF8.GetBytes(text.AsSpan(), Span(buffer, length + 4, buffer.Length - length - 4))
+    ensureCapacity(length + 4 + maxBytes)
+
+    let written =
+      Encoding.UTF8.GetBytes(text.AsSpan(), Span(buffer, length + 4, buffer.Length - length - 4))
+
     BinaryPrimitives.WriteUInt32LittleEndian(Span(buffer, length, 4), uint32 written)
     length <- length + 4 + written
 
-  member _.Compute(kind: NodeKind, repository: RepositoryId, path: LogicalPath, qualifiedName: string, ordinal: uint32) =
+  member _.Compute
+    (kind: NodeKind, repository: RepositoryId, path: LogicalPath, qualifiedName: string, ordinal: uint32)
+    =
     ObjectDisposedException.ThrowIf(disposed, typeof<NodeIdBuilder>)
     length <- 0
     appendByte SchemeVersion
-    appendByte (NodeKind.toCode kind)
+    appendByte(NodeKind.toCode kind)
     appendLengthPrefixed repository.Value
     appendLengthPrefixed path.Value
     appendLengthPrefixed qualifiedName
@@ -186,7 +214,7 @@ type NodeIdBuilder() =
 
     let mutable digest = Span<byte>(Array.zeroCreate Hashing.HashLength)
     Hashing.hashInto (ReadOnlySpan(buffer, 0, length)) digest
-    NodeId.ofBytes (Span.op_Implicit digest)
+    NodeId.ofBytes(Span.op_Implicit digest)
 
   interface IDisposable with
 

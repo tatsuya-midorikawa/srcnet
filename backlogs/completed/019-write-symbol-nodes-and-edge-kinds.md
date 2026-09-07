@@ -3,7 +3,7 @@
 - 種別: 実装 / M2
 - 対象: `src/Srcnet.Storage/Writer.fs:37-52,162-490`, `src/Srcnet.Storage/Format.fs:17,179-219`, `src/Srcnet.Storage/Reader.fs`, `src/Srcnet.Storage/Verify.fs`, `src/Srcnet.Storage/Stats.fs`, `src/Srcnet.Cli/Commands.fs:144-232`
 - 依存: 014, 016, 017
-- 参照: [ストレージ](../docs/storage.md) 2, 3, 4, [グラフ モデル](../docs/graph-model.md) 4, 5
+- 参照: [ストレージ](../../docs/storage.md) 2, 3, 4, [グラフ モデル](../../docs/graph-model.md) 4, 5
 
 ## 背景
 
@@ -16,7 +16,7 @@
 - `Writer.IndexInput` にシンボルと参照候補を追加する
 - ノード表にシンボル レコードを書く。`fileIndex` に所属ファイルの密インデックスを入れ、ファイルに属さないノードは `NodeRecord.NoFile` を使う
 - エッジ種別ごとに `<id>.edges.<kind>` と `<id>.redges.<kind>` を書く。M2 で生成されるのは `CONTAINS` / `DECLARES` / `DEFINES` / `GUARDED_BY`
-- ノード ID を `NodeIdBuilder` で計算し、`.idmap` を昇順で書く。ID の衝突は握りつぶさず、明示的な失敗にする（[グラフ モデル](../docs/graph-model.md) 4.2）
+- ノード ID を `NodeIdBuilder` で計算し、`.idmap` を昇順で書く。ID の衝突は握りつぶさず、明示的な失敗にする（[グラフ モデル](../../docs/graph-model.md) 4.2）
 - 隣接配列は昇順に整列する。同じ始点から同じ終点への重複エッジは 1 本にまとめる
 - 形式が変わるため版を上げ、旧版の成果物は読まずに拒否する
   - `Format.FormatVersion` 2 → 3

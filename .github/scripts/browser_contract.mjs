@@ -108,6 +108,7 @@ try {
   await send("Page.addScriptToEvaluateOnNewDocument", { source: "globalThis.__srcnet_injected=false;" });
   await send("Network.emulateNetworkConditions", { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
   await send("Page.navigate", { url: pathToFileURL(html).href });
   await until(() => evaluate('document.readyState==="complete" && !!$("srcnet-data")'), "page load");
   await settle();
@@ -145,7 +146,23 @@ try {
   };
   await reset();
   const baseline = await image();
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+  await settle();
+  check("theme changes redraw canvas labels", await image() !== baseline);
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+  await settle();
+  check("theme restores canvas labels", await image() === baseline);
   check("unselected direction disabled", await evaluate('$("direction").disabled && !!$("directionReference").textContent'));
+  await select();
+  check("search navigation focuses details", await evaluate('document.activeElement===$("selection")'));
+  const navigationEdge = data.edges.find(e => e.from === reference && e.to !== reference);
+  const neighbor = data.nodes[navigationEdge.to];
+  await evaluate(`all("#selection button").find(b=>b.textContent===${json(navigationEdge.kind + neighbor.qualifiedName)}).focus()`);
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await settle();
+  check("keyboard neighbor navigation retains focus", await evaluate(
+    `document.activeElement===$("selection") && $("selection").textContent.includes(${json(neighbor.id)})`));
   await select();
   const directions = [];
   for (const value of ["in", "out", "both"]) {
@@ -182,6 +199,16 @@ try {
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x + 40, y: point.y + 30, button: "left", buttons: 0, clickCount: 1 });
   await settle(); check("pan changes canvas", await image() !== zoomed);
   await reset(); check("reset restores canvas", await image() === baseline);
+  await select();
+  const corner = await evaluate('(()=>{const r=document.querySelector("canvas").getBoundingClientRect();return {x:r.x+20,y:r.y+20};})()');
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", ...corner, button: "left", buttons: 1, clickCount: 1 });
+  for (let step = 1; step <= 8; step++)
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: corner.x + step, y: corner.y, buttons: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: corner.x + 8, y: corner.y, button: "left", buttons: 0, clickCount: 1 });
+  await settle();
+  check("slow panning does not replace selection", await evaluate(
+    `!$("direction").disabled && $("selection").textContent.includes(${json(node.id)})`));
+  await reset();
   check("offline without exceptions or injection", report.requests.length > 0 &&
     report.requests.every(url => url.startsWith("file:") || url.startsWith("data:")) &&
     !report.exceptions.length && !report.dialogs.length && !report.eventOverflow &&

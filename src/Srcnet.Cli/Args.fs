@@ -197,7 +197,8 @@ module ParseError =
 let private strictUtf8 = Text.UTF8Encoding(false, true)
 
 let internal validateQueryText (name: string) (text: string) =
-  if text.Length = 0 then ValueSome(InvalidValue(name, text))
+  if isNull(box text) then ValueSome(InvalidValue(name, "null"))
+  elif text.Length = 0 then ValueSome(InvalidValue(name, text))
   elif text.Length > MaxQueryScalars * 2 then
     ValueSome(UnsupportedValue(name, "", $"文字列は {MaxQueryScalars} Unicode scalar 以下にしてください"))
   else
@@ -311,6 +312,11 @@ type private OptionReader(options: ResizeArray<ParsedOption>, positional: Resize
       if option.Name = name then
         consumed.Add name |> ignore
         found <- true
+
+        match option.Value with
+        | ValueSome text when option.ValueTokenIndex < 0 && error.IsNone ->
+          error <- ValueSome(InvalidValue(name, text))
+        | _ -> ()
 
     found
 

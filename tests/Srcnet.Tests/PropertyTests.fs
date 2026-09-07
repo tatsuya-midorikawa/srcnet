@@ -114,7 +114,9 @@ let ``論理パスの生成はルート外への参照を必ず拒否する`` ()
           | Error _ -> true
           | Ok path ->
             let text = value path
-            not (text.StartsWith "/") && not (text.Contains "..") && not (text.Contains "\\")))
+            not (text.StartsWith "/")
+            && not (text.Split('/') |> Array.contains "..")
+            && not (text.Contains "\\")))
   )
 
 [<Fact>]

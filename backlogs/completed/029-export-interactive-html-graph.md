@@ -3,7 +3,7 @@
 - 種別: 実装 / M4
 - 対象: `src/Srcnet.Cli/Args.fs`, `src/Srcnet.Cli/Commands.fs`, `src/Srcnet.Storage/`, `tests/Srcnet.Tests/`, `docs/query-and-cli.md`
 - 依存: 028
-- 参照: [クエリと CLI](../docs/query-and-cli.md) 4, 5, [ストレージ](../docs/storage.md) 7-9, [ロードマップ](../docs/roadmap.md) M4, M6
+- 参照: [クエリと CLI](../../docs/query-and-cli.md) 4, 5, [ストレージ](../../docs/storage.md) 7-9, [ロードマップ](../../docs/roadmap.md) M4, M6
 
 ## 背景
 

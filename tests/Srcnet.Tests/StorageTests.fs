@@ -143,3 +143,15 @@ let ``lookup format rejects undersized and overflowed table declarations`` () =
     match Format.tryReadHeader (ReadOnlySpan buffer) (int64 Format.HeaderLength + int64 bytes) with
     | Error _ -> ()
     | Ok _ -> failwith "Accepted invalid lookup table lengths"
+
+[<Fact>]
+let ``payload plus header cannot wrap around the declared file length`` () =
+  let buffer = Array.zeroCreate<byte> Format.HeaderLength
+  Format.writeHeader
+    (Span buffer)
+    { Kind = Format.LexicalLookup
+      PrimaryCount = 0UL
+      SecondaryCount = 0UL
+      RecordLength = 24u
+      PayloadLength = UInt64.MaxValue - uint64 Format.HeaderLength + 1UL }
+  Assert.True(Format.tryReadHeader (ReadOnlySpan buffer) 0L |> Result.isError)

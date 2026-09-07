@@ -11,6 +11,7 @@ open System.IO
 open System.Reflection
 open System.Text
 open System.Text.Json
+open System.Threading
 open Srcnet.Core
 
 /// マニフェストの構造の版。セグメント形式の版とは独立に管理する。
@@ -242,7 +243,7 @@ let write (outputDirectory: string) (manifest: Manifest) : Result<unit, Artifact
       stream.Write(ReadOnlySpan payload)
       stream.Flush()
 
-    File.Move(temporary, destination, true)
+    Artifact.replaceFile temporary destination
     Ok()
   with
   | :? IOException as ex -> Error(Artifact.Unavailable(destination, ex.Message))
@@ -255,6 +256,26 @@ let stagingPath (outputDirectory: string) =
 /// 生成中のセグメントを置く場所。
 let stagedSegmentsPath (outputDirectory: string) =
   Path.Combine(stagingPath outputDirectory, Artifact.SegmentDirectory)
+
+/// Hold this lease from staging preparation through publication and cleanup.
+/// Keep the empty lock file: unlinking it would let another writer lock a new inode.
+let acquireWriter (outputDirectory: string) : Result<IDisposable, Artifact.PathError> =
+  let path = Path.Combine(outputDirectory, ".writer.lock")
+
+  match Artifact.ensureNotLink path with
+  | Error error -> Error error
+  | Ok() ->
+    try
+      let stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+
+      if stream.CanSeek then Ok(stream :> IDisposable)
+      else
+        stream.Dispose()
+        Error(Artifact.Unavailable(path, "書き込みロックが通常ファイルではありません"))
+    with
+    | :? IOException as ex ->
+      Error(Artifact.Unavailable(path, $"別の索引生成が実行中か、書き込みロックを取得できません: {ex.Message}"))
+    | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(path, "書き込む権限がありません"))
 
 /// リンク自身だけを取り除く。掃除でリンク先の管理外ファイルを消してはならない。
 ///
@@ -475,6 +496,57 @@ let private readKindCounts (element: JsonElement) (name: string) =
     | ValueSome error -> Error error
     | ValueNone -> Ok(entries.ToArray())
 
+let private nodeKindNames =
+  HashSet<string>(
+    [| for code in 0 .. 255 do
+         match Graph.NodeKind.ofCode (byte code) with
+         | ValueSome kind -> yield Graph.NodeKind.name kind
+         | ValueNone -> () |],
+    StringComparer.Ordinal
+  )
+
+let private edgeKindNames =
+  HashSet<string>(Graph.EdgeKind.all |> Array.map Graph.EdgeKind.name, StringComparer.Ordinal)
+
+let private validateKindCounts name total (known: HashSet<string>) (entries: Writer.KindCount[]) =
+  let seen = HashSet<string>(StringComparer.Ordinal)
+  let mutable sum = 0L
+  let mutable failure = ValueNone
+
+  for entry in entries do
+    if not (known.Contains entry.Kind) || not (seen.Add entry.Kind) then
+      failure <- ValueSome(Malformed $"{name} に未知または重複した種別があります: {entry.Kind}")
+    sum <- sum + int64 entry.Count
+
+  match failure with
+  | ValueSome error -> Error error
+  | ValueNone when sum <> int64 total -> Error(Malformed $"{name} の合計 {sum} が件数 {total} と一致しません")
+  | ValueNone -> Ok()
+
+let private validateEdgeSegments (segments: Writer.SegmentDescriptor[]) (kinds: Writer.KindCount[]) =
+  let expected = HashSet<string>(StringComparer.Ordinal)
+  let found = HashSet<string>(StringComparer.Ordinal)
+  let mutable failure = ValueNone
+
+  for kind in kinds do
+    expected.Add(".edges." + kind.Kind) |> ignore
+    expected.Add(".redges." + kind.Kind) |> ignore
+
+  for segment in segments do
+    let name = segment.Name.Split('/')[2]
+    for marker in [| ".edges."; ".redges." |] do
+      let index = name.IndexOf(marker, StringComparison.Ordinal)
+      if index >= 0 then
+        let role = name.Substring index
+        if not (expected.Contains role) || not (found.Add role) then
+          failure <- ValueSome(Malformed $"未宣言または重複した CSR セグメントです: {segment.Name}")
+
+  match failure with
+  | ValueSome error -> Error error
+  | ValueNone when not (found.SetEquals expected) ->
+    Error(Malformed "エッジ種別の前方・後方 CSR セグメントが揃っていません")
+  | ValueNone -> Ok()
+
 let private readCounts (element: JsonElement) =
   match
     requireInt32 element "nodes",
@@ -492,6 +564,12 @@ let private readCounts (element: JsonElement) =
       readKindCounts element "edgeKinds"
     with
     | Ok symbols, Ok referenceCandidates, Ok nodeKinds, Ok edgeKinds ->
+      match validateKindCounts "nodeKinds" nodes nodeKindNames nodeKinds with
+      | Error error -> Error error
+      | Ok() ->
+      match validateKindCounts "edgeKinds" edges edgeKindNames edgeKinds with
+      | Error error -> Error error
+      | Ok() ->
       Ok
         { Nodes = nodes
           Edges = edges
@@ -628,6 +706,10 @@ let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
     | Error error -> Error error
     | Ok counts ->
 
+    match validateEdgeSegments segments counts.EdgeKinds with
+    | Error error -> Error error
+    | Ok() ->
+
     match requireObject rootElement "options" with
     | Error error -> Error error
     | Ok optionsElement ->
@@ -658,11 +740,11 @@ let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
       // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張るため、エッジ総数は
       // 少なくともノード数 - 1 になる。構成シンボルはファイルに属さないため、
       // ノード数はディレクトリ・ファイル・シンボルの合計を下回らない。
-      let structural = 1 + counts.Directories + counts.Files + counts.Symbols
+      let structural = 1L + int64 counts.Directories + int64 counts.Files + int64 counts.Symbols
 
       if counts.Nodes > 0 && counts.Edges < counts.Nodes - 1 then
         Error(Malformed $"エッジ数 {counts.Edges} がノード数 {counts.Nodes} と整合しません")
-      elif counts.Nodes <> 0 && counts.Nodes < structural then
+      elif int64 counts.Nodes < structural then
         Error(Malformed $"ノード数 {counts.Nodes} がディレクトリ・ファイル・シンボルの合計と整合しません")
       else
         Ok
@@ -684,10 +766,18 @@ let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
 [<Literal>]
 let private MaxManifestBytes = 67_108_864L
 
-let private readPayload (path: string) =
+let internal readPayload (path: string) =
   try
+    if Artifact.isLink path then
+      Error(Malformed "マニフェストへのリンクは読み込めません")
+    elif not (File.Exists path) then
+      Error(NotFound path)
+    elif FileInfo(path).Length = 0L then
+      // FIFO もサイズ 0 になる。開いてから Length を調べると取り消し不能な待機になる。
+      Error(Malformed "マニフェストが空か、通常ファイルではありません")
+    else
     // 削除の共有を許す。Windows では共有を許さない読み手が居ると、公開側の
-    // `File.Move` による置換が ERROR_SHARING_VIOLATION で失敗し、公開自体が止まる。
+    // 原子的な置換に必要な共有を許可する。
     use stream =
       new FileStream(
         path,
@@ -753,14 +843,17 @@ let readStable (outputDirectory: string) (body: Manifest -> 'T) : Result<'T, Man
   | ValueNone -> Error(Busy path)
 
 
-let private isGenerationInstalled (outputDirectory: string) (manifest: Manifest) =
+let private isGenerationInstalled (outputDirectory: string) (manifest: Manifest) (cancellation: CancellationToken) =
   manifest.Segments
   |> Array.forall (fun segment ->
+    cancellation.ThrowIfCancellationRequested()
     match Artifact.tryResolveSegment outputDirectory segment.Name with
     | Error _ -> false
     | Ok path ->
       let info = FileInfo path
-      info.Exists && info.Length = segment.ByteLength)
+      info.Exists
+      && info.Length = segment.ByteLength
+      && String.Equals(Reader.checksum path cancellation, segment.Checksum, StringComparison.Ordinal))
 
 /// 保持対象以外の世代を片付ける。切替が終わってから呼ぶ。
 ///
@@ -772,8 +865,10 @@ let private retireStaleGenerations (outputDirectory: string) (retained: string[]
   if Directory.Exists segmentsRoot then
     try
       for entry in Directory.EnumerateFileSystemEntries segmentsRoot do
-        let name = Path.GetFileName entry
-        if not (Array.contains name retained) then deleteQuietly entry
+        match Path.GetFileName entry with
+        | null -> ()
+        | name ->
+          if Artifact.isGeneration name && not (Array.contains name retained) then deleteQuietly entry
     with
     | :? IOException -> ()
     | :? UnauthorizedAccessException -> ()
@@ -790,10 +885,11 @@ let private publishedGeneration (outputDirectory: string) =
 /// 公開の切替点にする。旧世代は置換が終わるまで残るため、公開の途中でも
 /// 読み手は旧世代か新世代のどちらか一方を完全に見る。
 /// docs/storage.md 3 の原子性の要件に対応する。
-let publish
+let publishWithCancellation
   (outputDirectory: string)
   (generation: string)
   (manifest: Manifest)
+  (cancellation: CancellationToken)
   : Result<unit, Artifact.PathError> =
   let staged = stagedSegmentsPath outputDirectory
   let segmentsRoot = Path.Combine(outputDirectory, Artifact.SegmentDirectory)
@@ -803,7 +899,7 @@ let publish
     if not (Directory.Exists staged) then
       // 書き出した領域が消えている。実体のないセグメントを指すマニフェストを
       // 正常終了で残してはならない。同じ世代が既に揃っている場合だけ公開を続ける。
-      if isGenerationInstalled outputDirectory manifest then Ok()
+      if isGenerationInstalled outputDirectory manifest cancellation then Ok()
       else Error(Artifact.Unavailable(staged, "書き出したセグメントが見つかりません"))
     else
 
@@ -825,20 +921,16 @@ let publish
     if not (Directory.Exists target) then
       Directory.Move(staged, target)
       Ok()
-    elif isGenerationInstalled outputDirectory manifest then
+    elif isGenerationInstalled outputDirectory manifest cancellation then
       // 同じ世代が既にあるのは、同じ入力を再び索引した場合である。内容は世代識別子から
       // 一意に決まるため、揃っていればそのまま使う。読み手の参照も切らさない。
       Ok()
     else
-      // 途中で停止した残骸である。参照される前に置き換える。
-      deleteQuietly target
-
-      if Directory.Exists target then Error(Artifact.Unavailable(target, "不完全な世代を片付けられません"))
-      else
-        Directory.Move(staged, target)
-        Ok()
+      // 読み手が mmap している可能性があるため、不変パスの破損を上書きで修復しない。
+      Error(Artifact.Unavailable(target, "既存の世代が欠損または破損しています。別の出力先へ再索引してください"))
 
   try
+    cancellation.ThrowIfCancellationRequested()
     // 切替の前に、いま参照されている世代を控える。切替の直後に消してしまうと、
     // 旧マニフェストを読み終えた直後の読み手が参照先を失う。
     let previous = publishedGeneration outputDirectory
@@ -847,6 +939,7 @@ let publish
     | Error error -> Error error
     | Ok() ->
 
+    cancellation.ThrowIfCancellationRequested()
     match write outputDirectory manifest with
     | Error error -> Error error
     | Ok() ->
@@ -867,3 +960,6 @@ let publish
   with
   | :? IOException as ex -> Error(Artifact.Unavailable(outputDirectory, ex.Message))
   | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(outputDirectory, "書き込む権限がありません"))
+
+let publish (outputDirectory: string) (generation: string) (manifest: Manifest) =
+  publishWithCancellation outputDirectory generation manifest CancellationToken.None

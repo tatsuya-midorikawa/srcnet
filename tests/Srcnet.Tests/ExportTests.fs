@@ -111,6 +111,52 @@ let ``起点なしではディレクトリ単位へ集約した概要を出す``
   Assert.All(kinds, (fun kind -> Assert.True(kind = "Repository" || kind = "Directory")))
 
 [<Fact>]
+let ``deterministic verify は既定の HTML だけを索引比較から除外する`` () =
+  task {
+    use workspace = new Workspace()
+    let source = Corpus.corpusPath "micro"
+
+    let! struct (indexed, _, errors) =
+      Corpus.runCli [ "index"; source; "--out"; workspace.Path; "--tier"; "0"; "--jobs"; "1" ]
+
+    Assert.True((indexed = Commands.ExitCode.Success), errors)
+    let file = workspace.File ExportCommands.DefaultFileName
+
+    Assert.Equal(
+      Commands.ExitCode.Success,
+      ExportCommands.exportHtml
+        { exportArguments workspace.Path file with
+            File = ValueNone }
+        CancellationToken.None
+    )
+
+    let original = File.ReadAllBytes file
+
+    let arguments: Args.VerifyArguments =
+      { OutputDirectory = ValueSome workspace.Path
+        RootPath = ValueSome source
+        Deterministic = true
+        Json = true }
+
+    let! verified = Commands.verify arguments CancellationToken.None
+    Assert.Equal(Commands.ExitCode.Success, verified)
+    Assert.Equal<byte[]>(original, File.ReadAllBytes file)
+
+    let custom = workspace.File "custom.html"
+
+    Assert.Equal(
+      Commands.ExitCode.Success,
+      ExportCommands.exportHtml (exportArguments workspace.Path custom) CancellationToken.None
+    )
+
+    let customBytes = File.ReadAllBytes custom
+    let! withUnexpectedFile = Commands.verify arguments CancellationToken.None
+    Assert.Equal(Commands.ExitCode.CompletedWithDiagnostics, withUnexpectedFile)
+    Assert.Equal<byte[]>(original, File.ReadAllBytes file)
+    Assert.Equal<byte[]>(customBytes, File.ReadAllBytes custom)
+  }
+
+[<Fact>]
 let ``起点を指定するとその周辺を出す`` () =
   use workspace = new Workspace()
   indexCorpus "micro" workspace.Path
@@ -360,6 +406,60 @@ let ``全体件数と集約候補と表示上限による省略を区別する``
   Assert.False(root.GetProperty("traversalTruncated").GetBoolean())
   Assert.True(root.GetProperty("truncated").GetBoolean())
 
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``概要の走査予算は表示しないエッジも数え重みを保持する`` exceedsBudget =
+  let directoryCount = 640
+  let names = Array.init directoryCount (fun index -> $"d{index:D4}")
+
+  let allConnections =
+    [| for source in 0..directoryCount do
+         for target in 0..directoryCount do
+           if source <> target then
+             yield struct (source, target, Contains) |]
+
+  Assert.True(allConnections.Length > Query.MaxExploredEdges)
+
+  let connections =
+    if exceedsBudget then
+      allConnections
+    else
+      Array.take Query.MaxExploredEdges allConnections
+
+  use graph = new QueryTests.TestGraph(names, connections)
+  use workspace = new Workspace()
+  let file = workspace.File "bounded-overview.html"
+
+  Assert.Equal(
+    Commands.ExitCode.Success,
+    ExportCommands.exportHtml
+      { exportArguments graph.Output file with
+          MaxNodes = 1 }
+      CancellationToken.None
+  )
+
+  use document = JsonDocument.Parse(dataBlock(File.ReadAllText file))
+  let root = document.RootElement
+  let nodes = root.GetProperty("nodes")
+  Assert.Equal(1, nodes.GetArrayLength())
+  Assert.Equal(directoryCount, nodes[0].GetProperty("weight").GetInt32())
+  Assert.Equal(directoryCount + 1, root.GetProperty("totalNodes").GetInt32())
+  Assert.Equal(directoryCount + 1, root.GetProperty("candidateNodes").GetInt32())
+  Assert.Equal(0, root.GetProperty("groupedNodeCount").GetInt32())
+  Assert.Equal(directoryCount, root.GetProperty("omittedCount").GetInt32())
+  Assert.Equal(Query.MaxExploredEdges, root.GetProperty("omittedEdgeCount").GetInt32())
+  Assert.Equal(exceedsBudget, root.GetProperty("traversalTruncated").GetBoolean())
+  Assert.Equal(exceedsBudget, root.GetProperty("omittedCountIsLowerBound").GetBoolean())
+  Assert.True(root.GetProperty("truncated").GetBoolean())
+  Assert.Empty(root.GetProperty("edges").EnumerateArray())
+
+  if exceedsBudget then
+    Assert.Contains(
+      root.GetProperty("diagnostics").EnumerateArray(),
+      fun diagnostic -> diagnostic.GetString().Contains "エッジ走査"
+    )
+
 [<Fact>]
 let ``ディレクトリのパスは所属ファイルではなく論理パスである`` () =
   use workspace = new Workspace()
@@ -572,6 +672,49 @@ let ``同時出力は固有の一時ファイルを使い他の一時ファイ�
   Assert.Equal<byte[]>(first, File.ReadAllBytes file)
   Assert.Equal("unrelated", File.ReadAllText(file + ".tmp"))
   Assert.Equal<string[]>([| file + ".tmp" |], Directory.GetFiles(workspace.Path, "*.tmp"))
+
+[<Fact>]
+let ``削除共有の読み手が残る HTML を旧内容を保ったまま置き換える`` () =
+  use workspace = new Workspace()
+  indexCorpus "micro" workspace.Path
+  let file = workspace.File "held.html"
+  let arguments = exportArguments workspace.Path file
+  Assert.Equal(Commands.ExitCode.Success, ExportCommands.exportHtml arguments CancellationToken.None)
+  let original = File.ReadAllBytes file
+
+  use reader =
+    new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite ||| FileShare.Delete)
+
+  Assert.Equal(
+    Commands.ExitCode.Success,
+    ExportCommands.exportHtml { arguments with MaxNodes = 1 } CancellationToken.None
+  )
+
+  let current = File.ReadAllBytes file
+  Assert.False(ReadOnlySpan(original).SequenceEqual(ReadOnlySpan current))
+  let snapshot = Array.zeroCreate<byte> original.Length
+  reader.ReadExactly(Span snapshot)
+  Assert.Equal<byte[]>(original, snapshot)
+  Assert.Empty(Directory.GetFiles(workspace.Path, "*.tmp"))
+
+[<Fact>]
+let ``長い出力ファイル名でも一時ファイル名の上限を超えず置き換える`` () =
+  use workspace = new Workspace()
+  indexCorpus "micro" workspace.Path
+
+  for name in [ String('a', 220) + ".html"; String.replicate 80 "界" + ".html" ] do
+    let file = workspace.File name
+    File.WriteAllText(file, "keep")
+
+    Assert.Equal(
+      Commands.ExitCode.Success,
+      ExportCommands.exportHtml (exportArguments workspace.Path file) CancellationToken.None
+    )
+
+    use document = JsonDocument.Parse(dataBlock(File.ReadAllText file))
+    Assert.NotEmpty(document.RootElement.GetProperty("nodes").EnumerateArray())
+
+  Assert.Empty(Directory.GetFiles(workspace.Path, "*.tmp"))
 
 [<Fact>]
 let ``取り消し済みの出力は既存ファイルを変更しない`` () =

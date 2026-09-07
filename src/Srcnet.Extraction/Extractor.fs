@@ -43,27 +43,28 @@ let private isTextual (flags: NodeFlags) =
 ///
 /// T1 は「直後のシンボル」を知らないため、併合後に位置関係だけで対応付ける。
 /// 解決規則の段階は「同一ファイル」であり、docs/extraction.md 5.2 の 2 に当たる。
-let private explainsReferences (language: Language) (symbols: ExtractedSymbol[]) =
+let private explainsReferences (language: Language) (symbols: ExtractedSymbol[]) (cancellation: CancellationToken) =
   let result = List<ExtractedReference>()
+  let mutable cursor = 0
 
   for index in 0 .. symbols.Length - 1 do
+    cancellation.ThrowIfCancellationRequested()
     let note = symbols[index]
 
     if note.Kind = Note then
-      let mutable target = -1
-      let mutable cursor = index + 1
+      // T1 notes occupy ordered, non-overlapping line ranges. Never rescan a
+      // run of comments for each preceding note.
+      cursor <- max cursor (index + 1)
 
-      while target < 0 && cursor < symbols.Length do
-        let candidate = symbols[cursor]
-
-        if candidate.Kind <> Note && candidate.StartByte >= note.EndByte then target <- cursor
+      while cursor < symbols.Length
+            && (symbols[cursor].Kind = Note || symbols[cursor].StartByte < note.EndByte) do
         cursor <- cursor + 1
 
-      if target >= 0 then
+      if cursor < symbols.Length then
         result.Add
           { Source = index
             Kind = Explains
-            Target = symbols[target].QualifiedName
+            Target = symbols[cursor].QualifiedName
             Qualifier = ""
             Language = language
             StartByte = note.StartByte
@@ -129,16 +130,22 @@ type Extractor(options: ExtractionOptions) =
       cancellation: CancellationToken
     ) : ExtractedFile =
 
+    ArgumentNullException.ThrowIfNull source
+
+    if length < 0 || length > source.Length then
+      invalidArg (nameof length) "抽出長がバッファ長を超えています"
+
+    cancellation.ThrowIfCancellationRequested()
+
     if options.Tier = Structure then ExtractedFile.empty Structure
     elif not (isTextual fileFlags) then ExtractedFile.skipped Structure NotText
     elif int64 length > options.MaxExtractionBytes then
       ExtractedFile.skipped Structure (TooLargeToExtract(int64 length))
     else
 
-    cancellation.ThrowIfCancellationRequested()
-
     // T1 は常に走らせる。T2 が成功しても、取り込みと根拠コメントはこちらを使う。
-    let lineResult = LineScan.run language (ReadOnlySpan(source, 0, length)) fileFlags
+    let lineResult =
+      LineScan.runWithCancellation language (ReadOnlySpan(source, 0, length)) fileFlags cancellation
 
     let generatedFlag =
       if lineResult.Generated then NodeFlags.Generated else NodeFlags.None
@@ -173,7 +180,7 @@ type Extractor(options: ExtractionOptions) =
           use tree = tree
 
           let result =
-            CSyntax.run language logicalPath source tree (fileFlags ||| generatedFlag)
+            CSyntax.runWithCancellation language logicalPath source tree (fileFlags ||| generatedFlag) cancellation
 
           struct (Syntax, ValueSome result, ValueNone)
 
@@ -217,26 +224,42 @@ type Extractor(options: ExtractionOptions) =
 
     let merged = Array.append syntaxSymbols lineSymbols
     let mergedReferences = Array.append syntaxReferences lineReferences
+    cancellation.ThrowIfCancellationRequested()
     let struct (ordered, orderedReferences) = normalize merged mergedReferences
-    let numbered = assignOrdinals ordered
-    let explains = explainsReferences language numbered
+    let symbolsTruncated = ordered.Length > Limits.MaxSymbolsPerFile
+    let retained = if symbolsTruncated then ordered[.. Limits.MaxSymbolsPerFile - 1] else ordered
+    let numbered = assignOrdinals retained
+
+    let retainedReferences =
+      if symbolsTruncated then orderedReferences |> Array.filter (fun reference -> reference.Source < numbered.Length)
+      else orderedReferences
+
+    let explains = explainsReferences language numbered cancellation
 
     let allReferences =
-      if explains.Length = 0 then orderedReferences
+      if explains.Length = 0 then retainedReferences
       else
-        let combined = Array.append orderedReferences explains
+        let combined = Array.append retainedReferences explains
         Array.sortInPlaceWith compareReferences combined
         combined
 
+    let referencesTruncated = allReferences.Length > Limits.MaxReferencesPerFile
+
     let truncated =
-      lineResult.Truncated
+      symbolsTruncated
+      || referencesTruncated
+      || lineResult.Truncated
       || (match syntax with
           | ValueSome result -> result.Truncated
           | ValueNone -> false)
 
+    cancellation.ThrowIfCancellationRequested()
+
     { Tier = tier
       Symbols = numbered
-      References = allReferences
+      References =
+        if referencesTruncated then allReferences[.. Limits.MaxReferencesPerFile - 1]
+        else allReferences
       FileFlags =
         generatedFlag
         ||| (if truncated then NodeFlags.ExtractionTruncated else NodeFlags.None)

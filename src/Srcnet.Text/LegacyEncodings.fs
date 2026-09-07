@@ -41,7 +41,8 @@ let private loadTable (name: string) =
   lazy
     (let raw = inflate name
 
-     if raw.Length <> TableEntries * 2 then Array.empty<uint16>
+     if raw.Length <> TableEntries * 2 then
+       Array.empty<uint16>
      else
        let table = Array.zeroCreate<uint16> TableEntries
        Buffer.BlockCopy(raw, 0, table, 0, raw.Length)
@@ -58,11 +59,14 @@ let private gb18030Runs =
   lazy
     (let raw = inflate "gb18030_4byte.bin"
 
-     if raw.Length < 4 then Array.empty<LinearRun>
+     if raw.Length < 4 then
+       Array.empty<LinearRun>
      else
-       let count = int (Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan raw))
+       let count =
+         int(Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan raw))
 
-       if raw.Length <> 4 + count * 12 then Array.empty<LinearRun>
+       if raw.Length <> 4 + count * 12 then
+         Array.empty<LinearRun>
        else
          Array.init count (fun index ->
            let span = ReadOnlySpan(raw, 4 + index * 12, 12)
@@ -108,27 +112,33 @@ let maxUtf8Bytes (sourceLength: int) = sourceLength * 3 + 3
 /// スカラー値を UTF-8 として書き出す。書けなければ 0 を返す。
 let inline private writeScalar (destination: Span<byte>) (position: int) (scalar: int) =
   if scalar < 0x80 then
-    if position + 1 > destination.Length then 0
+    if position + 1 > destination.Length then
+      0
     else
       destination[position] <- byte scalar
       1
   elif scalar < 0x800 then
-    if position + 2 > destination.Length then 0
+    if position + 2 > destination.Length then
+      0
     else
-      destination[position] <- byte (0xC0 ||| (scalar >>> 6))
-      destination[position + 1] <- byte (0x80 ||| (scalar &&& 0x3F))
+      destination[position] <- byte(0xC0 ||| (scalar >>> 6))
+      destination[position + 1] <- byte(0x80 ||| (scalar &&& 0x3F))
       2
-  else if position + 3 > destination.Length then 0
+  else if position + 3 > destination.Length then
+    0
   else
-    destination[position] <- byte (0xE0 ||| (scalar >>> 12))
-    destination[position + 1] <- byte (0x80 ||| ((scalar >>> 6) &&& 0x3F))
-    destination[position + 2] <- byte (0x80 ||| (scalar &&& 0x3F))
+    destination[position] <- byte(0xE0 ||| (scalar >>> 12))
+    destination[position + 1] <- byte(0x80 ||| ((scalar >>> 6) &&& 0x3F))
+    destination[position + 2] <- byte(0x80 ||| (scalar &&& 0x3F))
     3
 
 /// GB18030 の 4 バイト列を復号する。
 let private gb18030FourByte (b1: byte) (b2: byte) (b3: byte) (b4: byte) =
   let linear =
-    (int b1 - 0x81) * 12600 + (int b2 - 0x30) * 1260 + (int b3 - 0x81) * 10 + (int b4 - 0x30)
+    (int b1 - 0x81) * 12600
+    + (int b2 - 0x30) * 1260
+    + (int b3 - 0x81) * 10
+    + (int b4 - 0x30)
 
   // 上位の線形位置は補助面へ線形に写る。表を持たずに計算だけで決まる。
   if linear >= 189_000 then
@@ -144,22 +154,25 @@ let private gb18030FourByte (b1: byte) (b2: byte) (b3: byte) (b4: byte) =
       let middle = low + (high - low) / 2
       let run = runs[middle]
 
-      if uint32 linear < run.Linear then high <- middle - 1
-      elif uint32 linear >= run.Linear + run.Length then low <- middle + 1
+      if uint32 linear < run.Linear then
+        high <- middle - 1
+      elif uint32 linear >= run.Linear + run.Length then
+        low <- middle + 1
       else
-        found <- int (run.Scalar + (uint32 linear - run.Linear))
+        found <- int(run.Scalar + (uint32 linear - run.Linear))
         low <- high + 1
 
     found
 
 /// 補助面のスカラー値を UTF-8 として書き出す。
 let inline private writeSupplementary (destination: Span<byte>) (position: int) (scalar: int) =
-  if position + 4 > destination.Length then 0
+  if position + 4 > destination.Length then
+    0
   else
-    destination[position] <- byte (0xF0 ||| (scalar >>> 18))
-    destination[position + 1] <- byte (0x80 ||| ((scalar >>> 12) &&& 0x3F))
-    destination[position + 2] <- byte (0x80 ||| ((scalar >>> 6) &&& 0x3F))
-    destination[position + 3] <- byte (0x80 ||| (scalar &&& 0x3F))
+    destination[position] <- byte(0xF0 ||| (scalar >>> 18))
+    destination[position + 1] <- byte(0x80 ||| ((scalar >>> 12) &&& 0x3F))
+    destination[position + 2] <- byte(0x80 ||| ((scalar >>> 6) &&& 0x3F))
+    destination[position + 3] <- byte(0x80 ||| (scalar &&& 0x3F))
     4
 
 /// ISO-2022-JP の指示子。エスケープ列で切り替わる。
@@ -169,108 +182,190 @@ type private JisMode =
   | JisX0208
   /// JIS X 0201 のローマ字集合。ASCII とほぼ同じで、`\` と `~` だけが違う。
   | JisRoman
+  | JisKatakana
 
 /// `source` を UTF-8 へ復号し、`destination` へ書き出す。書き出したバイト数を返す。
 ///
 /// 変換表を持たない構成では -1 を返す。不正なバイト列は置換文字にして継続し、
 /// 復号の失敗で走査を止めない。
+/// 書き出し先が不足する場合は ArgumentException を投げ、部分的な成功として返さない。
 ///
 /// 1 反復で「スカラー値 1 つと消費バイト数」を決め、書き出しを 1 か所へ集約する。
 /// span は closure へ渡せないため、書き出しを内部関数に切り出せないという制約もある。
 let decode (encoding: Encodings.DetectedEncoding) (source: ReadOnlySpan<byte>) (destination: Span<byte>) =
   let table = tableFor encoding
 
-  if table.Length <> TableEntries then -1
+  if table.Length <> TableEntries then
+    -1
   else
 
-  let mutable position = 0
-  let mutable index = 0
-  let mutable mode = Ascii
+    let mutable position = 0
+    let mutable index = 0
+    let mutable mode = Ascii
 
-  while index < source.Length do
-    let b = source[index]
-    // -1 は「文字を生まない」（エスケープ列）を表す。
-    let mutable scalar = ReplacementChar
-    let mutable consumed = 1
+    while index < source.Length do
+      let b = source[index]
+      // -1 は「文字を生まない」（エスケープ列）を表す。
+      let mutable scalar = ReplacementChar
+      let mutable consumed = 1
 
-    match encoding with
-    | Encodings.Iso2022Jp ->
-      if b = 0x1Buy && index + 2 < source.Length then
-        let second = source[index + 1]
-        let third = source[index + 2]
+      match encoding with
+      | Encodings.Iso2022Jp ->
+        if b = 0x1Buy && index + 2 < source.Length then
+          let second = source[index + 1]
+          let third = source[index + 2]
 
-        if second = byte '$' && (third = byte 'B' || third = byte '@') then
-          mode <- JisX0208
-          scalar <- -1
-          consumed <- 3
-        elif second = byte '(' && third = byte 'B' then
-          mode <- Ascii
-          scalar <- -1
-          consumed <- 3
-        elif second = byte '(' && (third = byte 'J' || third = byte 'I') then
-          mode <- JisRoman
-          scalar <- -1
-          consumed <- 3
-      else
-        match mode with
-        | JisX0208 ->
-          if index + 1 < source.Length && b >= 0x21uy && b <= 0x7Euy then
-            // JIS X 0208 の区点は EUC-JP では上位ビットを立てた位置に入る。
-            let mapped = int table[(int b ||| 0x80) * 256 + (int source[index + 1] ||| 0x80)]
+          if second = byte '$' && (third = byte 'B' || third = byte '@') then
+            mode <- JisX0208
+            scalar <- -1
+            consumed <- 3
+          elif second = byte '(' && third = byte 'B' then
+            mode <- Ascii
+            scalar <- -1
+            consumed <- 3
+          elif second = byte '(' && third = byte 'J' then
+            mode <- JisRoman
+            scalar <- -1
+            consumed <- 3
+          elif second = byte '(' && third = byte 'I' then
+            mode <- JisKatakana
+            scalar <- -1
+            consumed <- 3
+        elif (b <= 0x20uy && b <> 0x1Buy) || b = 0x7Fuy then
+          scalar <- int b
+        else
+          match mode with
+          | JisX0208 ->
+            if
+              index + 1 < source.Length
+              && b >= 0x21uy
+              && b <= 0x7Euy
+              && source[index + 1] >= 0x21uy
+              && source[index + 1] <= 0x7Euy
+            then
+              // JIS X 0208 の区点は EUC-JP では上位ビットを立てた位置に入る。
+              let mapped = int table[(int b ||| 0x80) * 256 + (int source[index + 1] ||| 0x80)]
+              scalar <- (if mapped = 0 then ReplacementChar else mapped)
+              consumed <- 2
+          | JisRoman ->
+            if b = 0x5Cuy then
+              scalar <- 0x00A5
+            elif b = 0x7Euy then
+              scalar <- 0x203E
+            elif b < 0x80uy then
+              scalar <- int b
+          | JisKatakana ->
+            if b >= 0x21uy && b <= 0x5Fuy then
+              scalar <- 0xFF61 + int b - 0x21
+          | Ascii ->
+            if b < 0x80uy then
+              scalar <- int b
+
+      | Encodings.ShiftJis ->
+        if b < 0x80uy then
+          scalar <- int b
+        elif b >= 0xA1uy && b <= 0xDFuy then
+          // 半角カタカナ。表を引かずに位置で決まる。
+          scalar <- 0xFF61 + int b - 0xA1
+        elif
+          index + 1 < source.Length
+          && ((b >= 0x81uy && b <= 0x9Fuy) || (b >= 0xE0uy && b <= 0xFCuy))
+        then
+          let trailing = source[index + 1]
+
+          if
+            (trailing >= 0x40uy && trailing <= 0x7Euy)
+            || (trailing >= 0x80uy && trailing <= 0xFCuy)
+          then
+            let mapped = int table[int b * 256 + int trailing]
             scalar <- (if mapped = 0 then ReplacementChar else mapped)
             consumed <- 2
-        | Ascii
-        | JisRoman -> if b < 0x80uy then scalar <- int b
 
-    | Encodings.ShiftJis ->
-      if b < 0x80uy then scalar <- int b
-      elif b >= 0xA1uy && b <= 0xDFuy then
-        // 半角カタカナ。表を引かずに位置で決まる。
-        scalar <- 0xFF61 + int b - 0xA1
-      elif index + 1 < source.Length then
-        let mapped = int table[int b * 256 + int source[index + 1]]
-        scalar <- (if mapped = 0 then ReplacementChar else mapped)
-        consumed <- 2
+      | Encodings.Gb18030 ->
+        if b < 0x80uy then
+          scalar <- int b
+        elif b >= 0x81uy && b <= 0xFEuy && index + 1 < source.Length then
+          let second = source[index + 1]
 
-    | Encodings.Gb18030 ->
-      if b < 0x80uy then scalar <- int b
-      elif index + 1 < source.Length then
-        let second = source[index + 1]
+          if second >= 0x30uy && second <= 0x39uy then
+            if
+              index + 3 < source.Length
+              && source[index + 2] >= 0x81uy
+              && source[index + 2] <= 0xFEuy
+              && source[index + 3] >= 0x30uy
+              && source[index + 3] <= 0x39uy
+            then
+              scalar <- gb18030FourByte b second source[index + 2] source[index + 3]
+              consumed <- 4
+          elif (second >= 0x40uy && second <= 0x7Euy) || (second >= 0x80uy && second <= 0xFEuy) then
+            let mapped = int table[int b * 256 + int second]
+            scalar <- (if mapped = 0 then ReplacementChar else mapped)
+            consumed <- 2
 
-        if second >= 0x30uy && second <= 0x39uy then
-          if index + 3 < source.Length then
-            scalar <- gb18030FourByte b second source[index + 2] source[index + 3]
-            consumed <- 4
-        else
-          let mapped = int table[int b * 256 + int second]
-          scalar <- (if mapped = 0 then ReplacementChar else mapped)
-          consumed <- 2
+      | Encodings.EucJp ->
+        if b < 0x80uy then
+          scalar <- int b
+        elif b = 0x8Fuy then
+          // JIS X 0212 の表は持たない。後続の ASCII は巻き込まず、妥当な列だけを置換する。
+          if
+            index + 1 < source.Length
+            && source[index + 1] >= 0xA1uy
+            && source[index + 1] <= 0xFEuy
+          then
+            consumed <- 2
 
-    | _ ->
-      // EUC-JP / Big5 / EUC-KR。いずれも ASCII 透過の 2 バイト符号化である。
-      if b < 0x80uy then scalar <- int b
-      elif index + 1 < source.Length then
-        let mapped = int table[int b * 256 + int source[index + 1]]
+            if
+              index + 2 < source.Length
+              && source[index + 2] >= 0xA1uy
+              && source[index + 2] <= 0xFEuy
+            then
+              consumed <- 3
+        elif index + 1 < source.Length then
+          let trailing = source[index + 1]
 
-        if mapped = 0 then
-          // EUC-JP の 3 バイト列（`0x8F` 始まり、JIS X 0212）は表に持たない。
-          // 補助漢字はソース コードでほぼ使われないため、置換して継続する。
-          consumed <- (if b = 0x8Fuy then 3 else 2)
-        else
-          scalar <- mapped
-          consumed <- 2
+          let valid =
+            (b = 0x8Euy && trailing >= 0xA1uy && trailing <= 0xDFuy)
+            || (b >= 0xA1uy && b <= 0xFEuy && trailing >= 0xA1uy && trailing <= 0xFEuy)
 
-    if scalar < 0 then index <- index + consumed
-    else
-      let written =
-        if scalar > 0xFFFF then writeSupplementary destination position scalar
-        else writeScalar destination position scalar
+          if valid then
+            let mapped = int table[int b * 256 + int trailing]
+            scalar <- (if mapped = 0 then ReplacementChar else mapped)
+            consumed <- 2
 
-      if written = 0 then
-        // 書き出し先が尽きた。切り捨てを黙って続けず、そこで終える。
-        index <- source.Length
-      else
-        position <- position + written
+      | _ ->
+        // Big5 / EUC-KR。未知の符号化は tableFor の空配列により先に拒否される。
+        if b < 0x80uy then
+          scalar <- int b
+        elif b >= 0x81uy && b <= 0xFEuy && index + 1 < source.Length then
+          let trailing = source[index + 1]
+
+          let valid =
+            if encoding = Encodings.Big5 then
+              (trailing >= 0x40uy && trailing <= 0x7Euy)
+              || (trailing >= 0xA1uy && trailing <= 0xFEuy)
+            else
+              (trailing >= 0x41uy && trailing <= 0x5Auy)
+              || (trailing >= 0x61uy && trailing <= 0x7Auy)
+              || (trailing >= 0x81uy && trailing <= 0xFEuy)
+
+          if valid then
+            let mapped = int table[int b * 256 + int trailing]
+            scalar <- (if mapped = 0 then ReplacementChar else mapped)
+            consumed <- 2
+
+      if scalar < 0 then
         index <- index + consumed
+      else
+        let written =
+          if scalar > 0xFFFF then
+            writeSupplementary destination position scalar
+          else
+            writeScalar destination position scalar
 
-  position
+        if written = 0 then
+          invalidArg (nameof destination) "復号結果を格納するバッファが不足しています"
+        else
+          position <- position + written
+          index <- index + consumed
+
+    position

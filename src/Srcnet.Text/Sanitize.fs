@@ -18,6 +18,7 @@ let private Replacement = '\uFFFD'
 let private isUnsafe (c: char) =
   c < ' '
   || (c >= '\u007F' && c <= '\u009F')
+  || c = '\u061C'
   || c = '\u200E'
   || c = '\u200F'
   || (c >= '\u202A' && c <= '\u202E')
@@ -28,7 +29,9 @@ let private needsSanitizing (text: string) =
   let mutable i = 0
 
   while not found && i < text.Length do
-    if isUnsafe text[i] then found <- true
+    if isUnsafe text[i] then
+      found <- true
+
     i <- i + 1
 
   found
@@ -36,7 +39,8 @@ let private needsSanitizing (text: string) =
 /// 単一行として端末へ出力できる文字列に変換する。
 /// 安全な入力に対しては入力インスタンスをそのまま返し、割り当てを避ける。
 let forTerminal (text: string) =
-  if not (needsSanitizing text) then text
+  if not(needsSanitizing text) then
+    text
   else
     String.Create(
       text.Length,
@@ -55,15 +59,22 @@ let forTerminalMultiline (text: string) =
   let mutable i = 0
 
   while not found && i < text.Length do
-    if unsafeExceptWhitespace text[i] then found <- true
+    if unsafeExceptWhitespace text[i] then
+      found <- true
+
     i <- i + 1
 
-  if not found then text
+  if not found then
+    text
   else
     String.Create(
       text.Length,
       text,
       fun destination source ->
         for i in 0 .. source.Length - 1 do
-          destination[i] <- if unsafeExceptWhitespace source[i] then Replacement else source[i]
+          destination[i] <-
+            if unsafeExceptWhitespace source[i] then
+              Replacement
+            else
+              source[i]
     )

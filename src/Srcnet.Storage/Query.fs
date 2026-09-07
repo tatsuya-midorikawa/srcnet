@@ -215,8 +215,7 @@ type GraphView
     check()
     edges.Keys |> Seq.sortBy EdgeKind.toCode |> Seq.toArray
 
-  /// 文字列を UTF-8 のまま取り出す。比較だけが目的なら復号せずに済む。
-  member _.StringBytes(index: int) : ReadOnlySpan<byte> =
+  member private _.StringRange(index: int) =
     check()
 
     if index < 0 || index >= stringCount then
@@ -233,10 +232,19 @@ type GraphView
     if finish < start || finish > uint64 blob.Length then
       corrupt "stroffsets" "String offsets out of range"
 
-    let bytes = blob.Slice(int start, int(finish - start))
-
-    if bytes.Length > Format.Lookup.MaxKeyBytes then
+    if finish - start > uint64 Format.Lookup.MaxKeyBytes then
       corrupt "strings" "String exceeds the supported 1 MiB UTF-8 limit"
+
+    struct (int start, int(finish - start))
+
+  member internal this.StringByteLength(index: int) =
+    let struct (_, length) = this.StringRange index
+    length
+
+  /// 文字列を UTF-8 のまま取り出す。比較だけが目的なら復号せずに済む。
+  member this.StringBytes(index: int) : ReadOnlySpan<byte> =
+    let struct (start, length) = this.StringRange index
+    let bytes = strings.Payload.Slice(start, length)
 
     try
       Strings.utf8.GetCharCount bytes |> ignore
@@ -439,6 +447,20 @@ type GraphView
       corrupt "CSR" "Targets are not strictly increasing"
 
     int target
+
+  /// Counts one forward/reverse CSR row without materializing or scanning its targets.
+  member this.NeighborCount(index: int, kind: EdgeKind, incoming: bool) : int =
+    match this.Adjacency(index, kind, incoming) with
+    | ValueNone -> 0
+    | ValueSome(struct (_, _, count)) -> count
+
+  /// Reads one sorted target from a forward/reverse row. Callers bound their
+  /// iteration and check cancellation; no adjacency array or mapped handle escapes.
+  member this.NeighborAt(index: int, kind: EdgeKind, incoming: bool, position: int) : int =
+    match this.Adjacency(index, kind, incoming) with
+    | ValueSome(struct (segment, offset, count)) when position >= 0 && position < count ->
+      this.Target(segment, offset, position)
+    | _ -> invalid "position" "Adjacency position out of range"
 
   /// Materializes one adjacency row. Use bounded traversal APIs for graph exploration.
   member this.Neighbors(index: int, kind: EdgeKind, direction: Direction) : int[] =
@@ -808,6 +830,113 @@ let private lookupKeyAt (segment: Reader.MappedSegment) (index: int) =
 
   struct (text, first, count, length)
 
+let private lookupPostingAt (view: GraphView) (segment: Reader.MappedSegment) offset previous =
+  let record = segment.Payload.Slice(offset, Format.Lookup.PostingLength)
+  let index = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(0, 4))
+  let targetCode = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(4, 4))
+
+  if index >= uint32 view.NodeCount || targetCode > 2u then
+    corrupt "lookup" "Invalid posting reference or target"
+
+  let pair = struct (int index, int targetCode)
+
+  if compare pair previous <= 0 then
+    corrupt "lookup" "Postings are not strictly increasing"
+
+  pair
+
+let private lookupPostingReference (view: GraphView) (struct (index, targetCode)) =
+  let node = view.Node index
+
+  match targetCode with
+  | 0 -> struct (Name, node.NameRef)
+  | 1 -> struct (QualifiedName, node.QualifiedNameRef)
+  | 2 ->
+    if node.FileIndex = Format.NodeRecord.NoFile then
+      corrupt "lookup" "Path posting has no file"
+
+    struct (Path, view.FilePathRef node.FileIndex)
+  | _ -> corrupt "lookup" "Invalid posting target"
+
+let private checkLookupReference ignoreCase text (bytes: ReadOnlySpan<byte>) =
+  if Strings.lookupKey ignoreCase (Strings.utf8.GetString bytes) <> text then
+    corrupt "lookup" "Posting key disagrees with its node"
+
+/// Validate every lexical key and posting, including complete source-field coverage.
+/// Does not apply search work/result caps or take ownership of the view. Cancellation
+/// propagates; missing lookup or corrupt data raises QueryException.
+let validateLookup (view: GraphView) (cancellation: CancellationToken) : unit =
+  cancellation.ThrowIfCancellationRequested()
+
+  let segment =
+    match view.Lookup with
+    | ValueSome value -> value
+    | ValueNone -> raise(QueryException SearchIndexRequired)
+
+  let mutable expectedPostings = 0L
+
+  let countReference reference =
+    if view.StringByteLength reference > 0 then
+      expectedPostings <- expectedPostings + 1L
+
+  for index in 0 .. view.NodeCount - 1 do
+    if index &&& 1023 = 0 then
+      cancellation.ThrowIfCancellationRequested()
+
+    let node = view.Node index
+    countReference node.NameRef
+    countReference node.QualifiedNameRef
+
+    if node.FileIndex <> Format.NodeRecord.NoFile then
+      countReference(view.FilePathRef node.FileIndex)
+
+  let normalCount =
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
+
+  let postingBase = 32 + int segment.Header.PrimaryCount * Format.Lookup.KeyLength
+  let validatedReferences = HashSet<int>()
+  let mutable previousKey = ""
+  let mutable normalPostings = 0L
+
+  for index in 0 .. int segment.Header.PrimaryCount - 1 do
+    cancellation.ThrowIfCancellationRequested()
+    let struct (text, first, count, _) = lookupKeyAt segment index
+
+    if index <> 0 && index <> normalCount && String.CompareOrdinal(previousKey, text) >= 0 then
+      corrupt "lookup" "Keys are not strictly increasing"
+
+    previousKey <- text
+    validatedReferences.Clear()
+    let mutable previous = struct (-1, -1)
+
+    for position in 0 .. count - 1 do
+      if position &&& 1023 = 0 then
+        cancellation.ThrowIfCancellationRequested()
+
+      let posting =
+        lookupPostingAt view segment (postingBase + (first + position) * Format.Lookup.PostingLength) previous
+
+      previous <- posting
+      let struct (_, reference) = lookupPostingReference view posting
+
+      if validatedReferences.Add reference then
+        cancellation.ThrowIfCancellationRequested()
+        checkLookupReference (index >= normalCount) text (view.StringBytes reference)
+
+        // Bound memoization, not verification work; uncached references are still checked.
+        if validatedReferences.Count >= MaxLookupPostings then
+          validatedReferences.Clear()
+
+    if index < normalCount then
+      normalPostings <- normalPostings + int64 count
+
+  // Unique keys and matching, ordered postings allow each source field at most once per region.
+  if
+    normalPostings <> expectedPostings
+    || int64 segment.Header.SecondaryCount - normalPostings <> expectedPostings
+  then
+    corrupt "lookup" "Posting coverage disagrees with the source fields"
+
 let private lookupContainingKey (segment: Reader.MappedSegment) firstKey endKey position =
   let mutable low = firstKey
   let mutable high = endKey - 1
@@ -916,33 +1045,13 @@ let private searchCore
         if work &&& 1023 = 0 then
           cancellation.ThrowIfCancellationRequested()
 
-        let record = segment.Payload.Slice(postingBase + (first + position) * 8, 8)
-        let index = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(0, 4))
-        let targetCode = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(4, 4))
-
-        if index >= uint32 view.NodeCount || targetCode > 2u then
-          corrupt "lookup" "Invalid posting reference or target"
-
-        let pair = struct (int index, int targetCode)
-
-        if compare pair previous <= 0 then
-          corrupt "lookup" "Postings are not strictly increasing"
+        let struct (index, targetCode) as pair =
+          lookupPostingAt view segment (postingBase + (first + position) * 8) previous
 
         previous <- pair
 
-        if not exactNamesOnly || targetCode <> 2u then
-          let node = view.Node(int index)
-
-          let target, reference =
-            match targetCode with
-            | 0u -> Name, node.NameRef
-            | 1u -> QualifiedName, node.QualifiedNameRef
-            | 2u ->
-              if node.FileIndex = Format.NodeRecord.NoFile then
-                corrupt "lookup" "Path posting has no file"
-
-              Path, view.FilePathRef node.FileIndex
-            | _ -> corrupt "lookup" "Invalid posting target"
+        if not exactNamesOnly || targetCode <> 2 then
+          let struct (target, reference) = lookupPostingReference view pair
 
           if validatedReferences.Add reference then
             let bytes = view.StringBytes reference
@@ -952,12 +1061,11 @@ let private searchCore
             else
               decodedBytes <- decodedBytes + int64 bytes.Length
 
-              if Strings.lookupKey ignoreCase (Strings.utf8.GetString bytes) <> text then
-                corrupt "lookup" "Posting key disagrees with its node"
+              checkLookupReference ignoreCase text bytes
 
           if not truncated then
             let hit =
-              { Node = int index
+              { Node = index
                 Strength = strength
                 Target = target }
 
@@ -1415,8 +1523,8 @@ let neighbors view start kinds direction depth cancellation =
 /// A complete no-match outcome refers only to paths within the requested depth.
 /// Routes outside that query boundary are not omitted candidates.
 ///
-/// 経路が複数ある場合は、密インデックスの昇順で最初に見つかったものを返す。CSR の
-/// 隣接が昇順に整列しているため、この選択は決定的である。
+/// Ties use the first intersection in the cheaper frontier's stable node,
+/// edge-kind, direction, and CSR order.
 let shortestPath
   (view: GraphView)
   (source: int)
@@ -1484,13 +1592,13 @@ let shortestPath
     let mutable forwardCost = cost forward direction
     let mutable backwardCost = cost backward reverse
 
-    // Every completed layer establishes full distance balls of these two radii.
-    // Once best <= their sum, no shorter path can remain undiscovered.
+    // The completed distance balls are disjoint before each layer. Their first
+    // intersection proves a shortest route; finishing the layer only explores ties.
     while not stopped
+          && meeting < 0
           && forward.Length > 0
           && backward.Length > 0
-          && forwardDepth + backwardDepth < maxDepth
-          && best > forwardDepth + backwardDepth do
+          && forwardDepth + backwardDepth < maxDepth do
       cancellation.ThrowIfCancellationRequested()
       let fromSource = forwardCost <= backwardCost
 
@@ -1503,7 +1611,7 @@ let shortestPath
       let nextLayer = ResizeArray<int>()
       let mutable position = 0
 
-      while position < frontier.Length && not stopped do
+      while position < frontier.Length && not stopped && meeting < 0 do
         let current = frontier[position]
 
         let struct (examined, complete) =
@@ -1520,20 +1628,17 @@ let shortestPath
 
                 match others.TryGetValue next with
                 | true, otherDistance ->
-                  let length = level + 1 + otherDistance
-
-                  if length < best || (length = best && next < meeting) then
-                    best <- length
-                    meeting <- next
+                  best <- level + 1 + otherDistance
+                  meeting <- next
                 | false, _ -> ()
 
-            not stopped)
+            not stopped && meeting < 0)
 
         work <- work + examined
-        stopped <- stopped || not complete
+        stopped <- stopped || (not complete && meeting < 0)
         position <- position + 1
 
-      if not stopped then
+      if not stopped && meeting < 0 then
         let ordered = nextLayer.ToArray()
         Array.sortInPlace ordered
 
@@ -1544,7 +1649,7 @@ let shortestPath
           backward <- ordered
           backwardDepth <- backwardDepth + 1
 
-        if best > forwardDepth + backwardDepth && forwardDepth + backwardDepth < maxDepth then
+        if forwardDepth + backwardDepth < maxDepth then
           if fromSource then
             forwardCost <- cost forward direction
           else

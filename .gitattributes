@@ -15,6 +15,11 @@
 *.ico binary
 *.pdf binary
 *.zip binary
+*.bin binary
+
+# 符号化・改行の検体は原バイトを保存する。
+tests/corpus/cjk/** -text
+tests/corpus/pathological/** -text
 
 # srcnet の生成物はバイナリ セグメントを含む。差分を取らない。
 *.nodes binary
