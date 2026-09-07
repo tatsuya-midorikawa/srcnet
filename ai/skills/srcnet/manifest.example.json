@@ -1,4 +1,7 @@
 {
+  "SRCNET": "/path/to/srcnet",
+  "SOURCE_ROOT": "/path/to/source",
+  "INDEX_DIR": "/path/to/index",
   "manifestVersion": 3,
   "formatVersion": 3,
   "tool": "srcnet",
