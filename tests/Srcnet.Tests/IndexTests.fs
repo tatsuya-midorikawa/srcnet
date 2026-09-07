@@ -152,6 +152,54 @@ let ``--no-gitignore は無視設定を適用しない`` () =
   Assert.Contains("build/generated.c", found)
   Assert.Contains("debug.log", found)
 
+[<Theory>]
+[<InlineData(true, 1)>]
+[<InlineData(true, 4)>]
+[<InlineData(false, 1)>]
+[<InlineData(false, 4)>]
+let ``ドットで始まるディレクトリは無視設定にかかわらず走査しない`` respectIgnoreFiles jobs =
+  use workspace = new Workspace()
+  let included = [ ".settings.c"; "src/.settings.c"; "src/main.c"; "src.v2/main.c" ]
+
+  for path in included do
+    workspace.Write(path, "int visible;\n")
+
+  workspace.Write(".gitignore", "!**/.*/\n!**/.*/**\n")
+  workspace.Write(".srcnetignore", "!**/.*/\n!**/.*/**\n")
+
+  for directory in
+    [ ".git"
+      ".github"
+      ".vscode"
+      ".srcnet"
+      "src/.cache"
+      "src/..cache"
+      "設計/.内部"
+      "设计/.缓存"
+      "설계/.캐시" ] do
+    workspace.Write($"{directory}/nested/hidden.c", "int hidden;\n")
+
+  workspace.Write("src/.cache/.gitignore", String('x', Ignore.MaxLineBytes + 1))
+
+  let options =
+    { Walk.WalkOptions.defaults with
+        RespectIgnoreFiles = respectIgnoreFiles
+        Jobs = jobs
+        Extraction =
+          { Extractor.ExtractionOptions.defaults with
+              Tier = Model.Structure } }
+
+  let struct (result, diagnostics) = walk workspace options
+  Assert.Equal<Set<string>>(Set.ofList(".gitignore" :: ".srcnetignore" :: included), paths result)
+
+  Assert.Equal<Set<string>>(
+    set [ "src"; "src.v2"; "設計"; "设计"; "설계" ],
+    result.Directories |> Array.map value |> Set.ofArray
+  )
+
+  Assert.True result.Complete
+  Assert.Empty(diagnostics.Counts())
+
 [<Fact>]
 let ``CJK のパスと内容を欠落なく扱う`` () =
   use workspace = new Workspace()

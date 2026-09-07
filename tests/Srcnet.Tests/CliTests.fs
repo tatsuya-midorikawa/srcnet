@@ -235,6 +235,27 @@ let private runVerify (root: string) (deterministic: bool) =
   (Commands.verify arguments CancellationToken.None).Result
 
 [<Fact>]
+let ``index はドットで始まるディレクトリをグラフに含めない`` () =
+  use repository = new Sandbox()
+  repository.Write("src/main.c", "int visible;\n")
+  repository.Write("src/.settings.c", "int settings;\n")
+  repository.Write(".github/workflows/hidden.c", "int hidden;\n")
+  repository.Write("src/.cache/nested/hidden.c", "int hidden;\n")
+  Assert.Equal(Commands.ExitCode.Success, runIndex(Path.Combine(repository.Path, ".")))
+
+  let output = Path.Combine(repository.Path, Args.DefaultOutputDirectoryName)
+
+  match Manifest.read output with
+  | Error error -> failwith(Manifest.ManifestError.describe error)
+  | Ok manifest ->
+    Assert.True manifest.Complete
+    Assert.Equal(1, manifest.Counts.Directories)
+    Assert.Equal(2, manifest.Counts.Files)
+    Assert.Equal(4, manifest.Counts.Nodes)
+
+  Assert.Equal(Commands.ExitCode.Success, runVerify repository.Path true)
+
+[<Fact>]
 let ``全コマンドは同じ成果物パスを使い明示した出力先を優先する`` () =
   use repository = new Sandbox()
   repository.Write("日本語.c", "int value;\n")

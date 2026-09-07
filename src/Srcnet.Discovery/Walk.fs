@@ -387,7 +387,8 @@ let run
 
           let excluded =
             excludedPaths.Contains childValue
-            || (isDirectory && excludedDirectoryNames.Contains entry.Name)
+            || (isDirectory
+                && (entry.Name.StartsWith('.') || excludedDirectoryNames.Contains entry.Name))
 
           let ignored =
             excluded
