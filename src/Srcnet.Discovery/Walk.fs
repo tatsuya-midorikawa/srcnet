@@ -44,6 +44,9 @@ type WalkOptions =
 
 module WalkOptions =
 
+  [<Literal>]
+  let MaxJobs = 256
+
   /// 既定の上限。いずれも資源枯渇を防ぐためのもので、超過は失敗ではなく診断である。
   [<Literal>]
   let DefaultMaxEntries = 8_000_000
@@ -57,7 +60,7 @@ module WalkOptions =
       MaxDepth = MaxDepth
       MaxEntries = DefaultMaxEntries
       MaxFileSizeBytes = DefaultMaxFileSizeBytes
-      Jobs = Environment.ProcessorCount
+      Jobs = min MaxJobs Environment.ProcessorCount
       ExcludedDirectoryNames = [| ".git"; ".hg"; ".svn" |]
       ExcludedPaths = Array.empty
       Extraction = Extractor.ExtractionOptions.defaults
@@ -254,6 +257,9 @@ let run
   (cancellation: CancellationToken)
   : Task<WalkResult> =
   task {
+    if options.Jobs < 0 || options.Jobs > WalkOptions.MaxJobs then
+      invalidArg (nameof options) $"Jobs must be between 0 and {WalkOptions.MaxJobs}"
+
     let rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath physicalRoot)
 
     // ルート自身がリンク経由で与えられることがある（macOS の /tmp など）。
@@ -290,6 +296,7 @@ let run
     let mutable syntaxFiles = 0
     let mutable lineOrientedFiles = 0
     let mutable notExtractedFiles = 0
+    let missingGrammars = ConcurrentDictionary<Language, byte>()
 
     let enqueue item =
       Interlocked.Increment &pending |> ignore
@@ -468,7 +475,7 @@ let run
                     let extraction =
                       if options.Extraction.Tier = Model.Structure then
                         Model.ExtractedFile.empty Model.Structure
-                      elif summary.Decoded && summary.DecodedLength > 0 then
+                      elif summary.Decoded then
                         extractor.Extract(
                           language,
                           childValue,
@@ -477,8 +484,6 @@ let run
                           discoveredFlags,
                           cancellation
                         )
-                      elif summary.Decoded then
-                        Model.ExtractedFile.empty extractor.Options.Tier
                       elif discoveredFlags.HasFlag NodeFlags.Binary then
                         Model.ExtractedFile.skipped Model.Structure Model.NotText
                       elif fileInfo.Length > options.Extraction.MaxExtractionBytes then
@@ -506,9 +511,9 @@ let run
                     match extraction.Skipped with
                     | ValueSome((Model.ParseTimedOut | Model.ParseUnavailable _) as reason) ->
                       diagnostics.Add(ExtractionDegraded, childValue, Model.SkipReason.describe reason)
+                    | ValueSome Model.NoGrammar -> missingGrammars.TryAdd(language, 0uy) |> ignore
                     | ValueSome(Model.TooLargeToExtract _)
                     | ValueSome Model.NotText
-                    | ValueSome Model.NoGrammar
                     | ValueSome(Model.AmbiguousEncoding _)
                     | ValueSome(Model.UnsupportedEncoding _)
                     | ValueNone -> ()
@@ -671,6 +676,9 @@ let run
       && not parserAvailable
     then
       diagnostics.Add(ExtractionDegraded, "", "構文解析器を利用できないため、抽出は T1（行指向）までで実行しました")
+    elif parserAvailable then
+      for language in missingGrammars.Keys |> Seq.sortBy Language.toCode do
+        diagnostics.Add(ExtractionDegraded, "", $"{Language.name language} の文法を利用できないため、抽出は T1（行指向）までで実行しました")
 
     return
       { Directories = orderedDirectories

@@ -111,71 +111,6 @@ let private checkStringBytes
 
     index <- index + 1
 
-let private checkNodes
-  (cancellation: CancellationToken)
-  (name: string)
-  (segment: Reader.MappedSegment)
-  (stringCount: int)
-  (fileCount: int)
-  (issues: ResizeArray<Issue>)
-  =
-  let payload = segment.Payload
-  let count = int segment.Header.PrimaryCount
-  let expectedLength = count * Format.RecordLength
-
-  if payload.Length <> expectedLength then
-    issues.Add(LengthMismatch(name, int64 expectedLength, int64 payload.Length))
-  else
-    let mutable index = 0
-    let mutable reported = false
-
-    while index < count && not reported do
-      checkCancellation cancellation index
-      let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
-      let kindCode = record[Format.NodeRecord.KindOffset]
-
-      if not reported then
-        match NodeKind.ofCode kindCode with
-        | ValueNone ->
-          issues.Add(UnknownNodeKind(name, kindCode))
-          reported <- true
-        | ValueSome _ -> ()
-
-        let nameRef = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.NameOffset, 4))
-        let qualifiedRef = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.QualifiedNameOffset, 4))
-        let fileIndex = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FileIndexOffset, 4))
-
-        if nameRef >= uint32 stringCount || qualifiedRef >= uint32 stringCount then
-          issues.Add(ReferenceOutOfRange(name, $"ノード {index} の文字列参照が {stringCount} 件を超えています"))
-          reported <- true
-        elif fileIndex <> Format.NodeRecord.NoFile && fileIndex >= uint32 fileCount then
-          issues.Add(ReferenceOutOfRange(name, $"ノード {index} のファイル参照が {fileCount} 件を超えています"))
-          reported <- true
-
-      index <- index + 1
-
-let private checkFiles (cancellation: CancellationToken) (name: string) (segment: Reader.MappedSegment) (stringCount: int) (issues: ResizeArray<Issue>) =
-  let payload = segment.Payload
-  let count = int segment.Header.PrimaryCount
-  let expectedLength = count * Format.RecordLength
-
-  if payload.Length <> expectedLength then
-    issues.Add(LengthMismatch(name, int64 expectedLength, int64 payload.Length))
-  else
-    let mutable index = 0
-    let mutable reported = false
-
-    while index < count && not reported do
-      checkCancellation cancellation index
-      let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
-      let pathRef = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4))
-
-      if pathRef >= uint32 stringCount then
-        issues.Add(ReferenceOutOfRange(name, $"ファイル {index} のパス参照が {stringCount} 件を超えています"))
-        reported <- true
-
-      index <- index + 1
-
 let private checkCsr (cancellation: CancellationToken) (name: string) (segment: Reader.MappedSegment) (nodeCount: int) (expectedEdges: int) (issues: ResizeArray<Issue>) =
   let payload = segment.Payload
   let count = int segment.Header.PrimaryCount
@@ -217,17 +152,25 @@ let private checkCsr (cancellation: CancellationToken) (name: string) (segment: 
     if not reported && previous <> uint64 edgeCount then
       issues.Add(CountMismatch(name, edgeCount, int64 previous))
 
-    let mutable target = 0L
-
-    while target < edgeCount && not reported do
-      checkCancellation cancellation (int target)
-      let value = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(targetsOffset + int target * 4, 4))
-
-      if value >= uint32 nodeCount then
-        issues.Add(ReferenceOutOfRange(name, $"隣接要素 {target} がノード数 {nodeCount} を超えています"))
-        reported <- true
-
-      target <- target + 1L
+    let mutable source = 0
+    while source < nodeCount && not reported do
+      checkCancellation cancellation source
+      let first = int (BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(source * 8, 8)))
+      let finish = int (BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice((source + 1) * 8, 8)))
+      let mutable target = first
+      let mutable previousTarget = 0u
+      while target < finish && not reported do
+        checkCancellation cancellation target
+        let value = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(targetsOffset + target * 4, 4))
+        if value >= uint32 nodeCount then
+          issues.Add(ReferenceOutOfRange(name, $"隣接要素 {target} がノード数 {nodeCount} を超えています"))
+          reported <- true
+        elif target > first && value <= previousTarget then
+          issues.Add(OrderViolation(name, $"ノード {source} の隣接要素が重複または降順です"))
+          reported <- true
+        previousTarget <- value
+        target <- target + 1
+      source <- source + 1
 
 let private checkIdMap (cancellation: CancellationToken) (nodes: Reader.MappedSegment) (name: string) (segment: Reader.MappedSegment) (nodeCount: int) (issues: ResizeArray<Issue>) =
   let payload = segment.Payload
@@ -304,8 +247,60 @@ let private checkReferences
       elif edgeCode = 0uy || edgeCode > EdgeKind.toCode MemberOf then
         issues.Add(UnknownEdgeKind(name, edgeCode))
         reported <- true
+      elif not (Format.ReferenceRecord.hasValidMetadata record) then
+        issues.Add(SegmentUnreadable(name, $"参照 {index} の言語・確度・段階または位置が不正です"))
+        reported <- true
 
       index <- index + 1
+
+let private checkGraph (view: Query.GraphView) (cancellation: CancellationToken) =
+  let corrupt name detail = raise(Query.QueryException(Query.SegmentCorrupt(name, detail)))
+  let kinds = Array.zeroCreate<int> 256
+  for index in 0 .. view.NodeCount - 1 do
+    checkCancellation cancellation index
+    let node = view.Node index
+    kinds[int (NodeKind.toCode node.Kind)] <- kinds[int (NodeKind.toCode node.Kind)] + 1
+    if index = 0 && node.Kind <> Repository then corrupt "nodes" "The first node is not a repository"
+    if index > 0 && index <= view.Manifest.Counts.Directories && node.Kind <> Directory then
+      corrupt "nodes" "Directory nodes disagree with the dense schema"
+
+  for entry in view.Manifest.Counts.NodeKinds do
+    let actual =
+      kinds
+      |> Array.mapi (fun code count ->
+        match NodeKind.ofCode (byte code) with
+        | ValueSome kind when NodeKind.name kind = entry.Kind -> count
+        | _ -> 0)
+      |> Array.sum
+    if actual <> entry.Count then corrupt "nodes" $"Node kind count disagrees: {entry.Kind}"
+
+  for index in 0 .. view.FileCount - 1 do
+    checkCancellation cancellation index
+    view.FileNodeIndex(uint32 index) |> ignore
+
+  // Sorted rows allow a bounded-memory transpose check without copying the graph.
+  for kind in view.EdgeKinds do
+    for source in 0 .. view.NodeCount - 1 do
+      checkCancellation cancellation source
+      match view.Adjacency(source, kind, false) with
+      | ValueNone -> ()
+      | ValueSome(struct (forward, offset, count)) ->
+        for position in 0 .. count - 1 do
+          checkCancellation cancellation position
+          let target = view.Target(forward, offset, position)
+          let mutable found = false
+          match view.Adjacency(target, kind, true) with
+          | ValueNone -> ()
+          | ValueSome(struct (backward, reverseOffset, reverseCount)) ->
+            let mutable low = 0
+            let mutable high = reverseCount - 1
+            while low <= high && not found do
+              let middle = low + (high - low) / 2
+              let candidate = view.Target(backward, reverseOffset, middle)
+              if candidate = source then found <- true
+              elif candidate < source then low <- middle + 1
+              else high <- middle - 1
+          if not found then corrupt (EdgeKind.name kind) "Forward and reverse CSR disagree"
 
 /// 成果物へ記録された文法の版と、現在の実行ファイルの版を突き合わせる。
 ///
@@ -397,13 +392,9 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
             checkStringOffsets cancellation offsetName offsets issues
             if issues.Count = before then checkStringBytes cancellation name strings offsets issues))
 
-    openSegment "nodes" Format.Nodes manifest.Counts.Nodes (fun name segment ->
-      checkNodes cancellation name segment manifest.Counts.Strings manifest.Counts.Files issues
+    openSegment "nodes" Format.Nodes manifest.Counts.Nodes (fun _ segment ->
       openSegment "idmap" Format.IdMap manifest.Counts.Nodes (fun idName idMap ->
         checkIdMap cancellation segment idName idMap manifest.Counts.Nodes issues))
-
-    openSegment "files" Format.Files manifest.Counts.Files (fun name segment ->
-      checkFiles cancellation name segment manifest.Counts.Strings issues)
 
     // エッジ種別ごとに前方・後方の CSR を持つ。種別が増えても検査を取りこぼさないよう、
     // マニフェストが数えている種別をそのまま辿る。
@@ -416,21 +407,20 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
     openSegment "refs" Format.References manifest.Counts.ReferenceCandidates (fun name segment ->
       checkReferences cancellation name segment manifest.Counts.Nodes manifest.Counts.Strings issues)
 
-    if
-      issues.Count = 0
-      && (manifest.Segments |> Array.exists (fun segment -> segment.Name.EndsWith(".lookup", StringComparison.Ordinal)))
-    then
+    if issues.Count = 0 then
       match Query.GraphView.Open outputDirectory with
-      | Error error -> issues.Add(SegmentUnreadable("lookup", Query.QueryError.describe error))
+      | Error error -> issues.Add(SegmentUnreadable("graph", Query.QueryError.describe error))
       | Ok view ->
         use view = view
         if view.Manifest <> manifest then
           issues.Add(ManifestUnreadable(Query.QueryError.describe Query.GenerationChanged))
         else
           try
-            Query.validateLookup view cancellation
+            checkGraph view cancellation
+            if manifest.Segments |> Array.exists (fun segment -> segment.Name.EndsWith(".lookup", StringComparison.Ordinal)) then
+              Query.validateLookup view cancellation
           with Query.QueryException error ->
-            issues.Add(SegmentUnreadable("lookup", Query.QueryError.describe error))
+            issues.Add(SegmentUnreadable("graph", Query.QueryError.describe error))
 
     checkGrammars manifest issues
 

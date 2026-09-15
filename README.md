@@ -69,6 +69,34 @@ $ dotnet run --project src/Srcnet.Cli -c Release -- --help
 以下の `srcnet` はビルドした実行ファイルを指します。PATH へ配置していない場合は
 `dotnet run --project src/Srcnet.Cli -c Release --` に置き換えて実行できます。
 
+### コマンドとして導入する
+
+ソースから .NET ツールを作り、専用フォルダーへ導入できます。ツールの導入は
+生成したローカルパッケージだけを使い、グローバル設定や PATH を変更しません。
+ビルド時の NuGet 復元は、依存がキャッシュされていなければネットワークを使います。
+
+```console
+$ dotnet pack src/Srcnet.Cli -c Release -o artifacts/packages -p:IncludeNativeParser=false
+$ dotnet tool install Srcnet.Cli --version 0.1.0 --source ./artifacts/packages --tool-path ./artifacts/bin
+```
+
+macOS では `./artifacts/bin/srcnet --help`、Windows の PowerShell では
+`.\artifacts\bin\srcnet.exe --help` で起動します。以降はこの実行ファイルを
+任意の作業ディレクトリから呼べます。導入には .NET 10 SDK、実行には .NET 10 runtime が必要です。
+同じフォルダーのツールを入れ直す場合は、`dotnet tool uninstall Srcnet.Cli --tool-path ./artifacts/bin`
+でそのツールだけを外してから導入し直します。
+
+この例は解析器を含めない移植可能なパッケージを作ります。T1 で索引する場合は `--tier 1` を指定します。
+C / C++ の T2 が必要なら、先に `python3 tools/build_native.py --languages c cpp` を実行し、
+`-p:IncludeNativeParser=false` を外してパッケージ化してください。Windows では `python` を使えます。
+ネイティブ解析器を含むパッケージは、構築した OS・CPU architecture 用です。
+
+ツール形式が不要なら、`dotnet publish src/Srcnet.Cli -c Release -o artifacts/cli` で
+実行用フォルダーを作れます。実行ファイルだけでなく、生成された DLL・設定・ライセンス表記も
+一緒に配置してください。こちらも .NET 10 runtime を使います。
+
+### 索引と照会
+
 索引・整合性検査に加えて、部分グラフを予算内で照会できます。
 
 ```console
@@ -99,6 +127,12 @@ JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、
 
 `stdout` には結果のみを出力し、進捗・警告・診断は `stderr` へ出します。終了コードは
 [クエリと CLI](docs/query-and-cli.md) 2.2 に従います。
+各コマンドの `--help` / `-h` でも説明を表示できます。`--` 以降は位置引数として扱うため、
+`srcnet search --json -- --option-name` のようにオプションに見える名前も検索できます。
+
+エージェント向けには、索引を作る `srcnet-index` と既存索引を照会する `srcnet` の
+[配布用スキル](ai/skills/README.md) があります。導入先と、ソース・実行ファイル・索引の
+パスの渡し方は同文書を参照してください。
 
 ## 実装の構成
 

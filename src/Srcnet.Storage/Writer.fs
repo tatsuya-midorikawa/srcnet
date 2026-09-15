@@ -258,7 +258,7 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
   let normal = Array.create stringCount ValueNone
   let folded = Array.create stringCount ValueNone
 
-  let key (reference: uint32) ignoreCase =
+  let rec key (reference: uint32) ignoreCase =
     if reference >= uint32 stringCount then
       corrupt "nodes/files" "String reference out of range"
 
@@ -268,37 +268,42 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     match cache[index] with
     | ValueSome value -> value
     | ValueNone ->
-      let first =
-        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(index * 8, 8))
+      let value =
+        if ignoreCase then Strings.lookupKey true (key reference false)
+        else
+          let first = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(index * 8, 8))
+          let last = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice((index + 1) * 8, 8))
 
-      let last =
-        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice((index + 1) * 8, 8))
+          if last < first || last > uint64 strings.Payload.Length then
+            corrupt "stroffsets" "String offsets out of range"
+          if last - first > uint64 Format.Lookup.MaxKeyBytes then
+            raise(LookupBuildException(LookupTooLarge "Source key exceeds the 1 MiB UTF-8 limit"))
 
-      if last < first || last > uint64 strings.Payload.Length then
-        corrupt "stroffsets" "String offsets out of range"
-
-      if last - first > uint64 Format.Lookup.MaxKeyBytes then
-        raise(LookupBuildException(LookupTooLarge "Source key exceeds the 1 MiB UTF-8 limit"))
-
-      let text =
-        try
-          Strings.utf8.GetString(strings.Payload.Slice(int first, int(last - first)))
-        with :? Text.DecoderFallbackException ->
-          corrupt "strings" "Invalid UTF-8"
-
-      let value = Strings.lookupKey ignoreCase text
+          let text =
+            try
+              Strings.utf8.GetString(strings.Payload.Slice(int first, int(last - first)))
+            with :? Text.DecoderFallbackException ->
+              corrupt "strings" "Invalid UTF-8"
+          Strings.lookupKey false text
       cache[index] <- ValueSome value
       value
 
-  // Offline build only: keep compact postings, not a second managed graph.
-  let postings = ResizeArray<struct (bool * string * int * int)>()
+  // Folded references use the complemented index: three ints instead of a bool/string tuple.
+  let postings = ResizeArray<struct (int * int * int)>()
+
+  let cachedKey reference =
+    let cached = if reference < 0 then folded[~~~reference] else normal[reference]
+    match cached with
+    | ValueSome text -> text
+    | ValueNone -> invalidOp "Lookup posting refers to an uninitialized key"
 
   let add node target reference =
     let text = key reference false
 
     if text.Length > 0 then
-      postings.Add(struct (false, text, node, target))
-      postings.Add(struct (true, key reference true, node, target))
+      key reference true |> ignore
+      postings.Add(struct (int reference, node, target))
+      postings.Add(struct (~~~(int reference), node, target))
 
   for index in 0 .. nodeCount - 1 do
     checkCancellation cancellation index
@@ -325,15 +330,15 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
 
   let mutable comparisons = 0
 
-  let comparePosting (struct (lf, lk, ln, lt)) (struct (rf, rk, rn, rt)) =
+  let comparePosting (struct (lk, ln, lt)) (struct (rk, rn, rt)) =
     comparisons <- comparisons + 1
     checkCancellation cancellation comparisons
-    let byFold = compare lf rf
+    let byFold = compare (lk < 0) (rk < 0)
 
     if byFold <> 0 then
       byFold
     else
-      let byKey = String.CompareOrdinal(lk, rk)
+      let byKey = if lk = rk then 0 else String.CompareOrdinal(cachedKey lk, cachedKey rk)
 
       if byKey <> 0 then
         byKey
@@ -358,14 +363,17 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
   while position < postings.Count do
     checkCancellation cancellation position
     let first = position
-    let struct (fold, text, _, _) = postings[position]
+    let struct (reference, _, _) = postings[position]
+    let fold = reference < 0
+    let text = cachedKey reference
     position <- position + 1
     let mutable same = true
 
     while same && position < postings.Count do
-      let struct (nextFold, nextText, _, _) = postings[position]
+      let struct (nextReference, _, _) = postings[position]
 
-      if fold = nextFold && String.Equals(text, nextText, StringComparison.Ordinal) then
+      if fold = (nextReference < 0)
+         && (reference = nextReference || String.Equals(text, cachedKey nextReference, StringComparison.Ordinal)) then
         checkCancellation cancellation position
         position <- position + 1
       else
@@ -422,7 +430,7 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
 
   for index in 0 .. postings.Count - 1 do
     checkCancellation cancellation index
-    let struct (_, _, node, target) = postings[index]
+    let struct (_, node, target) = postings[index]
     let record = writer.Reserve Format.Lookup.PostingLength
     BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(0, 4), uint32 node)
     BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(4, 4), uint32 target)
@@ -528,7 +536,7 @@ let private writeCsr
 /// 「0 = リポジトリ → ディレクトリ → ファイル → シンボル → 構成シンボル」の順で、
 /// ディレクトリとファイルは論理パスの序数昇順、シンボルはファイル順・ファイル内の
 /// バイト位置順、構成シンボルは名前の序数昇順に並ぶ。この順序が決定性の基礎になる。
-let write
+let private writeBase
   (segmentDirectory: string)
   (input: IndexInput)
   (diagnostics: DiagnosticSink)
@@ -666,7 +674,7 @@ let write
 
   // 衝突は握りつぶさず、公開を止める失敗として扱う。docs/graph-model.md 4.2 を参照。
   let sortedIds = Array.copy ids
-  Array.sortInPlace sortedIds
+  Array.sortInPlaceWith NodeId.compare sortedIds
   let mutable idCollisions = 0
 
   for index in 1 .. nodeCount - 1 do
@@ -1125,7 +1133,7 @@ let write
         PayloadLength = payloadLength }
 
     let order = Array.init nodeCount id
-    Array.sortInPlaceWith (fun (a: int) (b: int) -> compare ids[a] ids[b]) order
+    Array.sortInPlaceWith (fun (a: int) (b: int) -> NodeId.compare ids[a] ids[b]) order
 
     let mutable idMapIndex = 0
 
@@ -1140,8 +1148,6 @@ let write
       BinaryPrimitives.WriteUInt32LittleEndian(writer.Reserve 4, uint32 position)
 
     descriptors.Add(writer.Complete())
-
-  descriptors.Add(buildLookup segmentDirectory cancellation)
 
   let ordered = descriptors.ToArray()
 
@@ -1177,3 +1183,17 @@ let write
     NodeKinds = nodeKinds
     EdgeKinds = edgeKinds
     IdCollisions = idCollisions }
+
+/// 基本セグメントの構築用配列を照会索引の構築中まで保持しない。
+/// 並び・形式・公開方法は変えず、二つの大きな作業領域の寿命だけを分ける。
+let write
+  (segmentDirectory: string)
+  (input: IndexInput)
+  (diagnostics: DiagnosticSink)
+  (cancellation: CancellationToken)
+  : WriteResult =
+  let result = writeBase segmentDirectory input diagnostics cancellation
+  let lookup = buildLookup segmentDirectory cancellation
+  let segments = Array.append result.Segments [| lookup |]
+  Array.sortInPlaceWith (fun (left: SegmentDescriptor) right -> String.CompareOrdinal(left.Name, right.Name)) segments
+  { result with Segments = segments }

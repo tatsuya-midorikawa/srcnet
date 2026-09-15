@@ -75,8 +75,10 @@ type IndexOptions =
     RespectIgnoreFiles: bool
     MaxDepth: int
     MaxFileSizeBytes: int64
-    /// 実際に適用した抽出段階（0..3）。
+    /// 実際に適用した抽出段階（0..2）。
     Tier: int
+    /// 要求段階。旧成果物には存在しないため、省略と明示値を区別する。
+    RequestedTier: int voption
     /// 構文解析器を利用できたか。段階が下がった理由を成果物から説明できるようにする。
     ParserAvailable: bool
     /// 同梱している文法の一覧。言語名の序数昇順。
@@ -153,6 +155,9 @@ let private serialize (manifest: Manifest) =
   writer.WriteNumber("maxDepth", manifest.Options.MaxDepth)
   writer.WriteNumber("maxFileSizeBytes", manifest.Options.MaxFileSizeBytes)
   writer.WriteNumber("tier", manifest.Options.Tier)
+  match manifest.Options.RequestedTier with
+  | ValueSome tier -> writer.WriteNumber("requestedTier", tier)
+  | ValueNone -> ()
   writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
   writer.WriteString("assumedEncoding", manifest.Options.AssumedEncoding)
   writer.WriteStartArray "grammars"
@@ -622,21 +627,32 @@ let private readOptions (element: JsonElement) =
   match
     requireBoolean element "followSymbolicLinks",
     requireBoolean element "respectIgnoreFiles",
-    requireInt32 element "maxDepth",
+    requireInt64 element "maxDepth" 0L (int64 Paths.MaxDepth),
     requireInt64 element "maxFileSizeBytes" 0L Int64.MaxValue
   with
   | Ok followSymbolicLinks, Ok respectIgnoreFiles, Ok maxDepth, Ok maxFileSizeBytes ->
-    match requireInt64 element "tier" 0L 3L, requireBoolean element "parserAvailable", readGrammars element with
+    match requireInt64 element "tier" 0L 2L, requireBoolean element "parserAvailable", readGrammars element with
     | Ok tier, Ok parserAvailable, Ok grammars ->
+      let requested =
+        match element.TryGetProperty "requestedTier" with
+        | false, _ -> Ok ValueNone
+        | true, _ -> requireInt64 element "requestedTier" tier 2L |> Result.map (int >> ValueSome)
+
+      match requested with
+      | Error error -> Error error
+      | Ok requestedTier ->
       match requireString element "assumedEncoding" with
       | Error error -> Error error
+      | Ok assumedEncoding when assumedEncoding <> "" && (Srcnet.Text.Encodings.tryParse assumedEncoding |> ValueOption.isNone) ->
+        Error(Malformed "assumedEncoding が対応する符号化名ではありません")
       | Ok assumedEncoding ->
         Ok
           { FollowSymbolicLinks = followSymbolicLinks
             RespectIgnoreFiles = respectIgnoreFiles
-            MaxDepth = maxDepth
+            MaxDepth = int maxDepth
             MaxFileSizeBytes = maxFileSizeBytes
             Tier = int tier
+            RequestedTier = requestedTier
             ParserAvailable = parserAvailable
             Grammars = grammars
             AssumedEncoding = assumedEncoding }

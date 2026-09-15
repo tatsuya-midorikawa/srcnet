@@ -236,3 +236,97 @@ let ``long error diagnostics preserve Unicode scalar boundaries and report omiss
     Assert.DoesNotContain("\uFFFD", diagnostic)
     Assert.EndsWith("\ud83d\ude00", diagnostic)
   }
+
+[<Fact>]
+let ``default extraction retains the requested tier for deterministic verification`` () =
+  task {
+    use workspace = new Workspace()
+    let source = Path.Combine(workspace.Path, "source")
+    Directory.CreateDirectory source |> ignore
+    File.WriteAllText(Path.Combine(source, "sample.c"), "int value;\n")
+    let! struct (code, json, errors) = Corpus.runCli [ "index"; source; "--json" ]
+    Assert.True(code = 0 || code = 4, errors)
+    use result = JsonDocument.Parse json
+    use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(source, ".srcnet", "manifest.json")))
+    Assert.Equal(2, manifest.RootElement.GetProperty("options").GetProperty("requestedTier").GetInt32())
+    Assert.Equal(result.RootElement.GetProperty("tier").GetInt32(),
+                 manifest.RootElement.GetProperty("options").GetProperty("tier").GetInt32())
+    let! struct (verified, report, verifyErrors) =
+      Corpus.runCli [ "verify"; source; "--deterministic"; "--json" ]
+    Assert.True((verified = 0), report + verifyErrors)
+  }
+
+[<Fact>]
+let ``option-shaped query text does not change error output options`` () =
+  task {
+    use workspace = new Workspace()
+    let! struct (code, output, errors) =
+      Corpus.runCli [ "context"; "--out"; workspace.Path; "--"; "--json"; "--budget=256" ]
+    Assert.Equal(3, code)
+    Assert.Equal("", output)
+    Assert.NotEqual<string>("", errors)
+  }
+
+[<Fact>]
+let ``deterministic verification requires its source before opening artifacts`` () =
+  task {
+    let! struct (code, json, errors) = Corpus.runCli [ "verify"; "--deterministic"; "--json" ]
+    Assert.Equal(2, code)
+    Assert.Equal("", errors)
+    use document = JsonDocument.Parse json
+    Assert.Equal("verify", document.RootElement.GetProperty("command").GetString())
+  }
+
+[<Fact>]
+let ``corrupt artifacts use the documented verification exit code`` () =
+  task {
+    use workspace = new Workspace()
+    do! index workspace.Path "micro"
+    use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(workspace.Path, "manifest.json")))
+    let segments = manifest.RootElement.GetProperty("segments")
+    let name = segments[0].GetProperty("name").GetString()
+    let path = Path.Combine(workspace.Path, name.Replace('/', Path.DirectorySeparatorChar))
+    let bytes = File.ReadAllBytes path
+    bytes[bytes.Length - 1] <- bytes[bytes.Length - 1] ^^^ 1uy
+    File.WriteAllBytes(path, bytes)
+    let! struct (code, json, errors) = Corpus.runCli [ "verify"; "--out"; workspace.Path; "--json" ]
+    Assert.Equal(3, code)
+    Assert.Equal("", errors)
+    use document = JsonDocument.Parse json
+    Assert.False(document.RootElement.GetProperty("valid").GetBoolean())
+  }
+
+[<Fact>]
+let ``a held writer lease rejects indexing before reading source ignore rules`` () =
+  task {
+    use source = new Workspace()
+    use output = new Workspace()
+    File.WriteAllText(Path.Combine(source.Path, ".gitignore"),
+                      "#" + String('x', Srcnet.Discovery.Ignore.MaxLineBytes + 1))
+    match Srcnet.Storage.Manifest.acquireWriter output.Path with
+    | Error error -> failwith (Srcnet.Storage.Artifact.PathError.describe error)
+    | Ok lease ->
+      use _lease = lease
+      let! struct (code, _, errors) =
+        Corpus.runCli [ "index"; source.Path; "--out"; output.Path; "--tier"; "0" ]
+      Assert.Equal(2, code)
+      Assert.DoesNotContain("ignore-file-unreadable", errors)
+      Assert.False(Directory.Exists(Srcnet.Storage.Manifest.stagingPath output.Path))
+  }
+
+[<Theory>]
+[<InlineData("stats")>]
+[<InlineData("verify")>]
+let ``artifact errors sanitize untrusted metadata before terminal output`` command =
+  task {
+    use workspace = new Workspace()
+    do! index workspace.Path "micro"
+    let path = Path.Combine(workspace.Path, "manifest.json")
+    let original = File.ReadAllText path
+    File.WriteAllText(path, original.Replace("\"Repository\"", "\"\\u001b[31mUnknown\""))
+    let! struct (code, output, errors) = Corpus.runCli [ command; "--out"; workspace.Path ]
+    Assert.Equal(3, code)
+    Assert.Equal("", output)
+    Assert.False(errors.Contains '\u001b')
+    Assert.True(errors.Contains '\uFFFD')
+  }

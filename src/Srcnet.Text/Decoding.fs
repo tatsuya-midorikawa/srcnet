@@ -111,6 +111,8 @@ let toUtf8
     let written = LegacyEncodings.decode encoding source destination
     if written < 0 then Unsupported else Converted written
 
+let private crlf = "\r\n"B
+
 /// 復号済みの UTF-8 バイト列から、改行種別によらない論理的な行数を数える。
 ///
 /// 判定時にバイト単位で数えられない符号化（UTF-16）のために用意する。
@@ -119,24 +121,10 @@ let countLines (source: ReadOnlySpan<byte>) =
   if source.Length = 0 then
     0
   else
-    let mutable terminators = 0
-    let mutable index = 0
-
-    while index < source.Length do
-      let b = source[index]
-
-      if b = 0x0Auy then
-        terminators <- terminators + 1
-        index <- index + 1
-      elif b = 0x0Duy then
-        terminators <- terminators + 1
-        // CRLF は 1 つの区切りとして数える。
-        if index + 1 < source.Length && source[index + 1] = 0x0Auy then
-          index <- index + 2
-        else
-          index <- index + 1
-      else
-        index <- index + 1
+    let lineFeeds = MemoryExtensions.Count(source, '\n'B)
+    let carriageReturns = MemoryExtensions.Count(source, '\r'B)
+    let pairs = MemoryExtensions.Count(source, ReadOnlySpan crlf)
+    let terminators = lineFeeds + (carriageReturns - pairs)
 
     let last = source[source.Length - 1]
 

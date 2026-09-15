@@ -181,6 +181,29 @@ let ``ID のバイト列の辞書順は数値順に一致する`` () =
     NodeId.writeTo (Span right) sorted[index]
     Assert.True(ReadOnlySpan(left).SequenceCompareTo(ReadOnlySpan right) < 0)
 
+[<Fact>]
+let ``repeated ID construction reuses scratch memory and preserves returned values`` () =
+  use builder = new NodeIdBuilder()
+  let path = ok(tryCreate "source.c")
+  let first = builder.Compute(Function, repository, path, "Item", 0u)
+  for index in 0 .. 999 do
+    builder.Compute(Function, repository, path, "Item", uint32 index) |> ignore
+  let allocated = GC.GetAllocatedBytesForCurrentThread()
+  for index in 0 .. 9999 do
+    builder.Compute(Function, repository, path, "Item", uint32 index) |> ignore
+  let used = GC.GetAllocatedBytesForCurrentThread() - allocated
+  Assert.Equal(0L, used)
+  Assert.Equal(first, builder.Compute(Function, repository, path, "Item", 0u))
+
+[<Fact>]
+let ``word-based ID ordering matches structural ordering at unsigned boundaries`` () =
+  let words = [| 0UL; 1UL; uint64 Int64.MaxValue; uint64 Int64.MaxValue + 1UL; UInt64.MaxValue |]
+  let ids = [| for high in words do for low in words do yield { High = high; Low = low } |]
+  for left in ids do
+    for right in ids do
+      Assert.Equal(compare left right, NodeId.compare left right)
+  Assert.Equal<NodeId[]>(Array.sort ids, Array.sortWith NodeId.compare (Array.rev ids))
+
 // --- リポジトリ ID ---
 
 [<Fact>]
@@ -336,3 +359,18 @@ let ``種別が違う診断は互いの標本枠を奪わない`` () =
   sink.Add(Diagnostics.PermissionDenied, "c", "")
   Assert.Equal(3, sink.Total)
   Assert.Equal(2, sink.Samples().Length)
+
+[<Fact>]
+let ``language lookup preserves stable codes without per-call allocation`` () =
+  for language in Language.all do
+    Assert.Equal(language, Language.ofCode(Language.toCode language))
+  Assert.Equal(Language.Unknown, Language.ofCode UInt16.MaxValue)
+  let mutable checksum = 0
+  for index in 0 .. 999 do
+    checksum <- checksum ^^^ int (Language.toCode (Language.ofCode (uint16 (index % 31))))
+  let before = GC.GetAllocatedBytesForCurrentThread()
+  for index in 0 .. 9999 do
+    checksum <- checksum ^^^ int (Language.toCode (Language.ofCode (uint16 (index % 31))))
+  let allocated = GC.GetAllocatedBytesForCurrentThread() - before
+  Assert.Equal(0L, allocated)
+  Assert.InRange(checksum, 0, 31)

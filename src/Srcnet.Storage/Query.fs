@@ -169,24 +169,8 @@ type GraphView
     let record =
       files.Payload.Slice(int fileIndex * Format.RecordLength, Format.RecordLength)
 
-    language "files" (BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.LanguageOffset, 2)))
-    |> ignore
-
-    let encoding =
-      BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2))
-
-    if encoding < 1us || encoding > 12us then
-      corrupt "files" "Unknown encoding code"
-
-    flags "files" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4)))
-    |> ignore
-
-    if
-      BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4)) > uint32
-        Int32.MaxValue
-      || BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8)) < 0L
-    then
-      corrupt "files" "Invalid file extent"
+    if not (Format.FileRecord.hasValidMetadata record) then
+      corrupt "files" "Invalid file language, encoding, flags or extent"
 
     record
 
@@ -1291,7 +1275,7 @@ let compareHits (view: GraphView) (left: SearchHit) (right: SearchHit) =
             byPath
           else
             // 同点の最終解消。ID は決定的なので順序も決定的になる。
-            compare leftNode.Id rightNode.Id
+            NodeId.compare leftNode.Id rightNode.Id
 
 // --- 近傍と経路 ---------------------------------------------------------------
 

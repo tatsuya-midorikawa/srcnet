@@ -21,14 +21,15 @@ let writeError (kind: string) (code: int) (message: string) (json: bool) =
 
 let writeArgumentError (arguments: string[]) code message =
   let kind = if arguments.Length = 0 then "query" else arguments[0]
-  let json = arguments |> Array.exists ((=) "--json")
+  let options = arguments |> Array.takeWhile ((<>) "--")
+  let json = options |> Array.exists ((=) "--json")
   let mutable budget = Args.DefaultBudget
-  for index in 0 .. arguments.Length - 1 do
+  for index in 0 .. options.Length - 1 do
     let value =
-      if arguments[index].StartsWith("--budget=", StringComparison.Ordinal) then
-        ValueSome(arguments[index].Substring 9)
-      elif arguments[index] = "--budget" && index + 1 < arguments.Length then
-        ValueSome arguments[index + 1]
+      if options[index].StartsWith("--budget=", StringComparison.Ordinal) then
+        ValueSome(options[index].Substring 9)
+      elif options[index] = "--budget" && index + 1 < options.Length then
+        ValueSome options[index + 1]
       else ValueNone
     match value with
     | ValueSome text ->
@@ -173,7 +174,7 @@ let private compareCandidates (view: Query.GraphView) (left: QueryOutput.Candida
     let leftNode = view.Node left.Index
     let rightNode = view.Node right.Index
     let kind = compare (NodeKind.toCode leftNode.Kind) (NodeKind.toCode rightNode.Kind)
-    if kind <> 0 then kind else compare leftNode.Id rightNode.Id
+    if kind <> 0 then kind else NodeId.compare leftNode.Id rightNode.Id
 
 let private resolveKinds (view: Query.GraphView) (requested: string[]) =
   if requested.Length = 0 then Ok view.EdgeKinds

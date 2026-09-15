@@ -493,6 +493,7 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
           MaxDepth = options.MaxDepth
           MaxFileSizeBytes = options.MaxFileSizeBytes
           Tier = int (Model.Tier.toCode result.AppliedTier)
+          RequestedTier = ValueNone
           ParserAvailable = result.ParserAvailable
           Grammars = Array.empty
           AssumedEncoding = "" }
@@ -1007,6 +1008,7 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
           MaxDepth = Walk.WalkOptions.defaults.MaxDepth
           MaxFileSizeBytes = Walk.WalkOptions.defaults.MaxFileSizeBytes
           Tier = int (Model.Tier.toCode walked.AppliedTier)
+          RequestedTier = ValueNone
           ParserAvailable = walked.ParserAvailable
           Grammars = Array.empty
           AssumedEncoding = "" }
@@ -1283,5 +1285,90 @@ let ``verify validates every lookup posting rather than only its checksum`` () =
     let keys = Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8))
     let first = Format.HeaderLength + Format.Lookup.PreludeLength + int keys * Format.Lookup.KeyLength
     Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), 3u)
+    bytes)
+  assertInvalidArtifact output.Path
+
+[<Theory>]
+[<InlineData(true)>]
+[<InlineData(false)>]
+let ``verify validates base record metadata with and without lexical lookup`` withLookup =
+  let cases =
+    [ ".nodes", Format.NodeRecord.LanguageOffset, 2, 65535UL
+      ".nodes", Format.NodeRecord.FlagsOffset, 4, 8192UL
+      ".nodes", Format.NodeRecord.EndLineOffset, 4, 2147483648UL
+      ".nodes", Format.NodeRecord.StartByteOffset, 8, UInt64.MaxValue
+      ".files", Format.FileRecord.LanguageOffset, 2, 65535UL
+      ".files", Format.FileRecord.EncodingOffset, 2, 65535UL
+      ".files", Format.FileRecord.FlagsOffset, 4, 8192UL
+      ".files", Format.FileRecord.LineCountOffset, 4, 2147483648UL
+      ".files", Format.FileRecord.SizeOffset, 8, UInt64.MaxValue ]
+  for suffix, offset, width, value in cases do
+    use workspace = new Workspace()
+    use output = new Workspace()
+    let original = indexedWorkspace workspace output
+    let manifest =
+      if withLookup then original
+      else
+        { original with
+            Segments = original.Segments |> Array.filter (fun item -> not (item.Name.EndsWith(".lookup", StringComparison.Ordinal))) }
+    rewriteSegment output.Path manifest suffix (fun bytes ->
+      let field = Span(bytes, Format.HeaderLength + offset, width)
+      match width with
+      | 2 -> Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(field, uint16 value)
+      | 4 -> Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(field, uint32 value)
+      | _ -> Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(field, value)
+      bytes)
+    assertInvalidArtifact output.Path
+    if suffix = ".files" then
+      Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError, $"{suffix}:{offset}")
+
+[<Fact>]
+let ``verify and statistics reject invalid reference metadata`` () =
+  for offset, width, value in
+    [ Format.ReferenceRecord.LanguageOffset, 2, 65535UL
+      Format.ReferenceRecord.ConfidenceOffset, 1, 0UL
+      Format.ReferenceRecord.StageOffset, 1, 7UL
+      Format.ReferenceRecord.LineOffset, 4, 2147483648UL
+      Format.ReferenceRecord.StartByteOffset, 8, UInt64.MaxValue
+      Format.ReferenceRecord.EndByteOffset, 8, 0UL ] do
+    use workspace = new Workspace()
+    use output = new Workspace()
+    workspace.Write("include.c", "#include \"sample.h\"\n")
+    let manifest = indexedWorkspace workspace output
+    Assert.True(manifest.Counts.ReferenceCandidates > 0)
+    rewriteSegment output.Path manifest ".refs" (fun bytes ->
+      let field = Span(bytes, Format.HeaderLength + offset, width)
+      match width with
+      | 1 -> field[0] <- byte value
+      | 2 -> Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(field, uint16 value)
+      | 4 -> Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(field, uint32 value)
+      | _ -> Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(field, value)
+      bytes)
+    assertInvalidArtifact output.Path
+    Assert.True(Stats.readReferenceStatistics output.Path manifest |> Result.isError)
+
+[<Theory>]
+[<InlineData("unordered")>]
+[<InlineData("duplicate")>]
+[<InlineData("reverse")>]
+let ``verify rejects CSR order and transpose mismatches`` corruption =
+  use workspace = new Workspace()
+  use output = new Workspace()
+  workspace.Write("b.c", "int b;\n")
+  workspace.Write("c.c", "int c;\n")
+  let manifest = indexedWorkspace workspace output
+  let suffix = if corruption = "reverse" then ".redges.CONTAINS" else ".edges.CONTAINS"
+  rewriteSegment output.Path manifest suffix (fun bytes ->
+    let first = Format.HeaderLength + (manifest.Counts.Nodes + 1) * 8
+    let value =
+      Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, first, 4))
+    if corruption = "reverse" then
+      Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first, 4), 1u)
+    elif corruption = "duplicate" then
+      Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), value)
+    else
+      let second = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, first + 4, 4))
+      Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first, 4), second)
+      Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), value)
     bytes)
   assertInvalidArtifact output.Path

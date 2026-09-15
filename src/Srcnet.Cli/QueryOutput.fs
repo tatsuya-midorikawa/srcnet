@@ -100,7 +100,7 @@ let private writeOmissions
 let writeError (kind: string) (code: int) (message: string) (json: bool) (requestedBudget: int) =
   let kind =
     match kind with
-    | "search" | "show" | "neighbors" | "path" | "context" | "export" -> kind
+    | "index" | "stats" | "verify" | "search" | "show" | "neighbors" | "path" | "context" | "export" -> kind
     | _ -> "query"
 
   let budget =

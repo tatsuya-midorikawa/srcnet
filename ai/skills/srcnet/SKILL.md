@@ -48,7 +48,7 @@ the current CLI does not automatically consume them or set environment variables
 5. Pass resolved `--out INDEX_DIR` on every query; the CLI does not infer it from
    the added field. `--root` alone only locates the default `.srcnet` directory.
    Read the small manifest metadata, not segment contents. Note `toolVersion`,
-   `complete`, the applied `options.tier`, `options.parserAvailable`, counts, and
+   `complete`, `options.requestedTier` when present, the applied `options.tier`, `options.parserAvailable`, counts, and
    diagnostics. A repository ID is not proof that two source trees match.
 6. If a path, runtime, index, or permission is missing or ambiguous, state what
    is missing and request the required location/access. Do not create a new index
@@ -242,8 +242,9 @@ queries. Do them only when the user requests the corresponding operation.
   fields, so that byte-comparison mode is not compatible with enriched manifests.
   Perform explicitly requested deterministic checking on CLI output before
   context annotation, or report the limitation; do not alter a live manifest.
-  A parser-less T2 fallback can also fail deterministic manifest replay even when
-  graph segments are intact; keep that distinct from context-field differences.
+  Older manifests without `options.requestedTier` can also fail deterministic
+  replay after a parser-less T2 fallback. New CLI-generated manifests retain that
+  request and replay it; this does not remove the separate context-field limitation.
 - `export html --out INDEX_DIR --file OUTPUT_FILE` writes a bounded display,
   not a full graph. Use `--node` or `--query` for a focused view, not both.
   Output can omit folders, nodes and edges; inspect the embedded diagnostics.

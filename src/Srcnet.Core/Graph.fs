@@ -329,12 +329,15 @@ module Language =
        Tsx
        FSharpSignature |]
 
+  let private byCode =
+    let values = Array.create (1 + int (all |> Array.map toCode |> Array.max)) Unknown
+    for language in all do values[int (toCode language)] <- language
+    values
+
   /// 符号から言語を復元する。未知の符号は `Unknown` にする。
   /// 成果物は外部入力であり、知らない符号で失敗させるより分類不能として扱うほうが安全である。
   let ofCode (code: uint16) =
-    match all |> Array.tryFind (fun language -> toCode language = code) with
-    | Some language -> language
-    | None -> Unknown
+    if int code < byCode.Length then byCode[int code] else Unknown
 
   let name language =
     match language with

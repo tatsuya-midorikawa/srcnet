@@ -5,6 +5,12 @@
         <AssemblyName>srcnet</AssemblyName>
         <RootNamespace>Srcnet.Cli</RootNamespace>
         <InvariantGlobalization>false</InvariantGlobalization>
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>srcnet</ToolCommandName>
+        <PackageId>Srcnet.Cli</PackageId>
+        <Description>Offline, deterministic source-code graph indexing and bounded queries.</Description>
+        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <ItemGroup>
@@ -18,6 +24,8 @@
     </ItemGroup>
 
     <ItemGroup>
+        <None Include="../../README.md" Pack="true" PackagePath="/" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="/" />
         <!--
             対話的な HTML の雛形。外部 CDN を使わないため、CSS と JavaScript を含めて
             埋め込み資源として持つ（backlog 029）。

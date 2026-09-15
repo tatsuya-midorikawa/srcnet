@@ -33,6 +33,7 @@ $ python3 tools/build_native.py --check               # 取得と検証のみ
 | --- | --- |
 | `build/libsrcnet_treesitter.dylib` (`.so` / `.dll`) | ランタイムと文法を含む単一の共有ライブラリ |
 | `build/languages.json` | 実際に構築した言語と、それぞれの文法の版 |
+| `build/srcnet_treesitter.NOTICES.txt` | 実際に組み込んだランタイム・文法のライセンス表記 |
 | `.cache/` | 検証済みの取得物 |
 | `.build/` | 展開したソースと中間生成物 |
 
@@ -41,12 +42,17 @@ $ python3 tools/build_native.py --check               # 取得と検証のみ
 Windows では F# の相互運用宣言と選択した文法から `.def` を生成し、必要な関数を DLL へ
 明示的に公開する。構築後は各 OS で実際にライブラリを開き、必須の公開シンボルが揃っていることを確認する。
 ツールの標準出力・標準エラーは UTF-8 に固定し、リダイレクト時も日本語を出力できる。
+空の `--languages` と、実行できない `CC` の指定は拒否し、全言語や別コンパイラへ
+黙って切り替えない。Windows で `python3` がない場合は `python` を使う。
 
 ## 構築しない場合
 
 共有ライブラリが無くてもビルドとテストは成功する。その場合 `Srcnet.Extraction` は
 構文解析を「利用不可」として報告し、走査・構造グラフ・照会（T0 / T1 の範囲）は
 そのまま動作する。構文解析を要する抽出だけが行われない。
+構築済みでも `dotnet pack` / `dotnet publish` に `-p:IncludeNativeParser=false` を渡すと、
+解析器とそのライセンス表記を含めない配布物を作れる。解析器を含める場合は
+構築した OS・CPU architecture 用として扱い、ライセンス表記も一緒に配布する。
 
 ## 同梱している文法
 
@@ -91,3 +97,5 @@ $ shasum -a 256 g.tar.gz
 
 tree-sitter のランタイムと本書が参照する文法は、いずれも MIT ライセンスで配布されている。
 取得物のライセンス表記は展開したソース内に含まれる。
+構築ツールは選択した取得物の表記を `srcnet_treesitter.NOTICES.txt` にまとめ、
+managed プロジェクトが共有ライブラリと一緒にビルド・発行・ツールパッケージへ複製する。

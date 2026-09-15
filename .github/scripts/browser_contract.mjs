@@ -146,6 +146,18 @@ try {
   };
   await reset();
   const baseline = await image();
+  check("keyboard zoom controls available", await evaluate(
+    '["zoomIn","zoomOut","fit"].every(id=>$(id)?.tagName==="BUTTON" && $(id).getAttribute("aria-controls")==="view")'));
+  await evaluate('$("zoomIn").focus()');
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await settle();
+  check("keyboard zoom changes canvas", await image() !== baseline);
+  await evaluate('$("fit").click()');
+  await settle();
+  check("fit keeps all graph positions visible", await evaluate(
+    'positions.every(p=>{const s=toScreen(p);return s.x>=16&&s.y>=16&&s.x<=canvas.clientWidth-16&&s.y<=canvas.clientHeight-16;})'));
+  await reset();
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
   await settle();
   check("theme changes redraw canvas labels", await image() !== baseline);
@@ -198,6 +210,9 @@ try {
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x + 40, y: point.y + 30, buttons: 1 });
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x + 40, y: point.y + 30, button: "left", buttons: 0, clickCount: 1 });
   await settle(); check("pan changes canvas", await image() !== zoomed);
+  await select();
+  check("search brings the selected node to the viewport center", await evaluate(
+    `(()=>{const p=toScreen(positions[${reference}]);return Math.abs(p.x-canvas.clientWidth/2)<1&&Math.abs(p.y-canvas.clientHeight/2)<1;})()`));
   await reset(); check("reset restores canvas", await image() === baseline);
   await select();
   const corner = await evaluate('(()=>{const r=document.querySelector("canvas").getBoundingClientRect();return {x:r.x+20,y:r.y+20};})()');

@@ -156,3 +156,14 @@ let ``不正なバイト列は置換して継続する`` () =
   let text = Encoding.UTF8.GetString(destination, 0, written)
   Assert.Contains("a", text)
   Assert.Contains("\uFFFD", text)
+
+[<Fact>]
+let ``line counting preserves CR LF and CRLF across vector boundaries`` () =
+  let random = Random 420
+  for length in [ 0; 1; 15; 16; 17; 31; 32; 33; 63; 64; 65; 65535; 65536; 65537 ] do
+    let bytes = Array.init length (fun _ -> [| 'a'B; '\r'B; '\n'B |][random.Next 3])
+    let normalized = (Encoding.UTF8.GetString bytes).Replace("\r\n", "\n").Replace('\r', '\n')
+    let expected =
+      if normalized.Length = 0 then 0
+      else normalized.Split('\n').Length - (if normalized.EndsWith('\n') then 1 else 0)
+    Assert.Equal(expected, Decoding.countLines(ReadOnlySpan bytes))

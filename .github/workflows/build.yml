@@ -63,6 +63,9 @@ jobs:
               # T2 の項目が省略として明示されることを確かめる（backlog 025）。
               run: dotnet test srcnet.slnx -c Release --no-build
 
+            - name: Pack and exercise the installed tool
+              run: python .github/scripts/tool_contract.py --out artifacts/tool-contract --without-parser
+
     parser:
         # 構文解析器（tree-sitter）は任意の構成要素なので、構築の有無を分けて検証する。
         # docs/decisions.md ADR-3 を参照。
@@ -99,6 +102,15 @@ jobs:
               env:
                   SRCNET_REQUIRE_PARSER: '1'
               run: dotnet test srcnet.slnx -c Release
+
+            - name: Verify parser and notices in the installed tool
+              run: python .github/scripts/tool_contract.py --out artifacts/parser-tool-contract --require-parser
+
+            - name: Build a partial parser
+              run: python tools/build_native.py --languages c
+
+            - name: Verify missing grammar diagnostics and replay
+              run: python .github/scripts/tool_contract.py --out artifacts/partial-parser-tool-contract --partial-parser
 
     determinism:
         # T-1: 同一入力から二度生成した成果物がバイト単位で一致すること。

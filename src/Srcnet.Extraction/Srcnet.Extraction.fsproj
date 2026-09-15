@@ -23,7 +23,7 @@
         <ProjectReference Include="../Srcnet.Text/Srcnet.Text.fsproj" />
     </ItemGroup>
 
-    <ItemGroup>
+    <ItemGroup Condition="'$(IncludeNativeParser)' != 'false'">
         <!--
             tools/build_native.py が構築した共有ライブラリを出力へ複製する。
             未構築でも一致するファイルが無いだけで、ビルドは成功する。
@@ -31,6 +31,8 @@
             リンク用の .def / .lib / .exp は配布しない。
         -->
         <Content Include="../../native/build/*srcnet_treesitter.dylib;../../native/build/*srcnet_treesitter.dll;../../native/build/*srcnet_treesitter.so"
+                 CopyToOutputDirectory="PreserveNewest" Link="%(Filename)%(Extension)" />
+        <Content Include="../../native/build/*srcnet_treesitter.NOTICES.txt"
                  CopyToOutputDirectory="PreserveNewest" Link="%(Filename)%(Extension)" />
     </ItemGroup>
 

@@ -11,12 +11,14 @@
 
     <ItemGroup>
         <Compile Include="HashBenchmarks.fs" />
+        <Compile Include="HotPathBenchmarks.fs" />
         <Compile Include="Program.fs" />
     </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="../../src/Srcnet.Core/Srcnet.Core.fsproj" />
         <ProjectReference Include="../../src/Srcnet.Text/Srcnet.Text.fsproj" />
+        <ProjectReference Include="../../src/Srcnet.Discovery/Srcnet.Discovery.fsproj" />
     </ItemGroup>
 
     <ItemGroup>

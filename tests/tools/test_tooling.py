@@ -99,6 +99,31 @@ class NativeBuildTests(unittest.TestCase):
                 toolchain.compile(Path("parser.c"), Path(temporary) / "parser.o", [])
                 self.assertIn("/std:c11", run.call_args.args[0])
 
+    def test_empty_language_selection_is_rejected_before_download(self):
+        with mock.patch.object(sys, "argv", ["build_native.py", "--languages"]), \
+             mock.patch.object(build_native, "download") as download, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                build_native.main()
+            self.assertEqual(2, error.exception.code)
+            download.assert_not_called()
+
+    def test_explicit_missing_compiler_is_not_silently_replaced(self):
+        with mock.patch.dict(os.environ, {"CC": "missing-compiler"}), \
+             mock.patch.object(build_native.shutil, "which", return_value=None):
+            with self.assertRaises(SystemExit):
+                build_native.Toolchain()
+
+    def test_license_notice_preserves_the_selected_source_license(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = {"repository": "example/parser", "version": "v1"}
+            with self.assertRaises(SystemExit):
+                build_native.license_notice(entry, root)
+            (root / "LICENSE").write_text("Fixture license\n", encoding="utf-8")
+            self.assertEqual("example/parser v1\n\nFixture license\n",
+                             build_native.license_notice(entry, root))
+
 class DependencyClosureTests(unittest.TestCase):
     def test_empty_or_incomplete_closure_cannot_pass_the_gate(self):
         spec = importlib.util.spec_from_file_location(

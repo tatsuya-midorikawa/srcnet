@@ -67,6 +67,11 @@ module NodeId =
     BinaryPrimitives.WriteUInt64BigEndian(destination, id.High)
     BinaryPrimitives.WriteUInt64BigEndian(destination.Slice 8, id.Low)
 
+  /// ID の数値順。保存したビッグエンディアンのバイト列の辞書順と一致する。
+  let compare (left: NodeId) (right: NodeId) =
+    let high = Operators.compare left.High right.High
+    if high <> 0 then high else Operators.compare left.Low right.Low
+
   let private hexValue (c: char) =
     if c >= '0' && c <= '9' then
       ValueSome(int c - int '0')
@@ -170,6 +175,7 @@ module RepositoryId =
 [<Sealed>]
 type NodeIdBuilder() =
   let mutable buffer = ArrayPool<byte>.Shared.Rent 512
+  let digest = Array.zeroCreate<byte> Hashing.HashLength
   let mutable length = 0
   let mutable disposed = false
 
@@ -212,9 +218,8 @@ type NodeIdBuilder() =
     appendLengthPrefixed qualifiedName
     appendUInt32 ordinal
 
-    let mutable digest = Span<byte>(Array.zeroCreate Hashing.HashLength)
-    Hashing.hashInto (ReadOnlySpan(buffer, 0, length)) digest
-    NodeId.ofBytes(Span.op_Implicit digest)
+    Hashing.hashInto (ReadOnlySpan(buffer, 0, length)) (Span digest)
+    NodeId.ofBytes(ReadOnlySpan digest)
 
   interface IDisposable with
 

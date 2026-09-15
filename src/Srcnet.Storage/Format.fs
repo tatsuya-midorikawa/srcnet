@@ -272,6 +272,18 @@ module FileRecord =
   [<Literal>]
   let ContentHashLength = 32
 
+  let internal hasValidMetadata (record: ReadOnlySpan<byte>) =
+    let language = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(LanguageOffset, 2))
+    let encoding = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(EncodingOffset, 2))
+    let flags = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(FlagsOffset, 4))
+    let lines = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(LineCountOffset, 4))
+    let size = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(SizeOffset, 8))
+    Graph.Language.toCode (Graph.Language.ofCode language) = language
+    && encoding >= 1us && encoding <= 12us
+    && flags &&& ~~~8191u = 0u
+    && lines <= uint32 Int32.MaxValue
+    && size >= 0L
+
 /// Optional v1 lexical lookup, suffix ".lookup"; no change to the v3 base segments.
 /// All integers are little endian. Payload: 32-byte prelude, 24-byte keys,
 /// 8-byte postings, UTF-8 key blob. Header counts are keys and postings.
@@ -337,3 +349,15 @@ module ReferenceRecord =
 
   [<Literal>]
   let ConfidenceOffset = 36
+
+  let internal hasValidMetadata (record: ReadOnlySpan<byte>) =
+    let language = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(LanguageOffset, 2))
+    let line = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(LineOffset, 4))
+    let start = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(StartByteOffset, 8))
+    let finish = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(EndByteOffset, 8))
+    Graph.Language.toCode (Graph.Language.ofCode language) = language
+    && (Graph.EdgeKind.ofCode record[EdgeKindOffset] |> ValueOption.isSome)
+    && (Graph.Confidence.ofCode record[ConfidenceOffset] |> ValueOption.isSome)
+    && record[StageOffset] <= 6uy
+    && line <= uint32 Int32.MaxValue
+    && start >= 0L && finish >= start

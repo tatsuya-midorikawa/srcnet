@@ -152,6 +152,13 @@ def verify_exports(library: Path, symbols: list[str]) -> None:
         if not hasattr(loaded, symbol):
             raise SystemExit(f"{library}: 必須の公開シンボルがありません: {symbol}")
 
+def license_notice(entry: dict, source: Path) -> str:
+    for name in ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"):
+        path = source / name
+        if path.is_file():
+            return f"{entry['repository']} {entry['version']}\n\n{path.read_text(encoding='utf-8').strip()}\n"
+    raise SystemExit(f"{entry['repository']}: 配布に必要なライセンス表記がありません")
+
 
 class Toolchain:
     """C コンパイラの起動方法。MSVC と clang / gcc の差だけを吸収する。"""
@@ -162,9 +169,16 @@ class Toolchain:
         self.is_msvc = Path(self.compiler).stem.lower() == "cl"
 
     def _find_compiler(self) -> str:
-        for candidate in (os.environ.get("CC"), "clang", "cc", "gcc", "cl"):
-            if candidate and shutil.which(candidate):
-                return shutil.which(candidate)
+        explicit = os.environ.get("CC")
+        if explicit:
+            resolved = shutil.which(explicit)
+            if not resolved:
+                raise SystemExit(f"CC が指定した C コンパイラが見つかりません: {explicit}")
+            return resolved
+        for candidate in ("clang", "cc", "gcc", "cl"):
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
         raise SystemExit("C コンパイラが見つかりません。CC 環境変数で指定してください")
 
     def compile(self, source: Path, output: Path, includes: list[Path]) -> None:
@@ -214,7 +228,7 @@ def library_name() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--languages", nargs="*", help="構築する言語。既定は全言語")
+    parser.add_argument("--languages", nargs="+", help="構築する言語。既定は全言語")
     parser.add_argument("--check", action="store_true", help="取得と検証のみ行う")
     arguments = parser.parse_args()
 
@@ -254,6 +268,7 @@ def main() -> int:
         return extracted[key]
 
     runtime_source = extract(runtime_archive, WORK / "tree-sitter")
+    notices = {runtime["repository"]: license_notice(runtime, runtime_source)}
     runtime_object = WORK / "obj" / "tree-sitter-runtime.o"
     toolchain.compile(
         runtime_source / "lib" / "src" / "lib.c",
@@ -268,6 +283,8 @@ def main() -> int:
     for grammar, archive in archives:
         language = grammar["language"]
         source = source_of(grammar, archive)
+        if grammar["repository"] not in notices:
+            notices[grammar["repository"]] = license_notice(grammar, source)
         # 1 つのリポジトリが複数の文法を持つ場合は subdirectory がその位置を指す。
         source_directory = source / grammar.get("subdirectory", ".") / "src"
 
@@ -291,6 +308,9 @@ def main() -> int:
     symbols = required_exports(grammars)
     toolchain.link(objects, output, symbols)
     verify_exports(output, symbols)
+    (OUTPUT / f"{LIBRARY_STEM}.NOTICES.txt").write_bytes(
+        "\n".join(notices[name] for name in sorted(notices)).encode("utf-8")
+    )
 
     (OUTPUT / "languages.json").write_text(
         json.dumps(

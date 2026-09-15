@@ -87,19 +87,24 @@ let readReferenceStatisticsWithCancellation
         let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
         let confidence = record[Format.ReferenceRecord.ConfidenceOffset]
 
-        match EdgeKind.ofCode edgeCode, Confidence.ofCode confidence with
-        | ValueSome _, ValueSome _ ->
+        if
+          not (Format.ReferenceRecord.hasValidMetadata record)
+          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4)) >= uint32 manifest.Counts.Nodes
+          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4)) >= uint32 manifest.Counts.Strings
+          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4)) >= uint32 manifest.Counts.Strings
+        then
+          invalid <- true
+        else
           bump totals edgeCode
           if confidence = Confidence.toCode Extracted then bump extracted edgeCode
           elif confidence = Confidence.toCode Ambiguous then bump ambiguous edgeCode
-        | _ -> invalid <- true
 
       let lookup (table: Dictionary<byte, int>) key =
         match table.TryGetValue key with
         | true, value -> value
         | false, _ -> 0
 
-      if invalid then Error(Reader.OpenFailed(path, "参照候補に未知の種別または確度があります"))
+      if invalid then Error(Reader.OpenFailed(path, "参照候補の種別・確度・言語・段階・位置または参照が不正です"))
       else
       totals
       |> Seq.choose (fun entry ->
@@ -136,9 +141,6 @@ let private encodingsByCode =
      Encodings.Undetermined |]
   |> Array.map (fun encoding -> Encodings.toCode encoding, encoding)
   |> dict
-
-let private languageCodes =
-  HashSet<uint16>(Language.all |> Array.map Language.toCode)
 
 let private encodingOfCode (code: uint16) = encodingsByCode[code]
 
@@ -205,9 +207,9 @@ let readFileStatisticsWithCancellation
         let sizeBytes = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8))
 
         if
-          sizeBytes < 0L || sizeBytes > Int64.MaxValue - totalBytes
-          || not (languageCodes.Contains languageCode)
-          || not (encodingsByCode.ContainsKey encodingCode)
+          not (Format.FileRecord.hasValidMetadata record)
+          || sizeBytes > Int64.MaxValue - totalBytes
+          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4)) >= uint32 manifest.Counts.Strings
         then
           invalid <- true
         else
@@ -222,7 +224,7 @@ let readFileStatisticsWithCancellation
           totalBytes <- totalBytes + sizeBytes
           totalLines <- totalLines + int64 lineCount
 
-      if invalid then Error(Reader.OpenFailed(path, "ファイルのサイズ・言語・符号化が不正です"))
+      if invalid then Error(Reader.OpenFailed(path, "ファイルのサイズ・行数・言語・符号化・フラグまたはパス参照が不正です"))
       else
       let languages =
         languageFiles

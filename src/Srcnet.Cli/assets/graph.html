@@ -105,6 +105,9 @@
   <body>
     <header>
       <h1 id="title">srcnet</h1>
+      <button id="zoomIn" type="button" aria-controls="view">拡大</button>
+      <button id="zoomOut" type="button" aria-controls="view">縮小</button>
+      <button id="fit" type="button" aria-controls="view">全体に合わせる</button>
       <button id="reset" type="button">表示をリセット</button>
     </header>
     <main>
@@ -188,6 +191,36 @@
       let scale = 1;
       let offsetX = 0;
       let offsetY = 0;
+
+      function zoom(factor, x = canvas.clientWidth / 2, y = canvas.clientHeight / 2) {
+        const next = Math.min(6, Math.max(0.001, scale * factor));
+        const ratio = next / scale;
+        const anchorX = x - canvas.clientWidth / 2;
+        const anchorY = y - canvas.clientHeight / 2;
+        offsetX = anchorX - (anchorX - offsetX) * ratio;
+        offsetY = anchorY - (anchorY - offsetY) * ratio;
+        scale = next;
+        draw();
+      }
+
+      function fit() {
+        if (positions.length === 0) {
+          scale = 1;
+          offsetX = offsetY = 0;
+        } else {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const point of positions) {
+            minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x);
+            minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y);
+          }
+          scale = Math.max(0.001, Math.min(1,
+            Math.max(1, canvas.clientWidth - 64) / Math.max(1, maxX - minX),
+            Math.max(1, canvas.clientHeight - 64) / Math.max(1, maxY - minY)));
+          offsetX = -(minX + maxX) * scale / 2;
+          offsetY = -(minY + maxY) * scale / 2;
+        }
+        draw();
+      }
 
       function resize() {
         const ratio = window.devicePixelRatio || 1;
@@ -417,7 +450,11 @@
         note.textContent = "隣接一覧は埋め込みデータと現在のフィルター内のみです。成果物全体の次数ではありません。";
         panel.appendChild(note);
 
-        if (focusDetails) panel.focus();
+        if (focusDetails) {
+          offsetX = -positions[index].x * scale;
+          offsetY = -positions[index].y * scale;
+          panel.focus();
+        }
         draw();
       }
 
@@ -524,10 +561,11 @@
       buildToggles("edgeKinds", edgeKinds, visibleEdgeKinds);
       document.getElementById("filter").addEventListener("input", runFilter);
       direction.addEventListener("change", () => select(selected));
+      document.getElementById("zoomIn").addEventListener("click", () => zoom(1.25));
+      document.getElementById("zoomOut").addEventListener("click", () => zoom(0.8));
+      document.getElementById("fit").addEventListener("click", fit);
       document.getElementById("reset").addEventListener("click", function () {
-        scale = 1;
-        offsetX = 0;
-        offsetY = 0;
+        fit();
         direction.value = "both";
         document.getElementById("filter").value = "";
         visibleKinds.clear();
@@ -580,8 +618,8 @@
         "wheel",
         function (event) {
           event.preventDefault();
-          scale = Math.min(6, Math.max(0.05, scale * Math.exp(-event.deltaY / 400)));
-          draw();
+          const rect = canvas.getBoundingClientRect();
+          zoom(Math.exp(-event.deltaY / 400), event.clientX - rect.left, event.clientY - rect.top);
         },
         { passive: false }
       );
@@ -589,6 +627,7 @@
       window.addEventListener("resize", resize);
       window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
       resize();
+      fit();
       select(data.nodes.length > 0 && data.seedIndex >= 0 ? data.seedIndex : -1);
     </script>
   </body>

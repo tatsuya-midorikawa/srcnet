@@ -132,6 +132,30 @@ let ``無視パターンも論理パスと同じ NFC で照合する`` () =
   let rules = [| ruleSet 0 [ "\u304B\u3099/*.o" ] |]
   Assert.Equal(Ignore.Ignored, decide rules "が/main.o" false)
 
+[<Fact>]
+let ``glob wildcards consume supplementary Unicode scalars rather than surrogate halves`` () =
+  let rules = [| ruleSet 0 [ "?.c"; "type[\U00020000-\U00020002].h" ] |]
+  Assert.Equal(Ignore.Ignored, decide rules "\U00020000.c" false)
+  Assert.Equal(Ignore.Ignored, decide rules "sub/\U0001f600.c" false)
+  Assert.Equal(Ignore.NotMatched, decide rules "\U00020000x.c" false)
+  Assert.Equal(Ignore.Ignored, decide rules "type\U00020001.h" false)
+  Assert.Equal(Ignore.NotMatched, decide rules "type\U00020003.h" false)
+  let starred = [| ruleSet 0 [ "*?\U00020002.c" ] |]
+  Assert.Equal(Ignore.Ignored, decide starred "\U00020000\U00020001\U00020002.c" false)
+  Assert.Equal(Ignore.NotMatched, decide starred "\U00020002.c" false)
+
+[<Fact>]
+let ``common basename and anchored rules preserve hierarchical decisions`` () =
+  for prefix in [ ""; "sub/"; "a/b/c/" ] do
+    let rules = [| ruleSet 0 [ "*.obj"; "cache/"; "!keep.obj"; "src/*.c" ] |]
+    Assert.Equal(Ignore.Ignored, decide rules (prefix + "file.obj") false)
+    Assert.Equal(Ignore.Reincluded, decide rules (prefix + "keep.obj") false)
+    Assert.Equal(Ignore.NotMatched, decide rules (prefix + "cache") false)
+    Assert.Equal(Ignore.Ignored, decide rules (prefix + "cache") true)
+    Assert.Equal(
+      (if prefix = "" then Ignore.Ignored else Ignore.NotMatched),
+      decide rules (prefix + "src/main.c") false)
+
 // --- 言語判定 ---
 
 [<Fact>]

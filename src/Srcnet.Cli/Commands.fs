@@ -7,7 +7,6 @@ module Srcnet.Cli.Commands
 open System
 open System.Buffers
 open System.IO
-open System.Runtime.ExceptionServices
 open System.Text
 open System.Text.Json
 open System.Threading
@@ -126,11 +125,6 @@ let private diagnosticCounts (diagnostics: DiagnosticSink) =
     { Manifest.Kind = DiagnosticKind.name kind
       Manifest.Count = count })
 
-/// 例外を stack trace を保ったまま再送出する。`raise ex` では発生位置を失う。
-let private reraise' (ex: exn) : 'T =
-  ExceptionDispatchInfo.Capture(ex).Throw()
-  Unchecked.defaultof<'T>
-
 let internal locateArtifact (explicitOutput: string voption) (rootPath: string voption) =
   match explicitOutput with
   | ValueSome directory -> Path.GetFullPath directory
@@ -145,15 +139,10 @@ let internal locateArtifact (explicitOutput: string voption) (rootPath: string v
 /// 出力先が解析ルート配下にある場合、その論理パスを走査から除外する。
 /// 生成物を自分で索引してしまうのを防ぐ。
 let private excludedOutputPath (rootFullPath: string) (outputDirectory: string) =
-  let rootPrefix = Path.TrimEndingDirectorySeparator rootFullPath + string Path.DirectorySeparatorChar
-
-  if not (outputDirectory.StartsWith(rootPrefix, StringComparison.Ordinal)) then Array.empty
-  else
-    let relative = outputDirectory.Substring rootPrefix.Length
-
-    match tryCreate relative with
-    | Ok path -> [| value path |]
-    | Error _ -> Array.empty
+  let relative = Path.GetRelativePath(rootFullPath, outputDirectory)
+  match tryCreate relative with
+  | Ok path -> [| value path |]
+  | Error _ -> Array.empty
 
 /// 成果物へ記録する文法の版。コンパイル時に埋め込んだ固定値だけを使い、
 /// 実行時に `native/` を読む経路は作らない（docs/security.md C-1、backlog 020）。
@@ -195,22 +184,6 @@ let private walkOptions (arguments: Args.IndexArguments) (excluded: string[]) =
         | ValueSome _
         | ValueNone -> Walk.WalkOptions.defaults.Jobs
       ExcludedPaths = excluded }
-
-/// staging へ書き出す。失敗したら書きかけを捨ててから送出し、既存の成果物を残す。
-/// `task { }` の中に `try/with` を置くとステート マシンが静的にコンパイルできなくなるため、
-/// 同期処理としてここに分離している。
-let private writeStaged
-  (outputDirectory: string)
-  (stagedSegments: string)
-  (input: Writer.IndexInput)
-  (diagnostics: DiagnosticSink)
-  (cancellation: CancellationToken)
-  =
-  try
-    Writer.write stagedSegments input diagnostics cancellation
-  with ex ->
-    Manifest.discardStaging outputDirectory
-    reraise' ex
 
 let private toSymbolInput (symbol: Model.ExtractedSymbol) : Writer.SymbolInput =
   { Kind = symbol.Kind
@@ -270,25 +243,15 @@ module private IndexFailure =
 /// 同期処理としてここへ分離しているのは、`task { }` の中で分岐と `return` が増えると
 /// ステート マシンを静的にコンパイルできず、遅い動的実装へ落ちるためである。
 let private publishIndex
-  (outputDirectory: string)
+  (trustedOutput: string)
   (repository: RepositoryId)
   (options: Walk.WalkOptions)
+  (requestedTier: int voption)
   (walk: Walk.WalkResult)
   (allowPartial: bool)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
   : Result<Manifest.Manifest, IndexFailure> =
-  // 出力先がリンクだと、生成、移動、再帰削除のすべてが管理外のファイルへ届く。
-  // 書き始める前に信頼できる出力ルートを確定させる。docs/security.md C-3 を参照。
-  match Artifact.prepareRoot outputDirectory with
-  | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
-  | Ok trustedOutput ->
-
-  match Manifest.acquireWriter trustedOutput with
-  | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
-  | Ok lease ->
-  use lease = lease
-
   if not walk.Complete && not allowPartial && (Manifest.read trustedOutput |> Result.isOk) then
     Error(PartialRefused "走査が不完全なため、既存の成果物を上書きしませんでした。上書きするには --allow-partial を指定してください")
   else
@@ -304,7 +267,7 @@ let private publishIndex
   | Error error -> Error(OutputRejected(Artifact.PathError.describe error))
   | Ok stagedSegments ->
 
-  let result = writeStaged trustedOutput stagedSegments input diagnostics cancellation
+  let result = Writer.write stagedSegments input diagnostics cancellation
 
   // 書き出しは長い。中断したのに新しい世代を公開して正常終了しないよう、
   // 切替の直前で必ず確認する。docs/query-and-cli.md 2.2 の終了コード 5 に対応する。
@@ -334,6 +297,7 @@ let private publishIndex
           MaxDepth = options.MaxDepth
           MaxFileSizeBytes = options.MaxFileSizeBytes
           Tier = int (Model.Tier.toCode walk.AppliedTier)
+          RequestedTier = requestedTier
           ParserAvailable = walk.ParserAvailable
           Grammars = grammarRecords
           AssumedEncoding =
@@ -366,16 +330,27 @@ let private buildIndex
   (outputDirectory: string)
   (repository: RepositoryId)
   (options: Walk.WalkOptions)
+  (requestedTier: int voption)
   (allowPartial: bool)
   (diagnostics: DiagnosticSink)
   (cancellation: CancellationToken)
   : Task<Result<struct (Manifest.Manifest * Walk.TierCounts), IndexFailure>> =
   task {
-    let! walk = Walk.run rootFullPath options diagnostics cancellation
-
-    return
-      publishIndex outputDirectory repository options walk allowPartial diagnostics cancellation
-      |> Result.map (fun manifest -> struct (manifest, walk.Tiers))
+    cancellation.ThrowIfCancellationRequested()
+    match Artifact.prepareRoot outputDirectory with
+    | Error error -> return Error(OutputRejected(Artifact.PathError.describe error))
+    | Ok trustedOutput ->
+      match Manifest.acquireWriter trustedOutput with
+      | Error error -> return Error(OutputRejected(Artifact.PathError.describe error))
+      | Ok lease ->
+        use _lease = lease
+        try
+          let! walk = Walk.run rootFullPath options diagnostics cancellation
+          return
+            publishIndex trustedOutput repository options requestedTier walk allowPartial diagnostics cancellation
+            |> Result.map (fun manifest -> struct (manifest, walk.Tiers))
+        finally
+          Manifest.discardStaging trustedOutput
   }
 
 /// 生成結果を報告し、終了コードを決める。
@@ -391,7 +366,7 @@ let private reportIndex
 
   match outcome with
   | Error failure ->
-    Terminal.errLine (IndexFailure.message failure)
+    Terminal.diagnosticLine (IndexFailure.message failure)
 
     match failure with
     | OutputRejected _ -> ExitCode.UserError
@@ -406,6 +381,7 @@ let private reportIndex
         writer.WriteString("repositoryId", manifest.RepositoryId)
         writer.WriteBoolean("complete", manifest.Complete)
         writer.WriteNumber("tier", appliedTier)
+        writer.WriteNumber("requestedTier", arguments.Tier)
         writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
         writer.WriteNumber("nodes", manifest.Counts.Nodes)
         writer.WriteNumber("edges", manifest.Counts.Edges)
@@ -480,12 +456,16 @@ let index (arguments: Args.IndexArguments) (cancellation: CancellationToken) : T
     | Ok repository ->
 
     let outputDirectory = locateArtifact arguments.OutputDirectory (ValueSome rootFullPath)
+    if Path.GetRelativePath(rootFullPath, outputDirectory) = "." then
+      Terminal.errLine "解析ルート自身を --out に指定できません。専用の出力ディレクトリを指定してください"
+      return ExitCode.UserError
+    else
     let excluded = excludedOutputPath rootFullPath outputDirectory
     let options = walkOptions arguments excluded
     let diagnostics = DiagnosticSink()
 
     let! outcome =
-      buildIndex rootFullPath outputDirectory repository options arguments.AllowPartial diagnostics cancellation
+      buildIndex rootFullPath outputDirectory repository options (ValueSome arguments.Tier) arguments.AllowPartial diagnostics cancellation
 
     return reportIndex arguments diagnostics outcome
   }
@@ -505,13 +485,13 @@ let statsWithCancellation (arguments: Args.StatsArguments) (cancellation: Cancel
 
   match observed with
   | Error error ->
-    Terminal.errLine (Manifest.ManifestError.describe error)
+    Terminal.diagnosticLine (Manifest.ManifestError.describe error)
     ExitCode.MissingArtifact
   | Ok(struct (_, Error error, _)) ->
-    Terminal.errLine (Reader.OpenError.describe error)
+    Terminal.diagnosticLine (Reader.OpenError.describe error)
     ExitCode.MissingArtifact
   | Ok(struct (_, _, Error error)) ->
-    Terminal.errLine (Reader.OpenError.describe error)
+    Terminal.diagnosticLine (Reader.OpenError.describe error)
     ExitCode.MissingArtifact
   | Ok(struct (manifest, Ok statistics, Ok references)) ->
       if arguments.Json then
@@ -702,7 +682,7 @@ let private checkDeterminism
             // 記録された段階で再生成しなければ決定性を検証したことにならない。
             Extraction =
               { Extractor.ExtractionOptions.defaults with
-                  Tier = tierOf manifest.Options.Tier }
+                  Tier = tierOf (manifest.Options.RequestedTier |> ValueOption.defaultValue manifest.Options.Tier) }
             AssumeEncoding = Encodings.tryParse manifest.Options.AssumedEncoding
             // 並列度は所要時間だけを変え、出力を変えないことをここで検証する。
             Jobs = 1
@@ -711,7 +691,7 @@ let private checkDeterminism
 
       let diagnostics = DiagnosticSink()
 
-      match! buildIndex rootFullPath temporary repository options true diagnostics cancellation with
+      match! buildIndex rootFullPath temporary repository options manifest.Options.RequestedTier true diagnostics cancellation with
       | Error failure -> return Error(IndexFailure.message failure)
       | Ok(struct (rebuilt, _)) ->
         return
@@ -737,7 +717,7 @@ let verify (arguments: Args.VerifyArguments) (cancellation: CancellationToken) :
 
     match Verify.run outputDirectory cancellation with
     | Error error ->
-      Terminal.errLine (Manifest.ManifestError.describe error)
+      Terminal.diagnosticLine (Manifest.ManifestError.describe error)
       return ExitCode.MissingArtifact
     | Ok report ->
 
@@ -799,6 +779,7 @@ let verify (arguments: Args.VerifyArguments) (cancellation: CancellationToken) :
       if report.IsValid && determinismIssues.Length = 0 then Terminal.outLine "整合性: 問題ありません"
 
     return
-      if report.IsValid && report.Issues.Length = 0 && determinismIssues.Length = 0 then ExitCode.Success
+      if not report.IsValid then ExitCode.MissingArtifact
+      elif report.Issues.Length = 0 && determinismIssues.Length = 0 then ExitCode.Success
       else ExitCode.CompletedWithDiagnostics
   }

@@ -982,6 +982,7 @@ type internal TestGraph(names: string[], connections: struct (int * int * EdgeKi
             MaxDepth = 64
             MaxFileSizeBytes = 1L
             Tier = 0
+            RequestedTier = ValueNone
             ParserAvailable = false
             Grammars = Array.empty
             AssumedEncoding = "" }

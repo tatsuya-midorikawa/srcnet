@@ -216,6 +216,18 @@ let internal validateQueryText (name: string) (text: string) =
     with :? Text.EncoderFallbackException ->
       ValueSome(InvalidValue(name, "不正な Unicode 文字列"))
 
+let internal validatePath (name: string) (text: string) =
+  if String.IsNullOrWhiteSpace text || Srcnet.Text.Unicode.hasUnpairedSurrogate text then
+    ValueSome(InvalidValue(name, text))
+  else
+    try
+      IO.Path.GetFullPath text |> ignore
+      ValueNone
+    with
+    | :? ArgumentException
+    | :? NotSupportedException
+    | :? IO.PathTooLongException -> ValueSome(InvalidValue(name, text))
+
 /// `4096`、`64KiB`、`1GB` のようなサイズ表記を解析する。
 /// 単位は 2 進接頭辞（KiB/MiB/GiB）と 10 進接頭辞（KB/MB/GB）の両方を受け付ける。
 let tryParseSize (text: string) =
@@ -268,11 +280,15 @@ let private split (arguments: string[]) =
   let positional = ResizeArray<Positional>()
   let options = ResizeArray<ParsedOption>()
   let mutable index = 0
+  let mutable positionalOnly = false
 
   while index < arguments.Length do
     let argument = arguments[index]
 
-    if argument.StartsWith("--", StringComparison.Ordinal) then
+    if not positionalOnly && argument = "--" then
+      positionalOnly <- true
+      index <- index + 1
+    elif not positionalOnly && (argument.StartsWith("--", StringComparison.Ordinal) || argument = "-h") then
       let separator = argument.IndexOf '='
 
       if separator > 0 then
@@ -285,6 +301,7 @@ let private split (arguments: string[]) =
         let takesNext =
           index + 1 < arguments.Length
           && not (arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
+          && arguments[index + 1] <> "-h"
 
         options.Add
           { Name = argument
@@ -343,6 +360,13 @@ type private OptionReader(options: ResizeArray<ParsedOption>, positional: Resize
 
     result
 
+  member this.Path(name: string) =
+    let value = this.Value name
+    match value with
+    | ValueSome text when error.IsNone -> error <- validatePath name text
+    | _ -> ()
+    value
+
   member _.Unknown() =
     let mutable unknown = ValueNone
 
@@ -382,8 +406,20 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
 
   let reader = OptionReader(options, positional)
   let json = reader.Flag "--json"
+  let help = reader.Flag "--help"
+  let shortHelp = reader.Flag "-h"
+
+  if
+    (help || shortHelp)
+    && Array.contains command [| "index"; "search"; "show"; "neighbors"; "path"; "context"; "export"; "stats"; "verify" |]
+  then
+    match reader.Error with
+    | ValueSome error -> Error error
+    | ValueNone -> Ok Help
+  else
 
   let optionalValue name = reader.Value name
+  let optionalPath name = reader.Path name
 
   let optionalParsed parseValue name =
     match reader.Value name with
@@ -425,12 +461,17 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
 
   match command with
   | "index" ->
-    let output = optionalValue "--out"
+    let output = optionalPath "--out"
     let repository = optionalValue "--repo"
-    let jobs = optionalInt "--jobs"
+    let jobs = boundedInt "--jobs" 1 Srcnet.Discovery.Walk.WalkOptions.MaxJobs true
     let maxFileSize = optionalSize "--max-file-size"
-    let maxDepth = optionalInt "--max-depth"
+    let maxDepth = boundedInt "--max-depth" 0 Srcnet.Core.Paths.MaxDepth false
     let assumeEncoding = optionalValue "--assume-encoding"
+    let encodingError =
+      match assumeEncoding with
+      | ValueSome text when Srcnet.Text.Encodings.tryParse text |> ValueOption.isNone ->
+        Some(InvalidValue("--assume-encoding", text))
+      | _ -> None
     let noGitignore = reader.Flag "--no-gitignore"
     let followSymlinks = reader.Flag "--follow-symlinks"
     let allowPartial = reader.Flag "--allow-partial"
@@ -456,11 +497,15 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
         | ValueSome _
         | ValueNone -> ValueSome(Error(InvalidValue("--tier", text)))
 
-    match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize; errorOf tier ] with
+    match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize; errorOf tier; encodingError ] with
     | Some error -> Error error
     | None ->
-      if positional.Count = 0 then Error(MissingArgument "<path>")
+      if reader.Error |> ValueOption.isSome then Error(ValueOption.get reader.Error)
+      elif positional.Count = 0 then Error(MissingArgument "<path>")
       else
+        match validatePath "<path>" positional[0].Text with
+        | ValueSome error -> Error error
+        | ValueNone ->
         let unwrap (value: Result<'T, ParseError> voption) =
           match value with
           | ValueSome(Ok parsed) -> ValueSome parsed
@@ -489,14 +534,17 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
   | "neighbors"
   | "path"
   | "context" ->
-    let output = optionalValue "--out"
-    let root = optionalValue "--root"
+    let output = optionalPath "--out"
+    let root = optionalPath "--root"
     let limit = boundedInt "--limit" 1 MaxLimit true
     let budget = boundedInt "--budget" MinBudget MaxBudget true
-    let depth = boundedInt "--depth" 0 MaxQueryDepth false
-    let direction = optionalValue "--direction"
-    let edges = optionalValue "--edge"
-    let ignoreCase = reader.Flag "--ignore-case"
+    let traversal = command = "neighbors" || command = "path"
+    let depth =
+      if traversal || command = "context" then boundedInt "--depth" 0 MaxQueryDepth false
+      else ValueNone
+    let direction = if traversal then optionalValue "--direction" else ValueNone
+    let edges = if traversal then optionalValue "--edge" else ValueNone
+    let ignoreCase = command = "search" && reader.Flag "--ignore-case"
 
     let directionText =
       match direction with
@@ -599,9 +647,9 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
               Limits = limits
               Json = json })
   | "export" ->
-    let output = optionalValue "--out"
-    let root = optionalValue "--root"
-    let file = optionalValue "--file"
+    let output = optionalPath "--out"
+    let root = optionalPath "--root"
+    let file = optionalPath "--file"
     let queryText = optionalValue "--query"
     let node = optionalValue "--node"
     let depth = boundedInt "--depth" 0 MaxQueryDepth false
@@ -646,17 +694,28 @@ let parse (arguments: string[]) : Result<Command, ParseError> =
             MaxNodes = number maxNodes DefaultMaxNodes true
             Json = json })
   | "stats" ->
-    let output = optionalValue "--out"
+    let output = optionalPath "--out"
 
+    match if positional.Count > 0 then validatePath "<path>" positional[0].Text else ValueNone with
+    | ValueSome error -> Error error
+    | ValueNone ->
     finish reader positional 1 (fun () ->
       Stats
         { OutputDirectory = output
           RootPath = (if positional.Count > 0 then ValueSome positional[0].Text else ValueNone)
           Json = json })
   | "verify" ->
-    let output = optionalValue "--out"
+    let output = optionalPath "--out"
     let deterministic = reader.Flag "--deterministic"
 
+    match reader.Error with
+    | ValueSome error -> Error error
+    | ValueNone ->
+    if deterministic && positional.Count = 0 then Error(MissingArgument "<path>")
+    else
+    match if positional.Count > 0 then validatePath "<path>" positional[0].Text else ValueNone with
+    | ValueSome error -> Error error
+    | ValueNone ->
     finish reader positional 1 (fun () ->
       Verify
         { OutputDirectory = output
@@ -700,9 +759,9 @@ let usage =
       "index のオプション:"
       "  --out <dir>            出力先 (既定 <path>/.srcnet)"
       "  --repo <id>            リポジトリ ID (既定 <path> のディレクトリ名)"
-      "  --jobs <n>             並列度。結果には影響しない"
+      "  --jobs <n>             並列度 (1..256、0 は CPU 数)。結果には影響しない"
       "  --max-file-size <size> 1 ファイルの処理上限 (例 64MiB)"
-      "  --max-depth <n>        走査する階層の深さ上限"
+      "  --max-depth <n>        走査する階層の深さ上限 (0..256)"
       "  --tier <0|1|2>         抽出段階 (0 走査のみ / 1 行指向 / 2 構文。既定 2)"
       "  --assume-encoding <名>  符号化が曖昧なファイルに適用する符号化 (例 EUC-JP)"
       "  --no-gitignore         .gitignore / .srcnetignore を無視する"
@@ -716,10 +775,10 @@ let usage =
       "  --root <path>          解析ルート (生成物の位置を決めるために使う)"
       "  --limit <n>            返すノード数の上限 (既定 50、上限 10000)"
       "  --budget <tokens>      JSON 封筒を含む出力予算 (256..1000000、既定 8000)"
-      "  --depth <n>            探索の深さ (0..16、既定 1)"
-      "  --edge <kind,...>      辿るエッジ種別 (既定はすべて)"
-      "  --direction in|out|both 探索の向き (既定 both)"
-      "  --ignore-case          大文字小文字を畳んで検索する"
+      "  --depth <n>            neighbors / path / context の深さ (0..16、既定 1)"
+      "  --edge <kind,...>      neighbors / path のエッジ種別 (既定はすべて)"
+      "  --direction in|out|both neighbors / path の向き (既定 both)"
+      "  --ignore-case          search の大文字小文字を畳む"
       ""
       "export html のオプション:"
       "  --file <path>          出力先 (既定 <out>/graph.html)"
@@ -732,5 +791,7 @@ let usage =
       "共通:"
       "  --out <dir>            生成物の位置"
       "  --json                 機械可読出力"
+      "  --help, -h             サブコマンドからも説明を表示する"
+      "  --                     以降をオプションではなく位置引数として扱う"
       ""
       "終了コード: 0 成功 / 1 該当なし / 2 入力誤り / 3 生成物なし・非互換 / 4 診断あり / 5 中断 / 70 内部エラー" ]

@@ -48,10 +48,10 @@ module Truncation =
 
 /// セグメント内のグロブ トークン。パターン解析時に一度だけ構築する。
 type private GlobToken =
-  | Exact of char
+  | Exact of int
   | AnyChar
   | AnyRun
-  | CharacterClass of ranges: struct (char * char)[] * negated: bool
+  | CharacterClass of ranges: struct (int * int)[] * negated: bool
 
 /// パス セグメント 1 つ分の照合規則。
 type private SegmentRule =
@@ -85,6 +85,12 @@ type Decision =
   | Ignored
   | Reincluded
 
+let inline private scalarAt (text: string) index =
+  if Char.IsHighSurrogate text[index] then Char.ConvertToUtf32(text, index)
+  else int text[index]
+
+let inline private scalarLength scalar = if scalar > 0xFFFF then 2 else 1
+
 let private parseClass (pattern: string) (start: int) =
   // `[` の次から `]` までを読む。閉じ括弧がなければクラスとして扱わない。
   let mutable index = start
@@ -95,7 +101,7 @@ let private parseClass (pattern: string) (start: int) =
   if negated then
     index <- index + 1
 
-  let ranges = List<struct (char * char)>()
+  let ranges = List<struct (int * int)>()
   let mutable closed = false
 
   // POSIX と同様、先頭の `]` はリテラルとして扱う。
@@ -107,18 +113,19 @@ let private parseClass (pattern: string) (start: int) =
       index <- index + 1
     else
       first <- false
-      let low = pattern[index]
+      let low = scalarAt pattern index
+      index <- index + scalarLength low
 
       if
-        index + 2 < pattern.Length
-        && pattern[index + 1] = '-'
-        && pattern[index + 2] <> ']'
+        index + 1 < pattern.Length
+        && pattern[index] = '-'
+        && pattern[index + 1] <> ']'
       then
-        ranges.Add(struct (low, pattern[index + 2]))
-        index <- index + 3
+        let high = scalarAt pattern (index + 1)
+        ranges.Add(struct (low, high))
+        index <- index + 1 + scalarLength high
       else
         ranges.Add(struct (low, low))
-        index <- index + 1
 
   if closed then
     ValueSome(struct (ranges.ToArray(), negated, index))
@@ -146,21 +153,23 @@ let private tokenize (segment: string) =
         tokens.Add(CharacterClass(ranges, negated))
         index <- next
       | ValueNone ->
-        tokens.Add(Exact '[')
+        tokens.Add(Exact(int '['))
         index <- index + 1
     | '\\' when index + 1 < segment.Length ->
-      tokens.Add(Exact segment[index + 1])
-      index <- index + 2
-    | c ->
-      tokens.Add(Exact c)
-      index <- index + 1
+      let scalar = scalarAt segment (index + 1)
+      tokens.Add(Exact scalar)
+      index <- index + 1 + scalarLength scalar
+    | _ ->
+      let scalar = scalarAt segment index
+      tokens.Add(Exact scalar)
+      index <- index + scalarLength scalar
 
   tokens.ToArray()
 
 let private hasWildcard (segment: string) =
   segment.IndexOfAny [| '*'; '?'; '['; '\\' |] >= 0
 
-let private matchClass (ranges: struct (char * char)[]) (negated: bool) (c: char) =
+let private matchClass (ranges: struct (int * int)[]) (negated: bool) (c: int) =
   let mutable inside = false
 
   for struct (low, high) in ranges do
@@ -169,7 +178,7 @@ let private matchClass (ranges: struct (char * char)[]) (negated: bool) (c: char
 
   inside <> negated
 
-let inline private matchToken (token: GlobToken) (c: char) =
+let inline private matchToken (token: GlobToken) (c: int) =
   match token with
   | Exact expected -> expected = c
   | AnyChar -> true
@@ -190,11 +199,11 @@ let private matchGlob (tokens: GlobToken[]) (text: string) =
       starToken <- t
       starText <- s
       t <- t + 1
-    elif t < tokens.Length && matchToken tokens[t] text[s] then
+    elif t < tokens.Length && matchToken tokens[t] (scalarAt text s) then
       t <- t + 1
-      s <- s + 1
+      s <- s + (if Char.IsHighSurrogate text[s] then 2 else 1)
     elif starToken >= 0 then
-      starText <- starText + 1
+      starText <- starText + scalarLength (scalarAt text starText)
       t <- starToken + 1
       s <- starText
     else
@@ -216,16 +225,15 @@ let inline private matchSegment (rule: SegmentRule) (segment: string) =
 ///
 /// 走査中のあらゆるファイル項目 × 規則数だけ呼ばれる最も熱い経路なので、
 /// 作業配列はプールから借りて割り当てを避ける。
-let private matchSegments (rules: SegmentRule[]) (segments: string[]) (offset: int) =
+let private matchRecursiveSegments (rules: SegmentRule[]) (segments: string[]) (offset: int) =
   let ruleCount = rules.Length
   let segmentCount = segments.Length - offset
   let width = ruleCount + 1
-  let previous = ArrayPool<bool>.Shared.Rent width
-  let current = ArrayPool<bool>.Shared.Rent width
+  let mutable previous = ArrayPool<bool>.Shared.Rent width
+  let mutable current = ArrayPool<bool>.Shared.Rent width
 
   try
     Array.Clear(previous, 0, width)
-    Array.Clear(current, 0, width)
     previous[0] <- true
 
     for j in 1..ruleCount do
@@ -243,12 +251,34 @@ let private matchSegments (rules: SegmentRule[]) (segments: string[]) (offset: i
           | AnyDepth -> current[j - 1] || previous[j]
           | rule -> previous[j - 1] && matchSegment rule segment
 
-      Array.blit current 0 previous 0 width
+      let completed = current
+      current <- previous
+      previous <- completed
 
     previous[ruleCount]
   finally
     ArrayPool<bool>.Shared.Return previous
     ArrayPool<bool>.Shared.Return current
+
+let private matchSegments (rules: SegmentRule[]) (segments: string[]) (offset: int) =
+  match rules with
+  | [| AnyDepth; rule |] when rule <> AnyDepth ->
+    matchSegment rule segments[segments.Length - 1]
+  | _ ->
+    let mutable recursive = false
+    let mutable index = 0
+    while not recursive && index < rules.Length do
+      recursive <- rules[index] = AnyDepth
+      index <- index + 1
+    if recursive then matchRecursiveSegments rules segments offset
+    elif rules.Length <> segments.Length - offset then false
+    else
+      let mutable matched = true
+      let mutable index = 0
+      while matched && index < rules.Length do
+        matched <- matchSegment rules[index] segments[offset + index]
+        index <- index + 1
+      matched
 
 /// 行末の未エスケープの空白を取り除く。gitignore の規則に合わせる。
 let private trimTrailingSpaces (line: string) =

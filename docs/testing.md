@@ -104,8 +104,8 @@ ANSI エスケープの検証は、リポジトリから端末表示を偽装で
 
 | ジョブ | OS | 実行契機 | 内容 |
 | --- | --- | --- | --- |
-| build-test | macOS, Windows | 全 PR | 生成表の一致、Python ビルドツールの回帰、Release ビルド、全テスト、コンパイラ警告をエラー化 |
-| parser | macOS, Windows | 全 PR | 固定した取得元の検証、tree-sitter の構築、解析器ありでのテスト |
+| build-test | macOS, Windows | 全 PR | 生成表の一致、Python ビルドツールの回帰、Release ビルド、全テスト、解析器なしのツール導入と縮退時の決定性 |
+| parser | macOS, Windows | 全 PR | 固定した取得元の検証、tree-sitter の構築、解析器ありでのテスト、完全・一部文法のツール導入と診断・決定性 |
 | determinism | macOS, Windows | 全 PR | 同じ入力を並列度 1 / 8 で生成し、全ファイルを比較、`verify --deterministic` |
 | cross-platform-determinism | 補助比較 | 全 PR | 各 OS で検査済みのセグメントの SHA-256 を含むマニフェストの比較 |
 | query-contract | macOS, Windows | 全 PR | 有界 JSON、異常系、HTML の生成と Chrome / Edge のオフライン操作 |
@@ -150,6 +150,12 @@ C/C++ 構文シンボルを前提とする項目だけは `Corpus.ParserFact` �
 明示的なスキップを記録し、`parser` ジョブでは実行する。`SRCNET_REQUIRE_PARSER=1` の場合は
 省略しない。復号のテストは解析器なしでも文字列・識別子の復号を検証し、解析器がある場合は
 抽出したシンボルも照合する。
+
+`.github/scripts/tool_contract.py` は `dotnet pack` の成果物をローカルだけの配信元から
+隔離した `--tool-path` へ導入する。導入用 NuGet キャッシュも一時領域に置き、グローバルツールを変えず、
+インストール済みコマンドでヘルプ、CJK 索引、照会、決定性を確認し、作業ディレクトリを片付ける。
+`--without-parser` は解析器のない T2 → T1、`--partial-parser` は C の文法だけを同梱した
+C++ の縮退を検証する。ネイティブ成果物のライセンス表記もパッケージ内で必須にする。
 
 ## 5. コーパスの管理
 
