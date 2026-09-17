@@ -2,6 +2,7 @@
 name: srcnet
 description: 'Use an existing srcnet knowledge graph to investigate a codebase before broad file searches. Use when the user asks to query srcnet, provides an index, or asks about indexed files, symbols, repository structure, relationships, or bounded context. Also use for requested verification or HTML export; prefer srcnet-index for generation or rebuilding.'
 compatibility: 'Requires local command execution, file-reading tools, and a working srcnet executable with its runtime dependencies.'
+user-invocable: true
 ---
 
 # srcnet

@@ -2,6 +2,7 @@
 name: srcnet-index
 description: 'Generate or rebuild a srcnet index and matching segments, then record SRCNET, SOURCE_ROOT and INDEX_DIR in manifest.json for AI queries. Use for explicit index creation, refresh or manifest path-metadata updates. Not for ordinary graph queries, example JSON, or authoring skill files.'
 compatibility: 'Requires local command execution, filesystem access, a working srcnet executable, and bounded process execution for large indexing jobs.'
+user-invocable: true
 ---
 
 # Generate a srcnet index
