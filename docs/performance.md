@@ -112,7 +112,7 @@ primitive 単体ではなく `index` / `verify` 全体で測る。単体の 5 �
 | --- | --- |
 | 環境 | macOS / Apple Silicon、.NET 10、Release publish、warm cache |
 | 入力 | 20,000 個の小ファイル（78 MB）+ 6 個の 20 MiB ファイル、計 197 MB |
-| 手法 | 実行時間の中央値。`index` は毎回 `.srcnet` を削除してから計測 |
+| 手法 | 実行時間の中央値。`index` は毎回 `_srcnet` を削除してから計測 |
 
 | 計測 | 変更前 (BLAKE3) | 変更後 (SHA-256) | 比 |
 | --- | ---: | ---: | ---: |

@@ -171,7 +171,7 @@ let ``ドットで始まるディレクトリは無視設定にかかわらず�
     [ ".git"
       ".github"
       ".vscode"
-      ".srcnet"
+      ".config"
       "src/.cache"
       "src/..cache"
       "設計/.内部"
@@ -450,7 +450,7 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
   let options =
     { Walk.WalkOptions.defaults with
         Jobs = jobs
-        ExcludedPaths = [| ".srcnet" |] }
+        ExcludedPaths = [| "_srcnet" |] }
 
   let result = (Walk.run workspace.Path options diagnostics CancellationToken.None).Result
 

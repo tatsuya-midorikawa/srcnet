@@ -296,16 +296,24 @@ let private runVerify (root: string) (deterministic: bool) =
 
   (Commands.verify arguments CancellationToken.None).Result
 
-[<Fact>]
-let ``index はドットで始まるディレクトリをグラフに含めない`` () =
+[<Theory>]
+[<InlineData(true)>]
+[<InlineData(false)>]
+let ``index はドットで始まるディレクトリと _srcnet をグラフに含めない`` respectIgnoreFiles =
   use repository = new Sandbox()
   repository.Write("src/main.c", "int visible;\n")
   repository.Write("src/.settings.c", "int settings;\n")
   repository.Write(".github/workflows/hidden.c", "int hidden;\n")
   repository.Write("src/.cache/nested/hidden.c", "int hidden;\n")
-  Assert.Equal(Commands.ExitCode.Success, runIndex(Path.Combine(repository.Path, ".")))
 
-  let output = Path.Combine(repository.Path, Args.DefaultOutputDirectoryName)
+  let options =
+    { indexOptions(Path.Combine(repository.Path, ".")) with
+        RespectIgnoreFiles = respectIgnoreFiles }
+
+  for _ in 1..2 do
+    Assert.Equal(Commands.ExitCode.Success, (Commands.index options CancellationToken.None).Result)
+
+  let output = Path.Combine(repository.Path, "_srcnet")
 
   match Manifest.read output with
   | Error error -> failwith(Manifest.ManifestError.describe error)

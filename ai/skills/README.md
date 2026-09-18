@@ -33,7 +33,7 @@ and validates the three fields. Explicit trusted user settings take precedence.
 Older/CLI-only manifests without them still use supplied context or defaults.
 
 An index outside the source tree is supported through explicit `--out`;
-the default is `<source-root>/.srcnet`. The CLI does not automatically consume
+the default is `<source-root>/_srcnet`. The CLI does not automatically consume
 the added fields, and they do not authorize executing an untrusted binary.
 The agent needs access to the selected paths. Store real machine-specific paths
 only in local generated manifests, not in the distributed skill or its example.

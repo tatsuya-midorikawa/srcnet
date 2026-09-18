@@ -10,7 +10,7 @@ open Srcnet.Storage
 
 /// 生成物の既定の出力先。解析ルートからの相対。
 [<Literal>]
-let DefaultOutputDirectoryName = ".srcnet"
+let DefaultOutputDirectoryName = "_srcnet"
 
 /// 抽出段階の既定値。docs/query-and-cli.md 2.1 の `--tier` に対応する。
 [<Literal>]
@@ -757,7 +757,7 @@ let usage =
       "  srcnet --help                      この説明を表示する"
       ""
       "index のオプション:"
-      "  --out <dir>            出力先 (既定 <path>/.srcnet)"
+      "  --out <dir>            出力先 (既定 <path>/_srcnet)"
       "  --repo <id>            リポジトリ ID (既定 <path> のディレクトリ名)"
       "  --jobs <n>             並列度 (1..256、0 は CPU 数)。結果には影響しない"
       "  --max-file-size <size> 1 ファイルの処理上限 (例 64MiB)"

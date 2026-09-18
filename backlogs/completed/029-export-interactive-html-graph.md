@@ -14,7 +14,7 @@ Chromium 系コーパスの全 1,152,071 ノードをブラウザーへ渡すの
 ## やること
 
 - `srcnet export html` を追加し、単一の自己完結 HTML ファイルを生成する
-  - 既定出力は `<repo>/.srcnet/graph.html`
+  - 既定出力は `<repo>/_srcnet/graph.html`
   - `--query <text>` または `--node <id>` で起点を指定する
   - `--depth <n>` と `--max-nodes <n>` で範囲を制限する
   - 起点なしでは、現在の `CONTAINS` グラフをディレクトリ単位に集約した概要を出す

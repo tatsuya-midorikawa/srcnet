@@ -28,7 +28,7 @@ does not read these fields as configuration or environment variables.
 | --- | --- |
 | `SRCNET` | Resolve the trusted executable from user/PATH settings to a full executable path, not a command string |
 | `SOURCE_ROOT` | Resolve the user-requested original source directory to an absolute path |
-| `INDEX_DIR` | Resolve the requested output directory to an absolute path; otherwise use `SOURCE_ROOT/.srcnet` |
+| `INDEX_DIR` | Resolve the requested output directory to an absolute path; otherwise use `SOURCE_ROOT/_srcnet` |
 | `TIER` | Honor the requested tier; otherwise explicitly choose T1 for this skill |
 | `JOBS` | Honor a reasonable user-specified value; otherwise use 2, or 1 on a single-CPU allocation |
 

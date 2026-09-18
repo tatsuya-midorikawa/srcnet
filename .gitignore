@@ -5,7 +5,7 @@
 
 # srcnet 生成物とベンチマーク コーパス
 # 生成物にはソースの抜粋が含まれ得る。docs/security.md C-7 を参照
-.srcnet/
+_srcnet/
 bench/corpus/
 
 # User-specific files

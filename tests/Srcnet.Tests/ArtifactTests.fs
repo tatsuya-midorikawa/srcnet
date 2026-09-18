@@ -101,7 +101,7 @@ let ``経路の途中がリンクならセグメントを解決しない`` () =
 let ``リンクである出力ルートを用意しない`` () =
   use scratch = new Scratch()
   use outside = new Scratch()
-  let link = Path.Combine(scratch.Path, ".srcnet")
+  let link = Path.Combine(scratch.Path, "_srcnet")
 
   if trySymbolicLink link outside.Path true then
     match Artifact.prepareRoot link with
@@ -112,7 +112,7 @@ let ``リンクである出力ルートを用意しない`` () =
 [<Fact>]
 let ``存在しない出力ルートは作成して受け入れる`` () =
   use scratch = new Scratch()
-  let target = Path.Combine(scratch.Path, ".srcnet")
+  let target = Path.Combine(scratch.Path, "_srcnet")
 
   match Artifact.prepareRoot target with
   | Error error -> failwith (Artifact.PathError.describe error)
@@ -124,7 +124,7 @@ let ``存在しない出力ルートは作成して受け入れる`` () =
 [<Fact>]
 let ``ファイルを出力ルートとして受け入れない`` () =
   use scratch = new Scratch()
-  let target = Path.Combine(scratch.Path, ".srcnet")
+  let target = Path.Combine(scratch.Path, "_srcnet")
   File.WriteAllText(target, "not a directory")
 
   match Artifact.prepareRoot target with

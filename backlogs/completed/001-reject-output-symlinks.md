@@ -6,13 +6,13 @@
 
 ## 問題
 
-既定の出力先 `.srcnet` は解析対象リポジトリ内にあるため、リポジトリ作成者がシンボリックリンクや Windows の reparse point として配置できる。現在は字句的な `Path.GetFullPath` だけで出力先を決め、リンクを拒否せずに `manifest.json`、`segments`、`.staging`、`.staging.retired` を作成・移動・再帰削除している。
+既定の出力先 `_srcnet` は解析対象リポジトリ内にあるため、リポジトリ作成者がシンボリックリンクや Windows の reparse point として配置できる。現在は字句的な `Path.GetFullPath` だけで出力先を決め、リンクを拒否せずに `manifest.json`、`segments`、`.staging`、`.staging.retired` を作成・移動・再帰削除している。
 
 `manifest.json.tmp` などの管理対象ファイル自体がリンクである場合も、リンク先を上書きできる。
 
 ## 確認結果
 
-一時リポジトリで `.srcnet` を別ディレクトリへのリンクにし、リンク先の `segments/sentinel.txt` を作成してから `srcnet index` を実行した。
+一時リポジトリで `_srcnet` を別ディレクトリへのリンクにし、リンク先の `segments/sentinel.txt` を作成してから `srcnet index` を実行した。
 
 - 終了コードは `0`
 - リンク先へ `manifest.json` が作成された
@@ -31,6 +31,6 @@
 
 ## 完了条件
 
-- `.srcnet`、`segments`、staging、`manifest.json.tmp` の各リンクを使った回帰テストがある
+- `_srcnet`、`segments`、staging、`manifest.json.tmp` の各リンクを使った回帰テストがある
 - macOS のシンボリックリンクと Windows の junction/reparse point の双方で、管理外パスが変更されない
 - 拒否時は内部エラーではなく、利用者が理解できる診断と非成功終了コードを返す

@@ -247,7 +247,7 @@ let ``default extraction retains the requested tier for deterministic verificati
     let! struct (code, json, errors) = Corpus.runCli [ "index"; source; "--json" ]
     Assert.True(code = 0 || code = 4, errors)
     use result = JsonDocument.Parse json
-    use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(source, ".srcnet", "manifest.json")))
+    use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(source, "_srcnet", "manifest.json")))
     Assert.Equal(2, manifest.RootElement.GetProperty("options").GetProperty("requestedTier").GetInt32())
     Assert.Equal(result.RootElement.GetProperty("tier").GetInt32(),
                  manifest.RootElement.GetProperty("options").GetProperty("tier").GetInt32())

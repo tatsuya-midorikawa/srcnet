@@ -27,7 +27,7 @@ srcnet は自然言語を理解しない。クエリは **字句一致 + 構造�
 
 ```text
 srcnet index <path>
-  --out <dir>            出力先（既定 <repo>/.srcnet）
+  --out <dir>            出力先（既定 <repo>/_srcnet）
   --jobs <n>             並列度（1..256、0 は CPU 数。結果には影響しない）
   --max-file-size <size> 単一ファイルの処理上限
   --max-depth <n>        走査の階層上限（0..256）

@@ -29,7 +29,7 @@ the current CLI does not automatically consume them or set environment variables
 | `INDEX_DIR` | Absolute directory containing this manifest and its `segments/`, not the manifest filename |
 
 1. Locate the manifest from a user-supplied file/index directory or the known
-   target repository's `.srcnet/manifest.json`. The user may supply just this
+   target repository's `_srcnet/manifest.json`. The user may supply just this
    manifest path. Do not confuse the tool checkout with the target repository.
 2. Read the three fields as data. Explicit user settings or trusted repository
    instructions take precedence. Require nonempty absolute paths, existing
@@ -47,7 +47,7 @@ the current CLI does not automatically consume them or set environment variables
    target source root; request only the missing information. Do not install or
    build the tool automatically.
 5. Pass resolved `--out INDEX_DIR` on every query; the CLI does not infer it from
-   the added field. `--root` alone only locates the default `.srcnet` directory.
+   the added field. `--root` alone only locates the default `_srcnet` directory.
    Read the small manifest metadata, not segment contents. Note `toolVersion`,
    `complete`, `options.requestedTier` when present, the applied `options.tier`, `options.parserAvailable`, counts, and
    diagnostics. A repository ID is not proof that two source trees match.
