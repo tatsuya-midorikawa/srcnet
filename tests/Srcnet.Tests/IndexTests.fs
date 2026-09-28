@@ -115,17 +115,20 @@ let private buildCorpus (workspace: Workspace) =
 
 let private walk (workspace: Workspace) (options: Walk.WalkOptions) =
   let diagnostics = DiagnosticSink()
-  let result = (Walk.run workspace.Path options diagnostics CancellationToken.None).Result
+
+  let result =
+    (Walk.run workspace.Path options diagnostics CancellationToken.None).Result
+
   struct (result, diagnostics)
 
 /// 列挙値へのメンバー呼び出しは防御的コピーを生むため、ビット演算で判定する。
 let private hasFlag (flag: NodeFlags) (flags: NodeFlags) = (flags &&& flag) = flag
 
 let private paths (result: Walk.WalkResult) =
-  result.Files |> Array.map (fun file -> value file.Path) |> Set.ofArray
+  result.Files |> Array.map(fun file -> value file.Path) |> Set.ofArray
 
 let private fileNamed (result: Walk.WalkResult) (path: string) =
-  result.Files |> Array.tryFind (fun file -> value file.Path = path)
+  result.Files |> Array.tryFind(fun file -> value file.Path = path)
 
 [<Fact>]
 let ``無視設定が階層的に適用される`` () =
@@ -146,7 +149,10 @@ let ``--no-gitignore は無視設定を適用しない`` () =
   buildCorpus workspace
 
   let struct (result, _) =
-    walk workspace { Walk.WalkOptions.defaults with RespectIgnoreFiles = false }
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          RespectIgnoreFiles = false }
 
   let found = paths result
   Assert.Contains("build/generated.c", found)
@@ -262,7 +268,10 @@ let ``大きすぎるファイルは診断付きでスキップし、走査は�
   buildCorpus workspace
 
   let struct (result, diagnostics) =
-    walk workspace { Walk.WalkOptions.defaults with MaxFileSizeBytes = 1024L }
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          MaxFileSizeBytes = 1024L }
 
   Assert.Contains("pathological/longline.c", paths result)
 
@@ -270,7 +279,7 @@ let ``大きすぎるファイルは診断付きでスキップし、走査は�
   | Some file -> Assert.True(hasFlag NodeFlags.Skipped file.Flags)
   | None -> failwith "巨大ファイルのノードがありません"
 
-  Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = FileTooLarge)
+  Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = FileTooLarge))
 
 [<Fact>]
 let ``深さ上限を超えても失敗せず診断する`` () =
@@ -278,11 +287,14 @@ let ``深さ上限を超えても失敗せず診断する`` () =
   buildCorpus workspace
 
   let struct (result, diagnostics) =
-    walk workspace { Walk.WalkOptions.defaults with MaxDepth = 2 }
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          MaxDepth = 2 }
 
   Assert.Contains("src/main.c", paths result)
   Assert.DoesNotContain("deep/a/b/c/d/e/f/leaf.c", paths result)
-  Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = DepthLimitExceeded)
+  Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = DepthLimitExceeded))
 
 [<Fact>]
 let ``シンボリック リンクは既定で追跡しない`` () =
@@ -302,7 +314,7 @@ let ``シンボリック リンクは既定で追跡しない`` () =
   if created then
     let struct (result, diagnostics) = walk workspace Walk.WalkOptions.defaults
     Assert.DoesNotContain("link-to-src/main.c", paths result)
-    Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = SymbolicLinkSkipped)
+    Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = SymbolicLinkSkipped))
 
 [<Fact>]
 let ``ルート外を指すリンクは追跡を許可しても拒否される`` () =
@@ -322,10 +334,13 @@ let ``ルート外を指すリンクは追跡を許可しても拒否される``
 
   if created then
     let struct (result, diagnostics) =
-      walk workspace { Walk.WalkOptions.defaults with FollowSymbolicLinks = true }
+      walk
+        workspace
+        { Walk.WalkOptions.defaults with
+            FollowSymbolicLinks = true }
 
     Assert.DoesNotContain("escape/secret.txt", paths result)
-    Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = SymbolicLinkEscapesRoot)
+    Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = SymbolicLinkEscapesRoot))
 
 [<Fact>]
 let ``ルート内のリンクを経由してもルート外へ脱出できない`` () =
@@ -351,12 +366,15 @@ let ``ルート内のリンクを経由してもルート外へ脱出できな�
 
   if created then
     let struct (result, diagnostics) =
-      walk workspace { Walk.WalkOptions.defaults with FollowSymbolicLinks = true }
+      walk
+        workspace
+        { Walk.WalkOptions.defaults with
+            FollowSymbolicLinks = true }
 
     let found = paths result
     Assert.DoesNotContain("door/leaked.txt", found)
     Assert.DoesNotContain("hop/inner/leaked.txt", found)
-    Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = SymbolicLinkEscapesRoot)
+    Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = SymbolicLinkEscapesRoot))
 
 [<Fact>]
 let ``ルート内で完結するリンクは追跡できる`` () =
@@ -367,7 +385,9 @@ let ``ルート内で完結するリンクは追跡できる`` () =
 
   let created =
     try
-      Directory.CreateSymbolicLink(alias, Path.Combine(workspace.Path, "real")) |> ignore
+      Directory.CreateSymbolicLink(alias, Path.Combine(workspace.Path, "real"))
+      |> ignore
+
       true
     with
     | :? IOException -> false
@@ -375,7 +395,10 @@ let ``ルート内で完結するリンクは追跡できる`` () =
 
   if created then
     let struct (result, _) =
-      walk workspace { Walk.WalkOptions.defaults with FollowSymbolicLinks = true }
+      walk
+        workspace
+        { Walk.WalkOptions.defaults with
+            FollowSymbolicLinks = true }
 
     let found = paths result
     Assert.Contains("real/a.c", found)
@@ -403,9 +426,12 @@ let ``読み取り中に上限を超えたファイルは診断して打ち切�
   workspace.Write("big.c", String('x', 200_000))
 
   let struct (result, diagnostics) =
-    walk workspace { Walk.WalkOptions.defaults with MaxFileSizeBytes = 1024L }
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          MaxFileSizeBytes = 1024L }
 
-  Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = FileTooLarge)
+  Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = FileTooLarge))
 
   match fileNamed result "big.c" with
   | Some file -> Assert.True(hasFlag NodeFlags.Skipped file.Flags)
@@ -416,12 +442,21 @@ let ``並列度を変えても走査結果は同じ`` () =
   use workspace = new Workspace()
   buildCorpus workspace
 
-  let struct (single, _) = walk workspace { Walk.WalkOptions.defaults with Jobs = 1 }
-  let struct (many, _) = walk workspace { Walk.WalkOptions.defaults with Jobs = 16 }
+  let struct (single, _) =
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          Jobs = 1 }
+
+  let struct (many, _) =
+    walk
+      workspace
+      { Walk.WalkOptions.defaults with
+          Jobs = 16 }
 
   Assert.Equal<string[]>(
-    single.Files |> Array.map (fun file -> value file.Path),
-    many.Files |> Array.map (fun file -> value file.Path)
+    single.Files |> Array.map(fun file -> value file.Path),
+    many.Files |> Array.map(fun file -> value file.Path)
   )
 
   Assert.Equal<string[]>(single.Directories |> Array.map value, many.Directories |> Array.map value)
@@ -452,19 +487,20 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
         Jobs = jobs
         ExcludedPaths = [| "_srcnet" |] }
 
-  let result = (Walk.run workspace.Path options diagnostics CancellationToken.None).Result
+  let result =
+    (Walk.run workspace.Path options diagnostics CancellationToken.None).Result
 
   let repository =
     match RepositoryId.tryCreate "sample" with
     | Ok value -> value
-    | Error error -> failwith (RepositoryId.describe error)
+    | Error error -> failwith(RepositoryId.describe error)
 
   let input: Writer.IndexInput =
     { Repository = repository
       Directories = result.Directories
       Files =
         result.Files
-        |> Array.map (fun file ->
+        |> Array.map(fun file ->
           ({ Path = file.Path
              SizeBytes = file.SizeBytes
              Language = file.Language
@@ -492,7 +528,7 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
           RespectIgnoreFiles = options.RespectIgnoreFiles
           MaxDepth = options.MaxDepth
           MaxFileSizeBytes = options.MaxFileSizeBytes
-          Tier = int (Model.Tier.toCode result.AppliedTier)
+          Tier = int(Model.Tier.toCode result.AppliedTier)
           RequestedTier = ValueNone
           ParserAvailable = result.ParserAvailable
           Grammars = Array.empty
@@ -509,15 +545,16 @@ let private indexInto (workspace: Workspace) (output: string) (jobs: int) =
           NodeKinds = written.NodeKinds
           EdgeKinds = written.EdgeKinds }
       Segments = Manifest.qualify generation written.Segments
-      Diagnostics = Array.empty }
+      Diagnostics = Array.empty
+      Extraction = ValueNone }
 
   match Manifest.publish output generation manifest with
-  | Error error -> failwith (Artifact.PathError.describe error)
+  | Error error -> failwith(Artifact.PathError.describe error)
   | Ok() -> manifest
 
 let private allFileBytes (directory: string) =
   Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-  |> Seq.map (fun path -> Path.GetRelativePath(directory, path).Replace('\\', '/'), File.ReadAllBytes path)
+  |> Seq.map(fun path -> Path.GetRelativePath(directory, path).Replace('\\', '/'), File.ReadAllBytes path)
   |> Seq.sortBy fst
   |> Seq.toArray
 
@@ -550,7 +587,7 @@ let ``生成した成果物は検証を通る`` () =
   let manifest = indexInto workspace output.Path 4
 
   match Verify.run output.Path CancellationToken.None with
-  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Error error -> failwith(Manifest.ManifestError.describe error)
   | Ok report ->
     Assert.Empty(report.Issues |> Array.map Verify.Issue.describe)
     Assert.True report.IsValid
@@ -570,7 +607,8 @@ let ``セグメントを改竄すると検証が失敗する`` () =
   let target =
     Path.Combine(
       output.Path,
-      (manifest.Segments |> Array.find (fun segment -> segment.Name.EndsWith ".nodes")).Name.Replace('/', Path.DirectorySeparatorChar)
+      (manifest.Segments |> Array.find(fun segment -> segment.Name.EndsWith ".nodes"))
+        .Name.Replace('/', Path.DirectorySeparatorChar)
     )
 
   let bytes = File.ReadAllBytes target
@@ -578,10 +616,10 @@ let ``セグメントを改竄すると検証が失敗する`` () =
   File.WriteAllBytes(target, bytes)
 
   match Verify.run output.Path CancellationToken.None with
-  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Error error -> failwith(Manifest.ManifestError.describe error)
   | Ok report ->
     Assert.False report.IsValid
-    Assert.Contains(report.Issues, fun issue -> (Verify.Issue.describe issue).Contains "チェックサム")
+    Assert.Contains(report.Issues, (fun issue -> (Verify.Issue.describe issue).Contains "チェックサム"))
 
 [<Fact>]
 let ``形式版が非互換なマニフェストは拒否される`` () =
@@ -612,12 +650,12 @@ let ``統計は言語と符号化の内訳を返す`` () =
   let manifest = indexInto workspace output.Path 4
 
   match Stats.readFileStatistics output.Path manifest with
-  | Error error -> failwith (Reader.OpenError.describe error)
+  | Error error -> failwith(Reader.OpenError.describe error)
   | Ok statistics ->
-    Assert.Equal(manifest.Counts.Files, statistics.Languages |> Array.sumBy (fun entry -> entry.Files))
-    Assert.Contains(statistics.Languages, fun entry -> entry.Language = C)
-    Assert.Contains(statistics.Languages, fun entry -> entry.Language = Markdown)
-    Assert.Contains(statistics.Encodings, fun entry -> entry.Encoding = Encodings.Binary)
+    Assert.Equal(manifest.Counts.Files, statistics.Languages |> Array.sumBy(fun entry -> entry.Files))
+    Assert.Contains(statistics.Languages, (fun entry -> entry.Language = C))
+    Assert.Contains(statistics.Languages, (fun entry -> entry.Language = Markdown))
+    Assert.Contains(statistics.Encodings, (fun entry -> entry.Encoding = Encodings.Binary))
 
 [<Fact>]
 let ``ノード数は 構造ノードとシンボルの合計以上になる`` () =
@@ -628,14 +666,17 @@ let ``ノード数は 構造ノードとシンボルの合計以上になる`` (
 
   // 構成シンボルはファイルに属さないため、ノード数は構造ノードとシンボルの合計を上回り得る。
   let structural =
-    1 + manifest.Counts.Directories + manifest.Counts.Files + manifest.Counts.Symbols
+    1
+    + manifest.Counts.Directories
+    + manifest.Counts.Files
+    + manifest.Counts.Symbols
 
   Assert.True(manifest.Counts.Nodes >= structural)
 
   // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張る。
   let contains =
     manifest.Counts.EdgeKinds
-    |> Array.tryFind (fun entry -> entry.Kind = EdgeKind.name Contains)
+    |> Array.tryFind(fun entry -> entry.Kind = EdgeKind.name Contains)
 
   match contains with
   | Some entry -> Assert.Equal(manifest.Counts.Nodes - 1, entry.Count)
@@ -652,7 +693,7 @@ let ``空のリポジトリでも成果物を生成できる`` () =
   Assert.Equal(0, manifest.Counts.Edges)
 
   match Verify.run output.Path CancellationToken.None with
-  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Error error -> failwith(Manifest.ManifestError.describe error)
   | Ok report -> Assert.True report.IsValid
 
 // --- 無視ファイルの信頼境界と完全性（backlogs/completed/003, 004, 005） ---
@@ -681,7 +722,7 @@ let ``ルート外を指す無視ファイルの規則は適用しない`` () =
 
     // 外部の規則は適用されない。
     Assert.Contains("secret.txt", paths result)
-    Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = IgnoreFileUnreadable)
+    Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = IgnoreFileUnreadable))
     // 適用できなかった規則がある以上、索引対象を確定できない。
     Assert.False result.Complete
 
@@ -699,7 +740,7 @@ let ``規則を読み切れなかった無視ファイルは走査を不完全�
   workspace.Write("a.c", "int a;\n")
 
   let struct (result, diagnostics) = walk workspace Walk.WalkOptions.defaults
-  Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = IgnoreFileUnreadable)
+  Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = IgnoreFileUnreadable))
   Assert.False result.Complete
 
 [<Fact>]
@@ -733,7 +774,7 @@ let ``曖昧な符号化は診断として記録し、候補を保持する`` ()
   workspace.WriteBytes("ambiguous.txt", [| 0x81uy; 0x81uy; 0x0Auy |])
 
   let struct (result, diagnostics) = walk workspace Walk.WalkOptions.defaults
-  Assert.Contains(diagnostics.Counts(), fun (struct (kind, _)) -> kind = AmbiguousEncoding)
+  Assert.Contains(diagnostics.Counts(), (fun (struct (kind, _)) -> kind = AmbiguousEncoding))
 
   match fileNamed result "ambiguous.txt" with
   | Some file ->
@@ -748,7 +789,8 @@ let private generationsIn (output: string) =
 
   if Directory.Exists root then
     Directory.EnumerateDirectories root |> Seq.map Path.GetFileName |> Seq.toArray
-  else Array.empty
+  else
+    Array.empty
 
 [<Fact>]
 let ``セグメントは世代ごとに固有のパスへ置かれる`` () =
@@ -757,10 +799,7 @@ let ``セグメントは世代ごとに固有のパスへ置かれる`` () =
   use output = new Workspace()
   let manifest = indexInto workspace output.Path 4
 
-  Assert.All(
-    manifest.Segments,
-    fun segment -> Assert.Equal(Ok(), Artifact.validateSegmentName segment.Name)
-  )
+  Assert.All(manifest.Segments, (fun segment -> Assert.Equal(Ok(), Artifact.validateSegmentName segment.Name)))
 
   Assert.Single(generationsIn output.Path) |> ignore
 
@@ -775,8 +814,8 @@ let ``同じ入力の再索引は同じ世代を再利用する`` () =
   let second = indexInto workspace output.Path 8
 
   Assert.Equal<string[]>(
-    first.Segments |> Array.map (fun segment -> segment.Name),
-    second.Segments |> Array.map (fun segment -> segment.Name)
+    first.Segments |> Array.map(fun segment -> segment.Name),
+    second.Segments |> Array.map(fun segment -> segment.Name)
   )
 
   Assert.Single(generationsIn output.Path) |> ignore
@@ -808,16 +847,18 @@ let ``公開後のマニフェストとセグメントは常に同じ世代を�
   indexInto workspace output.Path 4 |> ignore
 
   match Manifest.read output.Path with
-  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Error error -> failwith(Manifest.ManifestError.describe error)
   | Ok manifest ->
     let generations =
-      manifest.Segments |> Array.map (fun segment -> segment.Name.Split('/')[1]) |> Array.distinct
+      manifest.Segments
+      |> Array.map(fun segment -> segment.Name.Split('/')[1])
+      |> Array.distinct
 
     Assert.Single generations |> ignore
 
     for segment in manifest.Segments do
       match Artifact.tryResolveSegment output.Path segment.Name with
-      | Error error -> failwith (Artifact.PathError.describe error)
+      | Error error -> failwith(Artifact.PathError.describe error)
       | Ok path ->
         Assert.True(File.Exists path, $"{segment.Name} がありません")
         Assert.Equal(segment.ByteLength, FileInfo(path).Length)
@@ -826,7 +867,7 @@ let ``公開後のマニフェストとセグメントは常に同じ世代を�
 
 let private tamperManifest (output: string) (edit: string -> string) =
   let path = Path.Combine(output, Manifest.FileName)
-  File.WriteAllText(path, edit (File.ReadAllText path))
+  File.WriteAllText(path, edit(File.ReadAllText path))
 
 let private indexedWorkspace (workspace: Workspace) (output: Workspace) =
   workspace.Write("a.c", "int a;\n")
@@ -866,8 +907,7 @@ let ``型や範囲が不正なマニフェストは内部エラーにならな�
       "件数が文字列", (fun text -> text.Replace(@"""files"": 1", @"""files"": ""1"""))
       "complete が文字列", (fun text -> text.Replace(@"""complete"": true", @"""complete"": ""yes"""))
       "byteLength が負", (fun text -> Regex.Replace(text, @"""byteLength"": \d+", @"""byteLength"": -1"))
-      "チェックサムが 16 進でない",
-      (fun text -> Regex.Replace(text, @"""sha256"": ""[0-9a-f]+""", @"""sha256"": ""zz""")) ]
+      "チェックサムが 16 進でない", (fun text -> Regex.Replace(text, @"""sha256"": ""[0-9a-f]+""", @"""sha256"": ""zz""")) ]
 
   for name, edit in cases do
     File.WriteAllText(Path.Combine(output.Path, Manifest.FileName), edit original)
@@ -890,19 +930,22 @@ let ``書き出し中の取り消しは成果物を残さない`` () =
 
   use output = new Workspace()
   let diagnostics = DiagnosticSink()
-  let result = (Walk.run workspace.Path Walk.WalkOptions.defaults diagnostics CancellationToken.None).Result
+
+  let result =
+    (Walk.run workspace.Path Walk.WalkOptions.defaults diagnostics CancellationToken.None)
+      .Result
 
   let repository =
     match RepositoryId.tryCreate "sample" with
     | Ok value -> value
-    | Error error -> failwith (RepositoryId.describe error)
+    | Error error -> failwith(RepositoryId.describe error)
 
   let input: Writer.IndexInput =
     { Repository = repository
       Directories = result.Directories
       Files =
         result.Files
-        |> Array.map (fun file ->
+        |> Array.map(fun file ->
           ({ Path = file.Path
              SizeBytes = file.SizeBytes
              Language = file.Language
@@ -938,7 +981,7 @@ let ``読めないセグメントは内部エラーではなく問題として�
   let target =
     match Artifact.tryResolveSegment output.Path manifest.Segments[0].Name with
     | Ok path -> path
-    | Error error -> failwith (Artifact.PathError.describe error)
+    | Error error -> failwith(Artifact.PathError.describe error)
 
   let denied =
     try
@@ -952,7 +995,7 @@ let ``読めないセグメントは内部エラーではなく問題として�
   if denied then
     try
       match Verify.run output.Path CancellationToken.None with
-      | Error error -> failwith (Manifest.ManifestError.describe error)
+      | Error error -> failwith(Manifest.ManifestError.describe error)
       | Ok report ->
         Assert.False report.IsValid
         Assert.NotEmpty report.Issues
@@ -967,19 +1010,22 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
   workspace.Write("a.c", "int a;\n")
 
   let diagnostics = DiagnosticSink()
-  let walked = (Walk.run workspace.Path Walk.WalkOptions.defaults diagnostics CancellationToken.None).Result
+
+  let walked =
+    (Walk.run workspace.Path Walk.WalkOptions.defaults diagnostics CancellationToken.None)
+      .Result
 
   let repository =
     match RepositoryId.tryCreate "sample" with
     | Ok value -> value
-    | Error error -> failwith (RepositoryId.describe error)
+    | Error error -> failwith(RepositoryId.describe error)
 
   let input: Writer.IndexInput =
     { Repository = repository
       Directories = walked.Directories
       Files =
         walked.Files
-        |> Array.map (fun file ->
+        |> Array.map(fun file ->
           ({ Path = file.Path
              SizeBytes = file.SizeBytes
              Language = file.Language
@@ -1007,7 +1053,7 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
           RespectIgnoreFiles = true
           MaxDepth = Walk.WalkOptions.defaults.MaxDepth
           MaxFileSizeBytes = Walk.WalkOptions.defaults.MaxFileSizeBytes
-          Tier = int (Model.Tier.toCode walked.AppliedTier)
+          Tier = int(Model.Tier.toCode walked.AppliedTier)
           RequestedTier = ValueNone
           ParserAvailable = walked.ParserAvailable
           Grammars = Array.empty
@@ -1024,7 +1070,8 @@ let ``書き出した領域が消えていたらマニフェストを公開し�
           NodeKinds = written.NodeKinds
           EdgeKinds = written.EdgeKinds }
       Segments = Manifest.qualify generation written.Segments
-      Diagnostics = Array.empty }
+      Diagnostics = Array.empty
+      Extraction = ValueNone }
 
   // 並行する別の生成が staging を消した状況を再現する。
   Manifest.discardStaging output.Path
@@ -1056,32 +1103,30 @@ let ``リンクである staging へは書き出さない`` () =
     | Error(Artifact.LinkRejected _) -> ()
     | Error error -> failwith $"想定と異なる拒否理由です: {Artifact.PathError.describe error}"
 
-let private rewriteSegment
-  (output: string)
-  (manifest: Manifest.Manifest)
-  (suffix: string)
-  (edit: byte[] -> byte[])
-  =
+let private rewriteSegment (output: string) (manifest: Manifest.Manifest) (suffix: string) (edit: byte[] -> byte[]) =
   let segments =
     manifest.Segments
-    |> Array.map (fun descriptor ->
-      if not (descriptor.Name.EndsWith(suffix, StringComparison.Ordinal)) then descriptor
+    |> Array.map(fun descriptor ->
+      if not(descriptor.Name.EndsWith(suffix, StringComparison.Ordinal)) then
+        descriptor
       else
-        let path = Path.Combine(output, descriptor.Name.Replace('/', Path.DirectorySeparatorChar))
+        let path =
+          Path.Combine(output, descriptor.Name.Replace('/', Path.DirectorySeparatorChar))
+
         let bytes = File.ReadAllBytes path |> edit
         File.WriteAllBytes(path, bytes)
 
         { descriptor with
             ByteLength = int64 bytes.Length
-            Checksum = Convert.ToHexStringLower(Hashing.hash (ReadOnlySpan bytes)) })
+            Checksum = Convert.ToHexStringLower(Hashing.hash(ReadOnlySpan bytes)) })
 
   match Manifest.write output { manifest with Segments = segments } with
   | Ok() -> ()
-  | Error error -> failwith (Artifact.PathError.describe error)
+  | Error error -> failwith(Artifact.PathError.describe error)
 
 let private assertInvalidArtifact output =
   match Verify.run output CancellationToken.None with
-  | Error error -> failwith (Manifest.ManifestError.describe error)
+  | Error error -> failwith(Manifest.ManifestError.describe error)
   | Ok report -> Assert.False(report.IsValid, "Corrupt artifact was accepted")
 
 [<Fact>]
@@ -1089,10 +1134,13 @@ let ``verify rejects missing string descriptors even when the file remains`` () 
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
-  let segments = manifest.Segments |> Array.filter (fun item -> not (item.Name.EndsWith(".strings", StringComparison.Ordinal)))
+
+  let segments =
+    manifest.Segments
+    |> Array.filter(fun item -> not(item.Name.EndsWith(".strings", StringComparison.Ordinal)))
 
   match Manifest.write output.Path { manifest with Segments = segments } with
-  | Error error -> failwith (Artifact.PathError.describe error)
+  | Error error -> failwith(Artifact.PathError.describe error)
   | Ok() -> assertInvalidArtifact output.Path
 
 [<Fact>]
@@ -1102,7 +1150,7 @@ let ``verify rejects a checksummed segment with the wrong kind`` () =
   let manifest = indexedWorkspace workspace output
 
   rewriteSegment output.Path manifest ".nodes" (fun bytes ->
-    let length = uint64 (bytes.Length - Format.HeaderLength)
+    let length = uint64(bytes.Length - Format.HeaderLength)
 
     Format.writeHeader
       (Span bytes)
@@ -1128,10 +1176,10 @@ let ``verify rejects node counts that disagree with the manifest`` () =
     Format.writeHeader
       (Span shortened)
       { Kind = Format.Nodes
-        PrimaryCount = uint64 (manifest.Counts.Nodes - 1)
+        PrimaryCount = uint64(manifest.Counts.Nodes - 1)
         SecondaryCount = 0UL
         RecordLength = uint32 Format.RecordLength
-        PayloadLength = uint64 (shortened.Length - Format.HeaderLength) }
+        PayloadLength = uint64(shortened.Length - Format.HeaderLength) }
 
     shortened)
 
@@ -1146,8 +1194,10 @@ let ``verify rejects string tables whose first offset is not zero`` () =
   rewriteSegment output.Path manifest ".stroffsets" (fun bytes ->
     for index in 0 .. manifest.Counts.Strings do
       let offset = Span(bytes, Format.HeaderLength + index * 8, 8)
+
       if Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian offset = 0UL then
         Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(offset, 1UL)
+
     bytes)
 
   assertInvalidArtifact output.Path
@@ -1157,9 +1207,11 @@ let ``verify rejects invalid UTF8 even when its checksum matches`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
+
   rewriteSegment output.Path manifest ".strings" (fun bytes ->
     bytes[Format.HeaderLength] <- 0xFFuy
     bytes)
+
   assertInvalidArtifact output.Path
 
 [<Fact>]
@@ -1169,8 +1221,9 @@ let ``manifest structural counts cannot wrap around Int32`` () =
   indexedWorkspace workspace output |> ignore
 
   tamperManifest output.Path (fun text ->
-    text.Replace("\"files\": 1", "\"files\": 2147483647")
-        .Replace("\"directories\": 0", "\"directories\": 2147483647"))
+    text
+      .Replace("\"files\": 1", "\"files\": 2147483647")
+      .Replace("\"directories\": 0", "\"directories\": 2147483647"))
 
   match Manifest.read output.Path with
   | Error(Manifest.Malformed _) -> ()
@@ -1181,15 +1234,17 @@ let ``republishing does not silently reuse same-sized corrupt data`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
-  let target = Path.Combine(output.Path, manifest.Segments[0].Name.Replace('/', Path.DirectorySeparatorChar))
+
+  let target =
+    Path.Combine(output.Path, manifest.Segments[0].Name.Replace('/', Path.DirectorySeparatorChar))
+
   let bytes = File.ReadAllBytes target
   bytes[bytes.Length - 1] <- bytes[bytes.Length - 1] ^^^ 0xFFuy
   File.WriteAllBytes(target, bytes)
 
   match Manifest.generationIn manifest with
   | ValueNone -> failwith "Expected a generation"
-  | ValueSome generation ->
-    Assert.True(Manifest.publish output.Path generation manifest |> Result.isError)
+  | ValueSome generation -> Assert.True(Manifest.publish output.Path generation manifest |> Result.isError)
 
 [<Fact>]
 let ``publication does not delete unrelated entries in the segments directory`` () =
@@ -1207,18 +1262,30 @@ let ``statistics reject negative sizes and unknown encoding codes`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
+
   rewriteSegment output.Path manifest ".files" (fun bytes ->
     Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(
-      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8), -1L)
+      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8),
+      -1L
+    )
+
     bytes)
+
   Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError)
 
   rewriteSegment output.Path manifest ".files" (fun bytes ->
     Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(
-      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8), 0L)
+      Span(bytes, Format.HeaderLength + Format.FileRecord.SizeOffset, 8),
+      0L
+    )
+
     Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
-      Span(bytes, Format.HeaderLength + Format.FileRecord.EncodingOffset, 2), UInt16.MaxValue)
+      Span(bytes, Format.HeaderLength + Format.FileRecord.EncodingOffset, 2),
+      UInt16.MaxValue
+    )
+
     bytes)
+
   Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError)
 
 [<Fact>]
@@ -1230,10 +1297,13 @@ let ``statistics observe cancellation even for empty tables`` () =
   cancellation.Cancel()
 
   Assert.Throws<OperationCanceledException>(fun () ->
-    Stats.readFileStatisticsWithCancellation output.Path manifest cancellation.Token |> ignore)
+    Stats.readFileStatisticsWithCancellation output.Path manifest cancellation.Token
+    |> ignore)
   |> ignore
+
   Assert.Throws<OperationCanceledException>(fun () ->
-    Stats.readReferenceStatisticsWithCancellation output.Path manifest cancellation.Token |> ignore)
+    Stats.readReferenceStatisticsWithCancellation output.Path manifest cancellation.Token
+    |> ignore)
   |> ignore
 
 [<Fact>]
@@ -1241,39 +1311,69 @@ let ``a grammar version difference is advisory rather than corruption`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
-  let recorded: Manifest.GrammarRecord =
-    { Language = "c"; Version = "different"; Sha256 = String('0', 64) }
 
-  match Manifest.write output.Path { manifest with Options = { manifest.Options with Grammars = [| recorded |] } } with
-  | Error error -> failwith (Artifact.PathError.describe error)
+  let recorded: Manifest.GrammarRecord =
+    { Language = "c"
+      Version = "different"
+      Sha256 = String('0', 64) }
+
+  match
+    Manifest.write
+      output.Path
+      { manifest with
+          Options =
+            { manifest.Options with
+                Grammars = [| recorded |] } }
+  with
+  | Error error -> failwith(Artifact.PathError.describe error)
   | Ok() ->
     match Verify.run output.Path CancellationToken.None with
-    | Error error -> failwith (Manifest.ManifestError.describe error)
+    | Error error -> failwith(Manifest.ManifestError.describe error)
     | Ok report ->
       Assert.True report.IsValid
-      Assert.Contains(report.Issues, function Verify.GrammarVersionDiffers _ -> true | _ -> false)
+
+      Assert.Contains(
+        report.Issues,
+        function
+        | Verify.GrammarVersionDiffers _ -> true
+        | _ -> false
+      )
 
 [<Fact>]
 let ``manifest kind totals and CSR roles cannot hide graph edges`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
-  let repeated = Array.append manifest.Counts.EdgeKinds [| manifest.Counts.EdgeKinds[0] |]
+
+  let repeated =
+    Array.append manifest.Counts.EdgeKinds [| manifest.Counts.EdgeKinds[0] |]
+
   let missingReverse =
     manifest.Segments
-    |> Array.filter (fun descriptor -> not (descriptor.Name.EndsWith(".redges.CONTAINS", StringComparison.Ordinal)))
+    |> Array.filter(fun descriptor -> not(descriptor.Name.EndsWith(".redges.CONTAINS", StringComparison.Ordinal)))
 
   for modified in
-    [ { manifest with Counts = { manifest.Counts with EdgeKinds = Array.empty } }
-      { manifest with Counts = { manifest.Counts with NodeKinds = Array.empty } }
-      { manifest with Counts = { manifest.Counts with EdgeKinds = repeated } }
-      { manifest with Segments = missingReverse } ] do
+    [ { manifest with
+          Counts =
+            { manifest.Counts with
+                EdgeKinds = Array.empty } }
+      { manifest with
+          Counts =
+            { manifest.Counts with
+                NodeKinds = Array.empty } }
+      { manifest with
+          Counts =
+            { manifest.Counts with
+                EdgeKinds = repeated } }
+      { manifest with
+          Segments = missingReverse } ] do
     match Manifest.write output.Path modified with
-    | Error error -> failwith (Artifact.PathError.describe error)
+    | Error error -> failwith(Artifact.PathError.describe error)
     | Ok() ->
       match Manifest.read output.Path with
       | Error(Manifest.Malformed _) -> ()
       | other -> failwith $"Inconsistent kind metadata was accepted: {other}"
+
       Assert.True(Query.GraphView.Open output.Path |> Result.isError)
 
 [<Fact>]
@@ -1281,11 +1381,19 @@ let ``verify validates every lookup posting rather than only its checksum`` () =
   use workspace = new Workspace()
   use output = new Workspace()
   let manifest = indexedWorkspace workspace output
+
   rewriteSegment output.Path manifest ".lookup" (fun bytes ->
-    let keys = Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8))
-    let first = Format.HeaderLength + Format.Lookup.PreludeLength + int keys * Format.Lookup.KeyLength
+    let keys =
+      Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8))
+
+    let first =
+      Format.HeaderLength
+      + Format.Lookup.PreludeLength
+      + int keys * Format.Lookup.KeyLength
+
     Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), 3u)
     bytes)
+
   assertInvalidArtifact output.Path
 
 [<Theory>]
@@ -1302,23 +1410,33 @@ let ``verify validates base record metadata with and without lexical lookup`` wi
       ".files", Format.FileRecord.FlagsOffset, 4, 8192UL
       ".files", Format.FileRecord.LineCountOffset, 4, 2147483648UL
       ".files", Format.FileRecord.SizeOffset, 8, UInt64.MaxValue ]
+
   for suffix, offset, width, value in cases do
     use workspace = new Workspace()
     use output = new Workspace()
     let original = indexedWorkspace workspace output
+
     let manifest =
-      if withLookup then original
+      if withLookup then
+        original
       else
         { original with
-            Segments = original.Segments |> Array.filter (fun item -> not (item.Name.EndsWith(".lookup", StringComparison.Ordinal))) }
+            Segments =
+              original.Segments
+              |> Array.filter(fun item -> not(item.Name.EndsWith(".lookup", StringComparison.Ordinal))) }
+
     rewriteSegment output.Path manifest suffix (fun bytes ->
       let field = Span(bytes, Format.HeaderLength + offset, width)
+
       match width with
       | 2 -> Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(field, uint16 value)
       | 4 -> Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(field, uint32 value)
       | _ -> Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(field, value)
+
       bytes)
+
     assertInvalidArtifact output.Path
+
     if suffix = ".files" then
       Assert.True(Stats.readFileStatistics output.Path manifest |> Result.isError, $"{suffix}:{offset}")
 
@@ -1336,14 +1454,18 @@ let ``verify and statistics reject invalid reference metadata`` () =
     workspace.Write("include.c", "#include \"sample.h\"\n")
     let manifest = indexedWorkspace workspace output
     Assert.True(manifest.Counts.ReferenceCandidates > 0)
+
     rewriteSegment output.Path manifest ".refs" (fun bytes ->
       let field = Span(bytes, Format.HeaderLength + offset, width)
+
       match width with
       | 1 -> field[0] <- byte value
       | 2 -> Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(field, uint16 value)
       | 4 -> Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(field, uint32 value)
       | _ -> Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(field, value)
+
       bytes)
+
     assertInvalidArtifact output.Path
     Assert.True(Stats.readReferenceStatistics output.Path manifest |> Result.isError)
 
@@ -1357,18 +1479,30 @@ let ``verify rejects CSR order and transpose mismatches`` corruption =
   workspace.Write("b.c", "int b;\n")
   workspace.Write("c.c", "int c;\n")
   let manifest = indexedWorkspace workspace output
-  let suffix = if corruption = "reverse" then ".redges.CONTAINS" else ".edges.CONTAINS"
+
+  let suffix =
+    if corruption = "reverse" then
+      ".redges.CONTAINS"
+    else
+      ".edges.CONTAINS"
+
   rewriteSegment output.Path manifest suffix (fun bytes ->
     let first = Format.HeaderLength + (manifest.Counts.Nodes + 1) * 8
+
     let value =
       Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, first, 4))
+
     if corruption = "reverse" then
       Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first, 4), 1u)
     elif corruption = "duplicate" then
       Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), value)
     else
-      let second = Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, first + 4, 4))
+      let second =
+        Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, first + 4, 4))
+
       Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first, 4), second)
       Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, first + 4, 4), value)
+
     bytes)
+
   assertInvalidArtifact output.Path

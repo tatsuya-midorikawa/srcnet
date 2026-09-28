@@ -5,7 +5,7 @@ open Xunit
 open Srcnet.Cli
 open Srcnet.Storage
 
-let private parse (arguments: string list) = Args.parse (List.toArray arguments)
+let private parse (arguments: string list) = Args.parse(List.toArray arguments)
 
 let private indexArguments (arguments: string list) =
   match parse arguments with
@@ -61,10 +61,7 @@ let ``値を取らないフラグへのインライン値を黙って有効化�
       [ "search"; "name" ], "--json"
       [ "verify" ], "--deterministic" ] do
     for value in [ "false"; "true"; "" ] do
-      Assert.Equal(
-        Error(Args.InvalidValue(flag, value)),
-        parse (command @ [ $"{flag}={value}" ])
-      )
+      Assert.Equal(Error(Args.InvalidValue(flag, value)), parse(command @ [ $"{flag}={value}" ]))
 
 [<Fact>]
 let ``未知のオプションは誤りとして報告する`` () =
@@ -114,7 +111,9 @@ let ``数値オプションの検証順と値の消費をコマンド間で保�
   for arguments, expected in cases do
     Assert.Equal(Error expected, parse arguments)
 
-  let indexed = indexArguments [ "index"; "4"; "--jobs=bad"; "--jobs"; "4"; "--max-file-size=64KiB" ]
+  let indexed =
+    indexArguments [ "index"; "4"; "--jobs=bad"; "--jobs"; "4"; "--max-file-size=64KiB" ]
+
   Assert.Equal("4", indexed.RootPath)
   Assert.Equal(ValueSome 4, indexed.Jobs)
   Assert.Equal(ValueSome 65_536L, indexed.MaxFileSizeBytes)
@@ -180,6 +179,7 @@ let ``subcommands accept help without required arguments`` () =
   for command in [ "index"; "search"; "show"; "neighbors"; "path"; "context"; "stats"; "verify" ] do
     for flag in [ "--help"; "-h" ] do
       Assert.Equal(Ok Args.Help, parse [ command; flag ])
+
   Assert.Equal(Ok Args.Help, parse [ "export"; "html"; "--help" ])
   Assert.Equal(Error(Args.UnknownCommand "unknown"), parse [ "unknown"; "--help" ])
 
@@ -187,12 +187,14 @@ let ``subcommands accept help without required arguments`` () =
 let ``option terminator preserves option-shaped positional values`` () =
   let indexed = indexArguments [ "index"; "--tier"; "0"; "--"; "--help" ]
   Assert.Equal("--help", indexed.RootPath)
+
   match parse [ "context"; "--json"; "--"; "--json"; "-h"; "--budget=1" ] with
   | Ok(Args.Context parsed) ->
     Assert.True parsed.Json
     Assert.Equal<string>([| "--json"; "-h"; "--budget=1" |], parsed.Keywords)
     Assert.Equal(Args.DefaultBudget, parsed.Limits.Budget)
   | other -> failwith $"{other}"
+
   Assert.Equal(Error(Args.MissingValue "--out"), parse [ "stats"; "--out"; "--"; "folder" ])
 
 [<Fact>]
@@ -203,14 +205,17 @@ let ``invalid index bounds and encoding names are rejected`` () =
       [ "index"; "repo"; "--assume-encoding=typo" ]
       [ "index"; "repo"; "--assume-encoding=binary" ] ] do
     Assert.True(parse arguments |> Result.isError, String.concat " " arguments)
-  let parsed = indexArguments [ "index"; "repo"; "--jobs=0"; "--max-depth=0"; "--assume-encoding=euc_jp" ]
+
+  let parsed =
+    indexArguments [ "index"; "repo"; "--jobs=0"; "--max-depth=0"; "--assume-encoding=euc_jp" ]
+
   Assert.Equal(ValueSome 0, parsed.Jobs)
   Assert.Equal(ValueSome 0, parsed.MaxDepth)
   Assert.Equal(ValueSome "euc_jp", parsed.AssumeEncoding)
 
 [<Fact>]
 let ``empty and malformed paths are user input errors`` () =
-  for value in [ ""; " "; "bad" + string (char 0) + "path" ] do
+  for value in [ ""; " "; "bad" + string(char 0) + "path" ] do
     for arguments in
       [ [ "index"; value ]
         [ "index"; "repo"; "--out"; value ]
@@ -235,7 +240,7 @@ let ``query options that have no effect on a command are rejected`` () =
       "path", "--ignore-case", "" ] do
     let positional = if command = "path" then [ "a"; "b" ] else [ "name" ]
     let value = if value = "" then [] else [ value ]
-    Assert.Equal(Error(Args.UnknownOption option), parse ([ command ] @ positional @ [ option ] @ value))
+    Assert.Equal(Error(Args.UnknownOption option), parse([ command ] @ positional @ [ option ] @ value))
 
 // --- コマンドの通し検証 ---
 
@@ -282,6 +287,9 @@ let private indexOptions (root: string) : Args.IndexArguments =
     RespectIgnoreFiles = true
     FollowSymbolicLinks = false
     AllowPartial = false
+    Progress = "never"
+    MemoryLimit = Args.DefaultMemoryLimit
+    TemporaryLimit = Args.DefaultTemporaryLimit
     Json = false }
 
 let private runIndex (root: string) =
@@ -332,7 +340,10 @@ let ``全コマンドは同じ成果物パスを使い明示した出力先を�
   Assert.Equal(Commands.ExitCode.Success, runIndex repository.Path)
 
   let output = Path.Combine(repository.Path, Args.DefaultOutputDirectoryName)
-  let limits: Args.QueryLimits = { Limit = Args.DefaultLimit; Budget = Args.DefaultBudget }
+
+  let limits: Args.QueryLimits =
+    { Limit = Args.DefaultLimit
+      Budget = Args.DefaultBudget }
 
   for explicitOutput, rootPath in
     [ ValueNone, ValueSome(repository.Path + string Path.DirectorySeparatorChar)
@@ -391,11 +402,20 @@ let ``全コマンドは同じ成果物パスを使い明示した出力先を�
         MaxNodes = Args.DefaultMaxNodes
         Json = true }
 
-    Assert.Equal(Commands.ExitCode.Success, Commands.stats { OutputDirectory = explicitOutput; RootPath = rootPath; Json = true })
+    Assert.Equal(
+      Commands.ExitCode.Success,
+      Commands.stats
+        { OutputDirectory = explicitOutput
+          RootPath = rootPath
+          Json = true }
+    )
 
     let verified =
       Commands.verify
-        { OutputDirectory = explicitOutput; RootPath = rootPath; Deterministic = false; Json = true }
+        { OutputDirectory = explicitOutput
+          RootPath = rootPath
+          Deterministic = false
+          Json = true }
         CancellationToken.None
 
     Assert.Equal(Commands.ExitCode.Success, verified.GetAwaiter().GetResult())
@@ -434,10 +454,7 @@ let ``deterministic verify は成果物の追加ファイルを検出する`` ()
   repository.Write("a.c", "int a;\n")
   Assert.Equal(Commands.ExitCode.Success, runIndex repository.Path)
 
-  File.WriteAllText(
-    Path.Combine(repository.Path, Args.DefaultOutputDirectoryName, "stray.bin"),
-    "leftover"
-  )
+  File.WriteAllText(Path.Combine(repository.Path, Args.DefaultOutputDirectoryName, "stray.bin"), "leftover")
 
   Assert.Equal(Commands.ExitCode.CompletedWithDiagnostics, runVerify repository.Path true)
 
@@ -488,9 +505,11 @@ let ``deterministic verify は猶予として残した旧世代を差として�
 let ``index rejects using the source root as its output directory`` () =
   use repository = new Sandbox()
   repository.Write("source.c", "int source;\n")
+
   let arguments =
     { indexOptions repository.Path with
         OutputDirectory = ValueSome(Path.Combine(repository.Path, ".")) }
+
   Assert.Equal(Commands.ExitCode.UserError, (Commands.index arguments CancellationToken.None).GetAwaiter().GetResult())
   Assert.False(File.Exists(Path.Combine(repository.Path, Manifest.FileName)))
   Assert.False(Directory.Exists(Path.Combine(repository.Path, Artifact.SegmentDirectory)))
@@ -500,11 +519,20 @@ let ``output exclusion honors equivalent root casing on case-insensitive filesys
   use repository = new Sandbox()
   repository.Write("source.c", "int source;\n")
   let alias = repository.Path.ToUpperInvariant()
+
   if Directory.Exists alias then
     let output = Path.Combine(alias, "index-output")
-    let arguments = { indexOptions repository.Path with OutputDirectory = ValueSome output }
-    for _ in 1 .. 2 do
-      Assert.Equal(Commands.ExitCode.Success, (Commands.index arguments CancellationToken.None).GetAwaiter().GetResult())
+
+    let arguments =
+      { indexOptions repository.Path with
+          OutputDirectory = ValueSome output }
+
+    for _ in 1..2 do
+      Assert.Equal(
+        Commands.ExitCode.Success,
+        (Commands.index arguments CancellationToken.None).GetAwaiter().GetResult()
+      )
+
       match Manifest.read output with
-      | Error error -> failwith (Manifest.ManifestError.describe error)
+      | Error error -> failwith(Manifest.ManifestError.describe error)
       | Ok manifest -> Assert.Equal(1, manifest.Counts.Files)

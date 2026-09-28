@@ -47,7 +47,8 @@ let toolVersion =
   | version -> $"{version.Major}.{version.Minor}.{version.Build}"
 
 type Counts =
-  { Nodes: int
+  {
+    Nodes: int
     Edges: int
     Strings: int
     StringBytes: int64
@@ -60,18 +61,22 @@ type Counts =
     /// ノード種別ごとの件数。種別名の序数昇順。
     NodeKinds: Writer.KindCount[]
     /// エッジ種別ごとの件数。種別名の序数昇順。
-    EdgeKinds: Writer.KindCount[] }
+    EdgeKinds: Writer.KindCount[]
+  }
 
 /// 同梱している文法 1 つ分。実行ファイルへコンパイル時に埋め込んだ値を記録する。
 /// 対象リポジトリからも構成ファイルからも読み込まない（docs/security.md C-1）。
 type GrammarRecord =
-  { Language: string
+  {
+    Language: string
     Version: string
     /// 取得元アーカイブの SHA-256（16 進小文字）。
-    Sha256: string }
+    Sha256: string
+  }
 
 type IndexOptions =
-  { FollowSymbolicLinks: bool
+  {
+    FollowSymbolicLinks: bool
     RespectIgnoreFiles: bool
     MaxDepth: int
     MaxFileSizeBytes: int64
@@ -85,12 +90,23 @@ type IndexOptions =
     Grammars: GrammarRecord[]
     /// 符号化が曖昧なファイルへ適用した符号化。指定がなければ空文字列。
     /// 利用者が持ち込んだ事実であり、成果物の内容を決める条件の一部になる。
-    AssumedEncoding: string }
+    AssumedEncoding: string
+  }
 
 type DiagnosticCount = { Kind: string; Count: int }
 
+type ExtractionCount =
+  { Language: string
+    Tier: int
+    Reason: string
+    Count: int
+    SyntaxSupported: bool
+    GrammarAvailable: bool
+    Examples: string[] }
+
 type Manifest =
-  { ManifestVersion: uint32
+  {
+    ManifestVersion: uint32
     FormatVersion: uint32
     ToolVersion: string
     RepositoryId: string
@@ -101,7 +117,9 @@ type Manifest =
     /// 名前の序数昇順。
     Segments: Writer.SegmentDescriptor[]
     /// 種別名の序数昇順。
-    Diagnostics: DiagnosticCount[] }
+    Diagnostics: DiagnosticCount[]
+    Extraction: ExtractionCount[] voption
+  }
 
 type ManifestError =
   | NotFound of path: string
@@ -110,6 +128,15 @@ type ManifestError =
   | UnsupportedFormatVersion of found: uint32
   /// 読取中に公開が繰り返され、一貫した世代を観測できなかった。
   | Busy of path: string
+
+let segmentFileNames (directory: string) (manifest: Manifest) : ISet<string> =
+  let names = HashSet<string>(StringComparer.Ordinal)
+
+  for segment in manifest.Segments do
+    names.Add(Path.GetFullPath(Path.Combine(directory, segment.Name.Replace('/', Path.DirectorySeparatorChar))))
+    |> ignore
+
+  names
 
 module ManifestError =
 
@@ -137,7 +164,7 @@ let private writeSegments (writer: Utf8JsonWriter) (segments: Writer.SegmentDesc
 
   writer.WriteEndArray()
 
-let private serialize (manifest: Manifest) =
+let serialize (manifest: Manifest) =
   use buffer = new MemoryStream()
   use writer = new Utf8JsonWriter(buffer, writerOptions)
 
@@ -155,9 +182,11 @@ let private serialize (manifest: Manifest) =
   writer.WriteNumber("maxDepth", manifest.Options.MaxDepth)
   writer.WriteNumber("maxFileSizeBytes", manifest.Options.MaxFileSizeBytes)
   writer.WriteNumber("tier", manifest.Options.Tier)
+
   match manifest.Options.RequestedTier with
   | ValueSome tier -> writer.WriteNumber("requestedTier", tier)
   | ValueNone -> ()
+
   writer.WriteBoolean("parserAvailable", manifest.Options.ParserAvailable)
   writer.WriteString("assumedEncoding", manifest.Options.AssumedEncoding)
   writer.WriteStartArray "grammars"
@@ -212,6 +241,30 @@ let private serialize (manifest: Manifest) =
     writer.WriteEndObject()
 
   writer.WriteEndArray()
+
+  match manifest.Extraction with
+  | ValueNone -> ()
+  | ValueSome coverage ->
+    writer.WriteStartArray "extraction"
+
+    for entry in coverage do
+      writer.WriteStartObject()
+      writer.WriteString("language", entry.Language)
+      writer.WriteNumber("tier", entry.Tier)
+      writer.WriteString("reason", entry.Reason)
+      writer.WriteNumber("count", entry.Count)
+      writer.WriteBoolean("syntaxSupported", entry.SyntaxSupported)
+      writer.WriteBoolean("grammarAvailable", entry.GrammarAvailable)
+      writer.WriteStartArray "examples"
+
+      for path in entry.Examples do
+        writer.WriteStringValue path
+
+      writer.WriteEndArray()
+      writer.WriteEndObject()
+
+    writer.WriteEndArray()
+
   writer.WriteEndObject()
   writer.Flush()
   buffer.ToArray()
@@ -232,27 +285,27 @@ let write (outputDirectory: string) (manifest: Manifest) : Result<unit, Artifact
   | Error error -> Error error
   | Ok() ->
 
-  match Artifact.ensureNotLink temporary with
-  | Error error -> Error error
-  | Ok() ->
+    match Artifact.ensureNotLink temporary with
+    | Error error -> Error error
+    | Ok() ->
 
-  try
-    Directory.CreateDirectory outputDirectory |> ignore
-    let payload = serialize manifest
-    File.Delete temporary
+      try
+        Directory.CreateDirectory outputDirectory |> ignore
+        let payload = serialize manifest
+        File.Delete temporary
 
-    do
-      use stream =
-        new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+        do
+          use stream =
+            new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)
 
-      stream.Write(ReadOnlySpan payload)
-      stream.Flush()
+          stream.Write(ReadOnlySpan payload)
+          stream.Flush()
 
-    Artifact.replaceFile temporary destination
-    Ok()
-  with
-  | :? IOException as ex -> Error(Artifact.Unavailable(destination, ex.Message))
-  | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(destination, "書き込む権限がありません"))
+        Artifact.replaceFile temporary destination
+        Ok()
+      with
+      | :? IOException as ex -> Error(Artifact.Unavailable(destination, ex.Message))
+      | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(destination, "書き込む権限がありません"))
 
 /// 生成中の成果物を置く場所。
 let stagingPath (outputDirectory: string) =
@@ -271,15 +324,16 @@ let acquireWriter (outputDirectory: string) : Result<IDisposable, Artifact.PathE
   | Error error -> Error error
   | Ok() ->
     try
-      let stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+      let stream =
+        new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
 
-      if stream.CanSeek then Ok(stream :> IDisposable)
+      if stream.CanSeek then
+        Ok(stream :> IDisposable)
       else
         stream.Dispose()
         Error(Artifact.Unavailable(path, "書き込みロックが通常ファイルではありません"))
     with
-    | :? IOException as ex ->
-      Error(Artifact.Unavailable(path, $"別の索引生成が実行中か、書き込みロックを取得できません: {ex.Message}"))
+    | :? IOException as ex -> Error(Artifact.Unavailable(path, $"別の索引生成が実行中か、書き込みロックを取得できません: {ex.Message}"))
     | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(path, "書き込む権限がありません"))
 
 /// リンク自身だけを取り除く。掃除でリンク先の管理外ファイルを消してはならない。
@@ -299,15 +353,19 @@ let private deleteLink (path: string) =
 /// 後片付け用の削除。失敗しても成果物の整合性に影響させないため、握り潰してよい。
 let private deleteQuietly (path: string) =
   try
-    if Artifact.isLink path then deleteLink path
-    elif Directory.Exists path then Directory.Delete(path, true)
-    elif File.Exists path then File.Delete path
+    if Artifact.isLink path then
+      deleteLink path
+    elif Directory.Exists path then
+      Directory.Delete(path, true)
+    elif File.Exists path then
+      File.Delete path
   with
   | :? IOException -> ()
   | :? UnauthorizedAccessException -> ()
 
 /// 生成に失敗した場合に、書きかけの成果物を捨てる。
-let discardStaging (outputDirectory: string) = deleteQuietly (stagingPath outputDirectory)
+let discardStaging (outputDirectory: string) =
+  deleteQuietly(stagingPath outputDirectory)
 
 /// 生成中の領域を用意し、セグメントの書き出し先を返す。
 ///
@@ -316,7 +374,7 @@ let discardStaging (outputDirectory: string) = deleteQuietly (stagingPath output
 let prepareStaging (outputDirectory: string) : Result<string, Artifact.PathError> =
   discardStaging outputDirectory
 
-  match Artifact.ensureNotLink (stagingPath outputDirectory) with
+  match Artifact.ensureNotLink(stagingPath outputDirectory) with
   | Error error -> Error error
   | Ok() ->
     let segments = stagedSegmentsPath outputDirectory
@@ -350,18 +408,20 @@ let generationOf (segments: Writer.SegmentDescriptor[]) =
       .Append('\n')
     |> ignore
 
-  let digest = Hashing.hash (ReadOnlySpan(Encoding.UTF8.GetBytes(builder.ToString())))
+  let digest = Hashing.hash(ReadOnlySpan(Encoding.UTF8.GetBytes(builder.ToString())))
   Convert.ToHexStringLower(ReadOnlySpan(digest, 0, Artifact.GenerationLength / 2))
 
 /// 世代を含む最終的なセグメント名を与える。
 let qualify (generation: string) (segments: Writer.SegmentDescriptor[]) =
   segments
-  |> Array.map (fun segment ->
-    { segment with Name = $"{Artifact.SegmentDirectory}/{generation}/{segment.Name}" })
+  |> Array.map(fun segment ->
+    { segment with
+        Name = $"{Artifact.SegmentDirectory}/{generation}/{segment.Name}" })
 
 /// マニフェストが参照している世代。セグメントを持たない成果物では `ValueNone`。
 let generationIn (manifest: Manifest) =
-  if manifest.Segments.Length = 0 then ValueNone
+  if manifest.Segments.Length = 0 then
+    ValueNone
   else
     let parts = manifest.Segments[0].Name.Split '/'
     if parts.Length = 3 then ValueSome parts[1] else ValueNone
@@ -386,8 +446,10 @@ let private requireKind (element: JsonElement) (name: string) (kind: JsonValueKi
   match requireProperty element name with
   | Error error -> Error error
   | Ok value ->
-    if value.ValueKind = kind then Ok value
-    else Error(Malformed $"項目 `{name}` の種別が {value.ValueKind} です ({kind} が必要です)")
+    if value.ValueKind = kind then
+      Ok value
+    else
+      Error(Malformed $"項目 `{name}` の種別が {value.ValueKind} です ({kind} が必要です)")
 
 let private requireObject (element: JsonElement) (name: string) =
   requireKind element name JsonValueKind.Object
@@ -434,7 +496,8 @@ let private requireUInt32 (element: JsonElement) (name: string) =
   | Error error -> Error error
   | Ok number -> Ok(Checked.uint32 number)
 
-let private isHexLower (c: char) = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+let private isHexLower (c: char) =
+  (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 let private readSegments (element: JsonElement) =
   let segments = List<Writer.SegmentDescriptor>()
@@ -457,7 +520,10 @@ let private readSegments (element: JsonElement) =
             match Artifact.validateSegmentName name with
             | Error detail -> Error(Malformed $"セグメント名が不正です ({detail}): {name}")
             | Ok() ->
-              if checksum.Length <> Hashing.HashLength * 2 || not (String.forall isHexLower checksum) then
+              if
+                checksum.Length <> Hashing.HashLength * 2
+                || not(String.forall isHexLower checksum)
+              then
                 Error(Malformed $"{name}: チェックサムが 16 進小文字 {Hashing.HashLength * 2} 桁ではありません")
               else
                 // `Writer` には `Name` を持つレコードが複数あるため、型を明示して選ぶ。
@@ -477,7 +543,32 @@ let private readSegments (element: JsonElement) =
 
   match failure with
   | ValueSome error -> Error error
-  | ValueNone -> Ok(segments.ToArray())
+  | ValueNone ->
+    let names = HashSet<string>(StringComparer.Ordinal)
+
+    for segment in segments do
+      if not(names.Add segment.Name) then
+        failure <- ValueSome(Malformed "Duplicate segment name")
+
+    for segment in segments do
+      let marker = segment.Name.LastIndexOf(".part-", StringComparison.Ordinal)
+
+      if marker >= 0 then
+        let root = segment.Name.Substring(0, marker)
+        let suffix = segment.Name.Substring(marker + 6)
+
+        match Int32.TryParse(suffix, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
+        | true, index when suffix.Length = 6 && index > 0 && index < Reader.MaxParts ->
+          if
+            not(names.Contains root)
+            || not(names.Contains(Reader.partPath root (index - 1)))
+          then
+            failure <- ValueSome(Malformed "Missing segment root or preceding part")
+        | _ -> failure <- ValueSome(Malformed "Invalid segment part name")
+
+    match failure with
+    | ValueSome error -> Error error
+    | ValueNone -> Ok(segments.ToArray())
 
 /// 種別ごとの件数を読む。並びは書き出し側で名前の序数昇順に固定されている。
 let private readKindCounts (element: JsonElement) (name: string) =
@@ -503,8 +594,8 @@ let private readKindCounts (element: JsonElement) (name: string) =
 
 let private nodeKindNames =
   HashSet<string>(
-    [| for code in 0 .. 255 do
-         match Graph.NodeKind.ofCode (byte code) with
+    [| for code in 0..255 do
+         match Graph.NodeKind.ofCode(byte code) with
          | ValueSome kind -> yield Graph.NodeKind.name kind
          | ValueNone -> () |],
     StringComparer.Ordinal
@@ -519,8 +610,9 @@ let private validateKindCounts name total (known: HashSet<string>) (entries: Wri
   let mutable failure = ValueNone
 
   for entry in entries do
-    if not (known.Contains entry.Kind) || not (seen.Add entry.Kind) then
+    if not(known.Contains entry.Kind) || not(seen.Add entry.Kind) then
       failure <- ValueSome(Malformed $"{name} に未知または重複した種別があります: {entry.Kind}")
+
     sum <- sum + int64 entry.Count
 
   match failure with
@@ -539,17 +631,19 @@ let private validateEdgeSegments (segments: Writer.SegmentDescriptor[]) (kinds: 
 
   for segment in segments do
     let name = segment.Name.Split('/')[2]
+
     for marker in [| ".edges."; ".redges." |] do
       let index = name.IndexOf(marker, StringComparison.Ordinal)
-      if index >= 0 then
+
+      if index >= 0 && not(name.Contains(".part-", StringComparison.Ordinal)) then
         let role = name.Substring index
-        if not (expected.Contains role) || not (found.Add role) then
+
+        if not(expected.Contains role) || not(found.Add role) then
           failure <- ValueSome(Malformed $"未宣言または重複した CSR セグメントです: {segment.Name}")
 
   match failure with
   | ValueSome error -> Error error
-  | ValueNone when not (found.SetEquals expected) ->
-    Error(Malformed "エッジ種別の前方・後方 CSR セグメントが揃っていません")
+  | ValueNone when not(found.SetEquals expected) -> Error(Malformed "エッジ種別の前方・後方 CSR セグメントが揃っていません")
   | ValueNone -> Ok()
 
 let private readCounts (element: JsonElement) =
@@ -572,20 +666,20 @@ let private readCounts (element: JsonElement) =
       match validateKindCounts "nodeKinds" nodes nodeKindNames nodeKinds with
       | Error error -> Error error
       | Ok() ->
-      match validateKindCounts "edgeKinds" edges edgeKindNames edgeKinds with
-      | Error error -> Error error
-      | Ok() ->
-      Ok
-        { Nodes = nodes
-          Edges = edges
-          Strings = strings
-          StringBytes = stringBytes
-          Directories = directories
-          Files = files
-          Symbols = symbols
-          ReferenceCandidates = referenceCandidates
-          NodeKinds = nodeKinds
-          EdgeKinds = edgeKinds }
+        match validateKindCounts "edgeKinds" edges edgeKindNames edgeKinds with
+        | Error error -> Error error
+        | Ok() ->
+          Ok
+            { Nodes = nodes
+              Edges = edges
+              Strings = strings
+              StringBytes = stringBytes
+              Directories = directories
+              Files = files
+              Symbols = symbols
+              ReferenceCandidates = referenceCandidates
+              NodeKinds = nodeKinds
+              EdgeKinds = edgeKinds }
     | Error error, _, _, _
     | _, Error error, _, _
     | _, _, Error error, _
@@ -636,26 +730,29 @@ let private readOptions (element: JsonElement) =
       let requested =
         match element.TryGetProperty "requestedTier" with
         | false, _ -> Ok ValueNone
-        | true, _ -> requireInt64 element "requestedTier" tier 2L |> Result.map (int >> ValueSome)
+        | true, _ -> requireInt64 element "requestedTier" tier 2L |> Result.map(int >> ValueSome)
 
       match requested with
       | Error error -> Error error
       | Ok requestedTier ->
-      match requireString element "assumedEncoding" with
-      | Error error -> Error error
-      | Ok assumedEncoding when assumedEncoding <> "" && (Srcnet.Text.Encodings.tryParse assumedEncoding |> ValueOption.isNone) ->
-        Error(Malformed "assumedEncoding が対応する符号化名ではありません")
-      | Ok assumedEncoding ->
-        Ok
-          { FollowSymbolicLinks = followSymbolicLinks
-            RespectIgnoreFiles = respectIgnoreFiles
-            MaxDepth = int maxDepth
-            MaxFileSizeBytes = maxFileSizeBytes
-            Tier = int tier
-            RequestedTier = requestedTier
-            ParserAvailable = parserAvailable
-            Grammars = grammars
-            AssumedEncoding = assumedEncoding }
+        match requireString element "assumedEncoding" with
+        | Error error -> Error error
+        | Ok assumedEncoding when
+          assumedEncoding <> ""
+          && (Srcnet.Text.Encodings.tryParse assumedEncoding |> ValueOption.isNone)
+          ->
+          Error(Malformed "assumedEncoding が対応する符号化名ではありません")
+        | Ok assumedEncoding ->
+          Ok
+            { FollowSymbolicLinks = followSymbolicLinks
+              RespectIgnoreFiles = respectIgnoreFiles
+              MaxDepth = int maxDepth
+              MaxFileSizeBytes = maxFileSizeBytes
+              Tier = int tier
+              RequestedTier = requestedTier
+              ParserAvailable = parserAvailable
+              Grammars = grammars
+              AssumedEncoding = assumedEncoding }
     | Error error, _, _
     | _, Error error, _
     | _, _, Error error -> Error error
@@ -682,6 +779,76 @@ let private readDiagnostics (element: JsonElement) =
   | ValueSome error -> Error error
   | ValueNone -> Ok(diagnostics.ToArray())
 
+let private readExtraction (root: JsonElement) fileCount =
+  match root.TryGetProperty "extraction" with
+  | false, _ -> Ok ValueNone
+  | true, value when value.ValueKind <> JsonValueKind.Array || value.GetArrayLength() > 512 ->
+    Error(Malformed "extraction must be an array of at most 512 entries")
+  | true, values ->
+    let rows = ResizeArray<ExtractionCount>()
+    let keys = HashSet<struct (string * int * string)>()
+    let mutable total = 0L
+    let mutable failure = ValueNone
+
+    for item in values.EnumerateArray() do
+      if failure.IsNone then
+        if item.ValueKind <> JsonValueKind.Object then
+          failure <- ValueSome(Malformed "invalid extraction entry")
+        else
+          match
+            requireString item "language",
+            requireInt64 item "tier" 0L 2L,
+            requireString item "reason",
+            requireInt32 item "count",
+            requireBoolean item "syntaxSupported",
+            requireBoolean item "grammarAvailable",
+            requireArray item "examples"
+          with
+          | Ok language, Ok tier, Ok reason, Ok count, Ok supported, Ok grammar, Ok examples ->
+            let paths = ResizeArray<string>()
+
+            if
+              language.Length > 64
+              || reason.Length > 64
+              || count = 0
+              || examples.GetArrayLength() > 2
+              || not(keys.Add(struct (language, int tier, reason)))
+            then
+              failure <- ValueSome(Malformed "invalid extraction counts or examples")
+            else
+              for path in examples.EnumerateArray() do
+                if path.ValueKind <> JsonValueKind.String then
+                  failure <- ValueSome(Malformed "invalid extraction example")
+                else
+                  match path.GetString() with
+                  | null -> failure <- ValueSome(Malformed "null extraction example")
+                  | text when text.Length > 512 ->
+                    failure <- ValueSome(Malformed "extraction example exceeds 512 characters")
+                  | text -> paths.Add text
+
+              total <- total + int64 count
+
+              rows.Add
+                { Language = language
+                  Tier = int tier
+                  Reason = reason
+                  Count = count
+                  SyntaxSupported = supported
+                  GrammarAvailable = grammar
+                  Examples = paths.ToArray() }
+          | Error error, _, _, _, _, _, _
+          | _, Error error, _, _, _, _, _
+          | _, _, Error error, _, _, _, _
+          | _, _, _, Error error, _, _, _
+          | _, _, _, _, Error error, _, _
+          | _, _, _, _, _, Error error, _
+          | _, _, _, _, _, _, Error error -> failure <- ValueSome error
+
+    match failure with
+    | ValueSome error -> Error error
+    | ValueNone when total <> int64 fileCount -> Error(Malformed "extraction counts do not match files")
+    | ValueNone -> Ok(ValueSome(rows.ToArray()))
+
 let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
   try
     use document = JsonDocument.Parse(ReadOnlyMemory payload)
@@ -691,88 +858,96 @@ let private parse (payload: byte[]) : Result<Manifest, ManifestError> =
       Error(Malformed "最上位がオブジェクトではありません")
     else
 
-    // 版の判定は他の項目より先に行う。非互換な成果物を、破損として報告しないためである。
-    match requireUInt32 rootElement "manifestVersion" with
-    | Error _ -> Error(UnsupportedManifestVersion 0u)
-    | Ok manifestVersion ->
+      // 版の判定は他の項目より先に行う。非互換な成果物を、破損として報告しないためである。
+      match requireUInt32 rootElement "manifestVersion" with
+      | Error _ -> Error(UnsupportedManifestVersion 0u)
+      | Ok manifestVersion ->
 
-    if manifestVersion <> ManifestVersion then Error(UnsupportedManifestVersion manifestVersion)
-    else
+        if manifestVersion <> ManifestVersion then
+          Error(UnsupportedManifestVersion manifestVersion)
+        else
 
-    match requireUInt32 rootElement "formatVersion" with
-    | Error _ -> Error(UnsupportedFormatVersion 0u)
-    | Ok formatVersion ->
+          match requireUInt32 rootElement "formatVersion" with
+          | Error _ -> Error(UnsupportedFormatVersion 0u)
+          | Ok formatVersion ->
 
-    if formatVersion <> Format.FormatVersion then Error(UnsupportedFormatVersion formatVersion)
-    else
+            if formatVersion <> Format.FormatVersion then
+              Error(UnsupportedFormatVersion formatVersion)
+            else
 
-    match requireArray rootElement "segments" with
-    | Error error -> Error error
-    | Ok segmentsElement ->
+              match requireArray rootElement "segments" with
+              | Error error -> Error error
+              | Ok segmentsElement ->
 
-    match readSegments segmentsElement with
-    | Error error -> Error error
-    | Ok segments ->
+                match readSegments segmentsElement with
+                | Error error -> Error error
+                | Ok segments ->
 
-    match requireObject rootElement "counts" with
-    | Error error -> Error error
-    | Ok countsElement ->
+                  match requireObject rootElement "counts" with
+                  | Error error -> Error error
+                  | Ok countsElement ->
 
-    match readCounts countsElement with
-    | Error error -> Error error
-    | Ok counts ->
+                    match readCounts countsElement with
+                    | Error error -> Error error
+                    | Ok counts ->
 
-    match validateEdgeSegments segments counts.EdgeKinds with
-    | Error error -> Error error
-    | Ok() ->
+                      match validateEdgeSegments segments counts.EdgeKinds with
+                      | Error error -> Error error
+                      | Ok() ->
 
-    match requireObject rootElement "options" with
-    | Error error -> Error error
-    | Ok optionsElement ->
+                        match requireObject rootElement "options" with
+                        | Error error -> Error error
+                        | Ok optionsElement ->
 
-    match readOptions optionsElement with
-    | Error error -> Error error
-    | Ok options ->
+                          match readOptions optionsElement with
+                          | Error error -> Error error
+                          | Ok options ->
 
-    match requireArray rootElement "diagnostics" with
-    | Error error -> Error error
-    | Ok diagnosticsElement ->
+                            match requireArray rootElement "diagnostics" with
+                            | Error error -> Error error
+                            | Ok diagnosticsElement ->
 
-    match readDiagnostics diagnosticsElement with
-    | Error error -> Error error
-    | Ok diagnostics ->
+                              match readDiagnostics diagnosticsElement with
+                              | Error error -> Error error
+                              | Ok diagnostics ->
 
-    match
-      requireString rootElement "toolVersion",
-      requireString rootElement "repositoryId",
-      requireBoolean rootElement "complete"
-    with
-    | Error error, _, _
-    | _, Error error, _
-    | _, _, Error error -> Error error
-    | Ok toolVersion, Ok repositoryId, Ok complete ->
-      // 構造ノードとシンボルの関係は書き出し側の不変条件である。破れていれば破損とみなす。
-      //
-      // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張るため、エッジ総数は
-      // 少なくともノード数 - 1 になる。構成シンボルはファイルに属さないため、
-      // ノード数はディレクトリ・ファイル・シンボルの合計を下回らない。
-      let structural = 1L + int64 counts.Directories + int64 counts.Files + int64 counts.Symbols
+                                match readExtraction rootElement counts.Files with
+                                | Error error -> Error error
+                                | Ok extraction ->
 
-      if counts.Nodes > 0 && counts.Edges < counts.Nodes - 1 then
-        Error(Malformed $"エッジ数 {counts.Edges} がノード数 {counts.Nodes} と整合しません")
-      elif int64 counts.Nodes < structural then
-        Error(Malformed $"ノード数 {counts.Nodes} がディレクトリ・ファイル・シンボルの合計と整合しません")
-      else
-        Ok
-          { ManifestVersion = manifestVersion
-            FormatVersion = formatVersion
-            ToolVersion = toolVersion
-            RepositoryId = repositoryId
-            Complete = complete
-            Options = options
-            Counts = counts
-            Segments = segments
-            Diagnostics = diagnostics }
+                                  match
+                                    requireString rootElement "toolVersion",
+                                    requireString rootElement "repositoryId",
+                                    requireBoolean rootElement "complete"
+                                  with
+                                  | Error error, _, _
+                                  | _, Error error, _
+                                  | _, _, Error error -> Error error
+                                  | Ok toolVersion, Ok repositoryId, Ok complete ->
+                                    // 構造ノードとシンボルの関係は書き出し側の不変条件である。破れていれば破損とみなす。
+                                    //
+                                    // `CONTAINS` はルート以外のすべてのノードへ 1 本ずつ張るため、エッジ総数は
+                                    // 少なくともノード数 - 1 になる。構成シンボルはファイルに属さないため、
+                                    // ノード数はディレクトリ・ファイル・シンボルの合計を下回らない。
+                                    let structural =
+                                      1L + int64 counts.Directories + int64 counts.Files + int64 counts.Symbols
+
+                                    if counts.Nodes > 0 && counts.Edges < counts.Nodes - 1 then
+                                      Error(Malformed $"エッジ数 {counts.Edges} がノード数 {counts.Nodes} と整合しません")
+                                    elif int64 counts.Nodes < structural then
+                                      Error(Malformed $"ノード数 {counts.Nodes} がディレクトリ・ファイル・シンボルの合計と整合しません")
+                                    else
+                                      Ok
+                                        { ManifestVersion = manifestVersion
+                                          FormatVersion = formatVersion
+                                          ToolVersion = toolVersion
+                                          RepositoryId = repositoryId
+                                          Complete = complete
+                                          Options = options
+                                          Counts = counts
+                                          Segments = segments
+                                          Diagnostics = diagnostics
+                                          Extraction = extraction }
   with
   | :? JsonException as ex -> Error(Malformed ex.Message)
   | :? OverflowException -> Error(Malformed "数値が扱える範囲を超えています")
@@ -786,33 +961,33 @@ let internal readPayload (path: string) =
   try
     if Artifact.isLink path then
       Error(Malformed "マニフェストへのリンクは読み込めません")
-    elif not (File.Exists path) then
+    elif not(File.Exists path) then
       Error(NotFound path)
     elif FileInfo(path).Length = 0L then
       // FIFO もサイズ 0 になる。開いてから Length を調べると取り消し不能な待機になる。
       Error(Malformed "マニフェストが空か、通常ファイルではありません")
     else
-    // 削除の共有を許す。Windows では共有を許さない読み手が居ると、公開側の
-    // 原子的な置換に必要な共有を許可する。
-    use stream =
-      new FileStream(
-        path,
-        FileStreamOptions(
-          Mode = FileMode.Open,
-          Access = FileAccess.Read,
-          Share = (FileShare.ReadWrite ||| FileShare.Delete),
-          Options = FileOptions.SequentialScan
+      // 削除の共有を許す。Windows では共有を許さない読み手が居ると、公開側の
+      // 原子的な置換に必要な共有を許可する。
+      use stream =
+        new FileStream(
+          path,
+          FileStreamOptions(
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = (FileShare.ReadWrite ||| FileShare.Delete),
+            Options = FileOptions.SequentialScan
+          )
         )
-      )
 
-    let length = stream.Length
+      let length = stream.Length
 
-    if length > MaxManifestBytes then
-      Error(Malformed $"マニフェストが上限 {MaxManifestBytes} バイトを超えています")
-    else
-      let payload = Array.zeroCreate<byte> (int length)
-      stream.ReadExactly(Span payload)
-      Ok payload
+      if length > MaxManifestBytes then
+        Error(Malformed $"マニフェストが上限 {MaxManifestBytes} バイトを超えています")
+      else
+        let payload = Array.zeroCreate<byte>(int length)
+        stream.ReadExactly(Span payload)
+        Ok payload
   with
   | :? FileNotFoundException -> Error(NotFound path)
   | :? DirectoryNotFoundException -> Error(NotFound path)
@@ -821,7 +996,7 @@ let internal readPayload (path: string) =
   | :? UnauthorizedAccessException -> Error(Malformed "読み取り権限がありません")
 
 let read (outputDirectory: string) : Result<Manifest, ManifestError> =
-  match readPayload (Path.Combine(outputDirectory, FileName)) with
+  match readPayload(Path.Combine(outputDirectory, FileName)) with
   | Error error -> Error error
   | Ok payload -> parse payload
 
@@ -861,12 +1036,14 @@ let readStable (outputDirectory: string) (body: Manifest -> 'T) : Result<'T, Man
 
 let private isGenerationInstalled (outputDirectory: string) (manifest: Manifest) (cancellation: CancellationToken) =
   manifest.Segments
-  |> Array.forall (fun segment ->
+  |> Array.forall(fun segment ->
     cancellation.ThrowIfCancellationRequested()
+
     match Artifact.tryResolveSegment outputDirectory segment.Name with
     | Error _ -> false
     | Ok path ->
       let info = FileInfo path
+
       info.Exists
       && info.Length = segment.ByteLength
       && String.Equals(Reader.checksum path cancellation, segment.Checksum, StringComparison.Ordinal))
@@ -884,7 +1061,8 @@ let private retireStaleGenerations (outputDirectory: string) (retained: string[]
         match Path.GetFileName entry with
         | null -> ()
         | name ->
-          if Artifact.isGeneration name && not (Array.contains name retained) then deleteQuietly entry
+          if Artifact.isGeneration name && not(Array.contains name retained) then
+            deleteQuietly entry
     with
     | :? IOException -> ()
     | :? UnauthorizedAccessException -> ()
@@ -912,38 +1090,40 @@ let publishWithCancellation
   let target = Path.Combine(segmentsRoot, generation)
 
   let install () =
-    if not (Directory.Exists staged) then
+    if not(Directory.Exists staged) then
       // 書き出した領域が消えている。実体のないセグメントを指すマニフェストを
       // 正常終了で残してはならない。同じ世代が既に揃っている場合だけ公開を続ける。
-      if isGenerationInstalled outputDirectory manifest cancellation then Ok()
-      else Error(Artifact.Unavailable(staged, "書き出したセグメントが見つかりません"))
+      if isGenerationInstalled outputDirectory manifest cancellation then
+        Ok()
+      else
+        Error(Artifact.Unavailable(staged, "書き出したセグメントが見つかりません"))
     else
 
-    match Artifact.ensureNotLink segmentsRoot with
-    | Error error -> Error error
-    | Ok() ->
+      match Artifact.ensureNotLink segmentsRoot with
+      | Error error -> Error error
+      | Ok() ->
 
-    Directory.CreateDirectory segmentsRoot |> ignore
+        Directory.CreateDirectory segmentsRoot |> ignore
 
-    // 作成の直前に置き換えられる競合を検出するため、作成後にもう一度確かめる。
-    match Artifact.ensureNotLink segmentsRoot with
-    | Error error -> Error error
-    | Ok() ->
+        // 作成の直前に置き換えられる競合を検出するため、作成後にもう一度確かめる。
+        match Artifact.ensureNotLink segmentsRoot with
+        | Error error -> Error error
+        | Ok() ->
 
-    match Artifact.ensureNotLink target with
-    | Error error -> Error error
-    | Ok() ->
+          match Artifact.ensureNotLink target with
+          | Error error -> Error error
+          | Ok() ->
 
-    if not (Directory.Exists target) then
-      Directory.Move(staged, target)
-      Ok()
-    elif isGenerationInstalled outputDirectory manifest cancellation then
-      // 同じ世代が既にあるのは、同じ入力を再び索引した場合である。内容は世代識別子から
-      // 一意に決まるため、揃っていればそのまま使う。読み手の参照も切らさない。
-      Ok()
-    else
-      // 読み手が mmap している可能性があるため、不変パスの破損を上書きで修復しない。
-      Error(Artifact.Unavailable(target, "既存の世代が欠損または破損しています。別の出力先へ再索引してください"))
+            if not(Directory.Exists target) then
+              Directory.Move(staged, target)
+              Ok()
+            elif isGenerationInstalled outputDirectory manifest cancellation then
+              // 同じ世代が既にあるのは、同じ入力を再び索引した場合である。内容は世代識別子から
+              // 一意に決まるため、揃っていればそのまま使う。読み手の参照も切らさない。
+              Ok()
+            else
+              // 読み手が mmap している可能性があるため、不変パスの破損を上書きで修復しない。
+              Error(Artifact.Unavailable(target, "既存の世代が欠損または破損しています。別の出力先へ再索引してください"))
 
   try
     cancellation.ThrowIfCancellationRequested()
@@ -951,28 +1131,29 @@ let publishWithCancellation
     // 旧マニフェストを読み終えた直後の読み手が参照先を失う。
     let previous = publishedGeneration outputDirectory
 
-    match install () with
+    match install() with
     | Error error -> Error error
     | Ok() ->
 
-    cancellation.ThrowIfCancellationRequested()
-    match write outputDirectory manifest with
-    | Error error -> Error error
-    | Ok() ->
-      // 掃除は切替の後に置く。掃除の失敗で公開済みの成果物を壊さないためである。
-      //
-      // 直前の世代を残すのは、読み手がマニフェストを読んでからセグメントを開くまでの
-      // 猶予を作るためである。猶予だけでは連続した公開に追い越され得るため、
-      // 読み手側は `readStable` で観測の一貫性を確かめる。
-      let retained =
-        match previous with
-        | ValueSome name when name <> generation -> [| generation; name |]
-        | ValueSome _
-        | ValueNone -> [| generation |]
+      cancellation.ThrowIfCancellationRequested()
 
-      retireStaleGenerations outputDirectory retained
-      discardStaging outputDirectory
-      Ok()
+      match write outputDirectory manifest with
+      | Error error -> Error error
+      | Ok() ->
+        // 掃除は切替の後に置く。掃除の失敗で公開済みの成果物を壊さないためである。
+        //
+        // 直前の世代を残すのは、読み手がマニフェストを読んでからセグメントを開くまでの
+        // 猶予を作るためである。猶予だけでは連続した公開に追い越され得るため、
+        // 読み手側は `readStable` で観測の一貫性を確かめる。
+        let retained =
+          match previous with
+          | ValueSome name when name <> generation -> [| generation; name |]
+          | ValueSome _
+          | ValueNone -> [| generation |]
+
+        retireStaleGenerations outputDirectory retained
+        discardStaging outputDirectory
+        Ok()
   with
   | :? IOException as ex -> Error(Artifact.Unavailable(outputDirectory, ex.Message))
   | :? UnauthorizedAccessException -> Error(Artifact.Unavailable(outputDirectory, "書き込む権限がありません"))

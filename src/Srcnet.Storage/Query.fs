@@ -167,9 +167,9 @@ type GraphView
       invalid "fileIndex" "Index out of range"
 
     let record =
-      files.Payload.Slice(int fileIndex * Format.RecordLength, Format.RecordLength)
+      files.Data.Slice(int fileIndex * Format.RecordLength, Format.RecordLength)
 
-    if not (Format.FileRecord.hasValidMetadata record) then
+    if not(Format.FileRecord.hasValidMetadata record) then
       corrupt "files" "Invalid file language, encoding, flags or extent"
 
     record
@@ -205,13 +205,13 @@ type GraphView
     if index < 0 || index >= stringCount then
       invalid "string" "Index out of range"
 
-    let offsets = stringOffsets.Payload
+    let offsets = stringOffsets.Data
     let start = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice(index * 8, 8))
 
     let finish =
       BinaryPrimitives.ReadUInt64LittleEndian(offsets.Slice((index + 1) * 8, 8))
 
-    let blob = strings.Payload
+    let blob = strings.Data
 
     if finish < start || finish > uint64 blob.Length then
       corrupt "stroffsets" "String offsets out of range"
@@ -228,7 +228,7 @@ type GraphView
   /// 文字列を UTF-8 のまま取り出す。比較だけが目的なら復号せずに済む。
   member this.StringBytes(index: int) : ReadOnlySpan<byte> =
     let struct (start, length) = this.StringRange index
-    let bytes = strings.Payload.Slice(start, length)
+    let bytes = strings.Data.Slice(start, length)
 
     try
       Strings.utf8.GetCharCount bytes |> ignore
@@ -244,7 +244,7 @@ type GraphView
 
   member _.Node(index: int) : NodeView =
     checkNode index
-    let record = nodes.Payload.Slice(index * Format.RecordLength, Format.RecordLength)
+    let record = nodes.Data.Slice(index * Format.RecordLength, Format.RecordLength)
 
     let kind =
       match NodeKind.ofCode record[Format.NodeRecord.KindOffset] with
@@ -312,6 +312,13 @@ type GraphView
     let record = fileRecord fileIndex
     checkStringRef "files" (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4)))
 
+  member _.FileContentHash(fileIndex: uint32) =
+    let record = fileRecord fileIndex
+
+    record
+      .Slice(Format.FileRecord.ContentHashOffset, Format.FileRecord.ContentHashLength)
+      .ToArray()
+
   /// v3 dense order is Repository, Directories, Files, Symbols, ConfigSymbols.
   /// NoFile represents legitimate absence; any other invalid reference is an error.
   member this.FileNodeIndex(fileIndex: uint32) : int voption =
@@ -340,7 +347,7 @@ type GraphView
   /// ノード ID から密インデックスを引く。`.idmap` は ID の昇順なので二分探索できる。
   member this.TryResolve(id: NodeId) =
     check()
-    let payload = idMap.Payload
+    let payload = idMap.Data
     let count = int idMap.Header.PrimaryCount
     let indicesOffset = count * Ids.NodeIdLength
     let mutable target = Span<byte>(Array.zeroCreate Ids.NodeIdLength)
@@ -402,7 +409,7 @@ type GraphView
     | false, _ -> ValueNone
     | true, segments ->
       let segment = if incoming then segments.Backward else segments.Forward
-      let payload = segment.Payload
+      let payload = segment.Data
       let start = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(index * 8, 8))
 
       let finish =
@@ -415,7 +422,7 @@ type GraphView
 
   member internal _.Target(segment: Reader.MappedSegment, offset: int, position: int) =
     check()
-    let payload = segment.Payload
+    let payload = segment.Data
 
     let target =
       BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(offset + position * 4, 4))
@@ -503,6 +510,7 @@ type GraphView
         | Error error -> outcome <- ValueSome(Error(ArtifactUnreadable error))
         | Ok manifest ->
           let opened = List<IDisposable>()
+          let allowedParts = Manifest.segmentFileNames outputDirectory manifest
 
           let openSegment (suffix: string) (expected: Format.SegmentKind) =
             match
@@ -523,7 +531,7 @@ type GraphView
               | Ok path ->
                 let mapped =
                   try
-                    Reader.MappedSegment.Open path
+                    Reader.MappedSegment.Open(path, allowedParts)
                   with
                   | :? IO.IOException as error -> Error(Reader.OpenFailed(path, error.Message))
                   | :? UnauthorizedAccessException as error -> Error(Reader.OpenFailed(path, error.Message))
@@ -570,10 +578,9 @@ type GraphView
                 fail "segments" "Segment counts disagree with the manifest"
 
               if
-                BinaryPrimitives.ReadUInt64LittleEndian(stringOffsets.Payload.Slice(0, 8))
-                <> 0UL
+                BinaryPrimitives.ReadUInt64LittleEndian(stringOffsets.Data.Slice(0, 8)) <> 0UL
                 || BinaryPrimitives.ReadUInt64LittleEndian(
-                     stringOffsets.Payload.Slice(int stringOffsets.Header.PrimaryCount * 8, 8)
+                     stringOffsets.Data.Slice(int stringOffsets.Header.PrimaryCount * 8, 8)
                    )
                    <> strings.Header.SecondaryCount
               then
@@ -598,9 +605,9 @@ type GraphView
                         then
                           fail entry.Kind "CSR counts disagree"
                         elif
-                          BinaryPrimitives.ReadUInt64LittleEndian(segment.Payload.Slice(0, 8)) <> 0UL
+                          BinaryPrimitives.ReadUInt64LittleEndian(segment.Data.Slice(0, 8)) <> 0UL
                           || BinaryPrimitives.ReadUInt64LittleEndian(
-                               segment.Payload.Slice(int nodes.Header.PrimaryCount * 8, 8)
+                               segment.Data.Slice(int nodes.Header.PrimaryCount * 8, 8)
                              )
                              <> segment.Header.SecondaryCount
                         then
@@ -622,7 +629,7 @@ type GraphView
                 match openSegment "lookup" Format.LexicalLookup with
                 | Error error -> failure <- ValueSome error
                 | Ok segment ->
-                  let data = segment.Payload
+                  let data = segment.Data
                   let blobBytes = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(16, 8))
 
                   let minimum =
@@ -756,7 +763,7 @@ type SearchOutcome =
   }
 
 let private lookupRangeAt (segment: Reader.MappedSegment) (index: int) =
-  let data = segment.Payload
+  let data = segment.Data
   let keyCount = int segment.Header.PrimaryCount
   let postingCount = int segment.Header.SecondaryCount
   let blobStart = 32 + keyCount * 24 + postingCount * 8
@@ -801,11 +808,11 @@ let private lookupKeyAt (segment: Reader.MappedSegment) (index: int) =
   let struct (offset, length, first, count) = lookupRangeAt segment index
 
   let normalCount =
-    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Data.Slice(24, 4)))
 
   let text =
     try
-      Strings.utf8.GetString(segment.Payload.Slice(offset, length))
+      Strings.utf8.GetString(segment.Data.Slice(offset, length))
     with :? DecoderFallbackException ->
       corrupt "lookup" "Invalid UTF-8"
 
@@ -815,7 +822,7 @@ let private lookupKeyAt (segment: Reader.MappedSegment) (index: int) =
   struct (text, first, count, length)
 
 let private lookupPostingAt (view: GraphView) (segment: Reader.MappedSegment) offset previous =
-  let record = segment.Payload.Slice(offset, Format.Lookup.PostingLength)
+  let record = segment.Data.Slice(offset, Format.Lookup.PostingLength)
   let index = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(0, 4))
   let targetCode = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(4, 4))
 
@@ -875,7 +882,7 @@ let validateLookup (view: GraphView) (cancellation: CancellationToken) : unit =
       countReference(view.FilePathRef node.FileIndex)
 
   let normalCount =
-    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Data.Slice(24, 4)))
 
   let postingBase = 32 + int segment.Header.PrimaryCount * Format.Lookup.KeyLength
   let validatedReferences = HashSet<int>()
@@ -886,7 +893,11 @@ let validateLookup (view: GraphView) (cancellation: CancellationToken) : unit =
     cancellation.ThrowIfCancellationRequested()
     let struct (text, first, count, _) = lookupKeyAt segment index
 
-    if index <> 0 && index <> normalCount && String.CompareOrdinal(previousKey, text) >= 0 then
+    if
+      index <> 0
+      && index <> normalCount
+      && String.CompareOrdinal(previousKey, text) >= 0
+    then
       corrupt "lookup" "Keys are not strictly increasing"
 
     previousKey <- text
@@ -974,7 +985,7 @@ let private searchCore
     | ValueNone -> raise(QueryException SearchIndexRequired)
 
   let normalCount =
-    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Payload.Slice(24, 4)))
+    int(BinaryPrimitives.ReadUInt32LittleEndian(segment.Data.Slice(24, 4)))
 
   let firstKey = if ignoreCase then normalCount else 0
 
@@ -1103,6 +1114,7 @@ let private searchCore
     let mutable validatedEnd = regionStart
     let mutable searchPosition = regionStart
     let mutable candidates = 0
+    let scanBytes = max 4 (LookupScanChunkBytes - needleBytes.Length + 1)
 
     // Scan mmap bytes rather than allocating one string per dictionary key. Keep
     // needleLength-1 bytes across windows (at most one extra window of work);
@@ -1111,26 +1123,25 @@ let private searchCore
     while validatedEnd < budgetEnd && not truncated do
       cancellation.ThrowIfCancellationRequested()
 
-      let mutable finish =
-        validatedEnd + min LookupScanChunkBytes (budgetEnd - validatedEnd)
+      let mutable finish = validatedEnd + min scanBytes (budgetEnd - validatedEnd)
 
       if finish < regionEnd then
         let mutable continuationBytes = 0
 
         while finish > validatedEnd
-              && segment.Payload[finish] &&& 0xC0uy = 0x80uy
+              && segment.Data[finish] &&& 0xC0uy = 0x80uy
               && continuationBytes < 3 do
           finish <- finish - 1
           continuationBytes <- continuationBytes + 1
 
-        if segment.Payload[finish] &&& 0xC0uy = 0x80uy then
+        if segment.Data[finish] &&& 0xC0uy = 0x80uy then
           corrupt "lookup" "Invalid UTF-8"
 
       if finish = validatedEnd then
         truncated <- true
       else
         try
-          Strings.utf8.GetCharCount(segment.Payload.Slice(validatedEnd, finish - validatedEnd))
+          Strings.utf8.GetCharCount(segment.Data.Slice(validatedEnd, finish - validatedEnd))
           |> ignore
         with :? DecoderFallbackException ->
           corrupt "lookup" "Invalid UTF-8"
@@ -1144,7 +1155,7 @@ let private searchCore
           cancellation.ThrowIfCancellationRequested()
 
           let relative =
-            segment.Payload
+            segment.Data
               .Slice(searchPosition, validatedEnd - searchPosition)
               .IndexOf(ReadOnlySpan needleBytes)
 

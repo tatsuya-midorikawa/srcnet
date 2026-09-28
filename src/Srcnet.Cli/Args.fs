@@ -58,8 +58,15 @@ let MaxContextKeywords = 32
 [<Literal>]
 let MaxQueryScalars = 4096
 
+[<Literal>]
+let DefaultMemoryLimit = 4294967296L
+
+[<Literal>]
+let DefaultTemporaryLimit = 17179869184L
+
 type IndexArguments =
-  { RootPath: string
+  {
+    RootPath: string
     OutputDirectory: string voption
     RepositoryId: string voption
     Jobs: int voption
@@ -72,37 +79,48 @@ type IndexArguments =
     RespectIgnoreFiles: bool
     FollowSymbolicLinks: bool
     AllowPartial: bool
-    Json: bool }
+    Progress: string
+    MemoryLimit: int64
+    TemporaryLimit: int64
+    Json: bool
+  }
 
 /// 照会コマンドに共通する出力の制限。
 ///
 /// 出力量は必ず有界にする。AI エージェントのコスト削減が目的である以上、予算制御は
 /// 中核機能であり任意機能ではない（docs/query-and-cli.md 4）。
 type QueryLimits =
-  { /// 返すノード数の上限。
+  {
+    /// 返すノード数の上限。
     Limit: int
     /// 出力トークンの予算。0 は無制限ではなく既定値を使うことを表す。
-    Budget: int }
+    Budget: int
+  }
 
 type SearchArguments =
-  { OutputDirectory: string voption
+  {
+    OutputDirectory: string voption
     RootPath: string voption
     Text: string
     /// 大文字小文字を畳んで比較する。
     IgnoreCase: bool
     Limits: QueryLimits
-    Json: bool }
+    Json: bool
+  }
 
 type ShowArguments =
-  { OutputDirectory: string voption
+  {
+    OutputDirectory: string voption
     RootPath: string voption
     /// ノード ID（16 進 32 桁）または名前。名前が一意でない場合は候補を返す。
     Node: string
     Limits: QueryLimits
-    Json: bool }
+    Json: bool
+  }
 
 type NeighborsArguments =
-  { OutputDirectory: string voption
+  {
+    OutputDirectory: string voption
     RootPath: string voption
     Node: string
     /// エッジ種別。空なら成果物が持つすべての種別。
@@ -110,7 +128,8 @@ type NeighborsArguments =
     Direction: string
     Depth: int
     Limits: QueryLimits
-    Json: bool }
+    Json: bool
+  }
 
 type PathArguments =
   { OutputDirectory: string voption
@@ -132,7 +151,8 @@ type ContextArguments =
     Json: bool }
 
 type ExportArguments =
-  { OutputDirectory: string voption
+  {
+    OutputDirectory: string voption
     RootPath: string voption
     /// 出力先のファイル。指定がなければ `<out>/graph.html`。
     File: string voption
@@ -143,7 +163,8 @@ type ExportArguments =
     Depth: int
     /// 表示するノード数の上限。ブラウザーをフリーズさせないための安全弁である。
     MaxNodes: int
-    Json: bool }
+    Json: bool
+  }
 
 type StatsArguments =
   { OutputDirectory: string voption
@@ -151,16 +172,34 @@ type StatsArguments =
     Json: bool }
 
 type VerifyArguments =
-  { OutputDirectory: string voption
+  {
+    OutputDirectory: string voption
     RootPath: string voption
     /// 同一入力から二度生成し、バイト単位の一致を確認する。
     Deterministic: bool
+    Json: bool
+  }
+
+type FreshnessArguments =
+  { OutputDirectory: string voption
+    RootPath: string
+    Paths: string[]
+    Json: bool }
+
+type AgentContextArguments =
+  { OutputDirectory: string voption
+    RootPath: string voption
+    Executable: string voption
+    Write: bool
+    Migrate: bool
     Json: bool }
 
 type Command =
   | Index of IndexArguments
   | Stats of StatsArguments
   | Verify of VerifyArguments
+  | Freshness of FreshnessArguments
+  | AgentContext of AgentContextArguments
   | Search of SearchArguments
   | Show of ShowArguments
   | Neighbors of NeighborsArguments
@@ -197,8 +236,10 @@ module ParseError =
 let private strictUtf8 = Text.UTF8Encoding(false, true)
 
 let internal validateQueryText (name: string) (text: string) =
-  if isNull(box text) then ValueSome(InvalidValue(name, "null"))
-  elif text.Length = 0 then ValueSome(InvalidValue(name, text))
+  if isNull(box text) then
+    ValueSome(InvalidValue(name, "null"))
+  elif text.Length = 0 then
+    ValueSome(InvalidValue(name, text))
   elif text.Length > MaxQueryScalars * 2 then
     ValueSome(UnsupportedValue(name, "", $"文字列は {MaxQueryScalars} Unicode scalar 以下にしてください"))
   else
@@ -212,7 +253,8 @@ let internal validateQueryText (name: string) (text: string) =
 
       if count > MaxQueryScalars then
         ValueSome(UnsupportedValue(name, "", $"文字列は {MaxQueryScalars} Unicode scalar 以下にしてください"))
-      else ValueNone
+      else
+        ValueNone
     with :? Text.EncoderFallbackException ->
       ValueSome(InvalidValue(name, "不正な Unicode 文字列"))
 
@@ -233,25 +275,37 @@ let internal validatePath (name: string) (text: string) =
 let tryParseSize (text: string) =
   let trimmed = text.Trim()
 
-  if trimmed.Length = 0 then ValueNone
+  if trimmed.Length = 0 then
+    ValueNone
   else
 
-  let struct (digits, multiplier) =
-    let upper = trimmed.ToUpperInvariant()
+    let struct (digits, multiplier) =
+      let upper = trimmed.ToUpperInvariant()
 
-    if upper.EndsWith("KIB", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 3), 1024L)
-    elif upper.EndsWith("MIB", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 3), 1024L * 1024L)
-    elif upper.EndsWith("GIB", StringComparison.Ordinal) then
-      struct (trimmed.Substring(0, trimmed.Length - 3), 1024L * 1024L * 1024L)
-    elif upper.EndsWith("KB", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 2), 1000L)
-    elif upper.EndsWith("MB", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 2), 1000_000L)
-    elif upper.EndsWith("GB", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 2), 1000_000_000L)
-    elif upper.EndsWith("B", StringComparison.Ordinal) then struct (trimmed.Substring(0, trimmed.Length - 1), 1L)
-    else struct (trimmed, 1L)
+      if upper.EndsWith("KIB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 3), 1024L)
+      elif upper.EndsWith("MIB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 3), 1024L * 1024L)
+      elif upper.EndsWith("GIB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 3), 1024L * 1024L * 1024L)
+      elif upper.EndsWith("TIB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 3), 1024L * 1024L * 1024L * 1024L)
+      elif upper.EndsWith("KB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 2), 1000L)
+      elif upper.EndsWith("MB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 2), 1000_000L)
+      elif upper.EndsWith("GB", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 2), 1000_000_000L)
+      elif upper.EndsWith("B", StringComparison.Ordinal) then
+        struct (trimmed.Substring(0, trimmed.Length - 1), 1L)
+      else
+        struct (trimmed, 1L)
 
-  match Int64.TryParse(digits.Trim(), Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
-  | true, value when value >= 0L && value <= Int64.MaxValue / multiplier -> ValueSome(value * multiplier)
-  | _ -> ValueNone
+    match
+      Int64.TryParse(digits.Trim(), Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture)
+    with
+    | true, value when value >= 0L && value <= Int64.MaxValue / multiplier -> ValueSome(value * multiplier)
+    | _ -> ValueNone
 
 let private tryParseInt (text: string) =
   match Int32.TryParse(text, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
@@ -288,7 +342,10 @@ let private split (arguments: string[]) =
     if not positionalOnly && argument = "--" then
       positionalOnly <- true
       index <- index + 1
-    elif not positionalOnly && (argument.StartsWith("--", StringComparison.Ordinal) || argument = "-h") then
+    elif
+      not positionalOnly
+      && (argument.StartsWith("--", StringComparison.Ordinal) || argument = "-h")
+    then
       let separator = argument.IndexOf '='
 
       if separator > 0 then
@@ -300,12 +357,16 @@ let private split (arguments: string[]) =
         // 値を取るかどうかは呼び出し側で決めるため、ここでは次の引数を暫定的に添える。
         let takesNext =
           index + 1 < arguments.Length
-          && not (arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
+          && not(arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
           && arguments[index + 1] <> "-h"
 
         options.Add
           { Name = argument
-            Value = (if takesNext then ValueSome arguments[index + 1] else ValueNone)
+            Value =
+              (if takesNext then
+                 ValueSome arguments[index + 1]
+               else
+                 ValueNone)
             ValueTokenIndex = (if takesNext then index + 1 else -1) }
 
       index <- index + 1
@@ -331,8 +392,7 @@ type private OptionReader(options: ResizeArray<ParsedOption>, positional: Resize
         found <- true
 
         match option.Value with
-        | ValueSome text when option.ValueTokenIndex < 0 && error.IsNone ->
-          error <- ValueSome(InvalidValue(name, text))
+        | ValueSome text when option.ValueTokenIndex < 0 && error.IsNone -> error <- ValueSome(InvalidValue(name, text))
         | _ -> ()
 
     found
@@ -345,7 +405,9 @@ type private OptionReader(options: ResizeArray<ParsedOption>, positional: Resize
         consumed.Add name |> ignore
 
         match option.Value with
-        | ValueNone -> if error.IsNone then error <- ValueSome(MissingValue name)
+        | ValueNone ->
+          if error.IsNone then
+            error <- ValueSome(MissingValue name)
         | ValueSome text ->
           result <- ValueSome text
 
@@ -355,23 +417,28 @@ type private OptionReader(options: ResizeArray<ParsedOption>, positional: Resize
             let mutable cursor = 0
 
             while cursor < positional.Count do
-              if positional[cursor].TokenIndex = option.ValueTokenIndex then positional.RemoveAt cursor
-              else cursor <- cursor + 1
+              if positional[cursor].TokenIndex = option.ValueTokenIndex then
+                positional.RemoveAt cursor
+              else
+                cursor <- cursor + 1
 
     result
 
   member this.Path(name: string) =
     let value = this.Value name
+
     match value with
     | ValueSome text when error.IsNone -> error <- validatePath name text
     | _ -> ()
+
     value
 
   member _.Unknown() =
     let mutable unknown = ValueNone
 
     for option in options do
-      if not (consumed.Contains option.Name) && unknown.IsNone then unknown <- ValueSome option.Name
+      if not(consumed.Contains option.Name) && unknown.IsNone then
+        unknown <- ValueSome option.Name
 
     unknown
 
@@ -387,342 +454,475 @@ let private finish
     match reader.Unknown() with
     | ValueSome option -> Error(UnknownOption option)
     | ValueNone ->
-      if positional.Count > expected then Error(UnexpectedArgument positional[expected].Text)
-      else Ok(build ())
+      if positional.Count > expected then
+        Error(UnexpectedArgument positional[expected].Text)
+      else
+        Ok(build())
 
 let parse (arguments: string[]) : Result<Command, ParseError> =
-  if arguments.Length = 0 then Error NoCommand
+  if arguments.Length = 0 then
+    Error NoCommand
   else
 
-  match arguments[0] with
-  | "--help"
-  | "-h"
-  | "help" -> Ok Help
-  | "--version" -> Ok Version
-  | command ->
+    match arguments[0] with
+    | "--help"
+    | "-h"
+    | "help" -> Ok Help
+    | "--version" -> Ok Version
+    | command ->
 
-  let rest = arguments[1..]
-  let struct (positional, options) = split rest
+      let rest = arguments[1..]
+      let struct (positional, options) = split rest
 
-  let reader = OptionReader(options, positional)
-  let json = reader.Flag "--json"
-  let help = reader.Flag "--help"
-  let shortHelp = reader.Flag "-h"
+      let reader = OptionReader(options, positional)
+      let json = reader.Flag "--json"
+      let help = reader.Flag "--help"
+      let shortHelp = reader.Flag "-h"
 
-  if
-    (help || shortHelp)
-    && Array.contains command [| "index"; "search"; "show"; "neighbors"; "path"; "context"; "export"; "stats"; "verify" |]
-  then
-    match reader.Error with
-    | ValueSome error -> Error error
-    | ValueNone -> Ok Help
-  else
+      if
+        (help || shortHelp)
+        && Array.contains
+          command
+          [| "index"
+             "search"
+             "show"
+             "neighbors"
+             "path"
+             "context"
+             "export"
+             "stats"
+             "verify"
+             "freshness"
+             "agent-context" |]
+      then
+        match reader.Error with
+        | ValueSome error -> Error error
+        | ValueNone -> Ok Help
+      else
 
-  let optionalValue name = reader.Value name
-  let optionalPath name = reader.Path name
+        let optionalValue name = reader.Value name
+        let optionalPath name = reader.Path name
 
-  let optionalParsed parseValue name =
-    match reader.Value name with
-    | ValueNone -> ValueNone
-    | ValueSome text ->
-      match parseValue text with
-      | ValueSome value -> ValueSome(Ok value)
-      | ValueNone -> ValueSome(Error(InvalidValue(name, text)))
+        let optionalParsed parseValue name =
+          match reader.Value name with
+          | ValueNone -> ValueNone
+          | ValueSome text ->
+            match parseValue text with
+            | ValueSome value -> ValueSome(Ok value)
+            | ValueNone -> ValueSome(Error(InvalidValue(name, text)))
 
-  let optionalInt name = optionalParsed tryParseInt name
-  let optionalSize name = optionalParsed tryParseSize name
+        let optionalInt name = optionalParsed tryParseInt name
+        let optionalSize name = optionalParsed tryParseSize name
 
-  let boundedInt name lower upper zeroIsDefault =
-    match optionalInt name with
-    | ValueSome(Ok value) when value > upper || (value < lower && not (zeroIsDefault && value = 0)) ->
-      ValueSome(
-        Error(
-          UnsupportedValue(
-            name,
-            value.ToString Globalization.CultureInfo.InvariantCulture,
-            $"{lower} 以上 {upper} 以下で指定してください"
-          )
-        )
-      )
-    | value -> value
-
-  let errorOf (value: Result<'T, ParseError> voption) =
-    match value with
-    | ValueSome(Error error) -> Some error
-    | ValueSome(Ok _)
-    | ValueNone -> None
-
-  let number (value: Result<int, ParseError> voption) (fallback: int) zeroIsDefault =
-    match value with
-    | ValueSome(Ok 0) when zeroIsDefault -> fallback
-    | ValueSome(Ok parsed) -> parsed
-    | ValueSome(Error _)
-    | ValueNone -> fallback
-
-  match command with
-  | "index" ->
-    let output = optionalPath "--out"
-    let repository = optionalValue "--repo"
-    let jobs = boundedInt "--jobs" 1 Srcnet.Discovery.Walk.WalkOptions.MaxJobs true
-    let maxFileSize = optionalSize "--max-file-size"
-    let maxDepth = boundedInt "--max-depth" 0 Srcnet.Core.Paths.MaxDepth false
-    let assumeEncoding = optionalValue "--assume-encoding"
-    let encodingError =
-      match assumeEncoding with
-      | ValueSome text when Srcnet.Text.Encodings.tryParse text |> ValueOption.isNone ->
-        Some(InvalidValue("--assume-encoding", text))
-      | _ -> None
-    let noGitignore = reader.Flag "--no-gitignore"
-    let followSymlinks = reader.Flag "--follow-symlinks"
-    let allowPartial = reader.Flag "--allow-partial"
-
-    // `--tier` は段階の番号をそのまま取る。3（ビルド構成に基づく解決）は未実装であり、
-    // 内部エラーではなく利用者エラーとして拒否する（backlog 021）。
-    let tier =
-      match reader.Value "--tier" with
-      | ValueNone -> ValueNone
-      | ValueSome text ->
-        match tryParseInt text with
-        | ValueSome 3 ->
-          ValueSome(
-            Error(
-              UnsupportedValue(
-                "--tier",
-                text,
-                "T3 はビルド構成に基づく解決であり、この版では実装していません"
+        let boundedInt name lower upper zeroIsDefault =
+          match optionalInt name with
+          | ValueSome(Ok value) when value > upper || (value < lower && not(zeroIsDefault && value = 0)) ->
+            ValueSome(
+              Error(
+                UnsupportedValue(
+                  name,
+                  value.ToString Globalization.CultureInfo.InvariantCulture,
+                  $"{lower} 以上 {upper} 以下で指定してください"
+                )
               )
             )
-          )
-        | ValueSome value when value >= 0 && value <= 2 -> ValueSome(Ok value)
-        | ValueSome _
-        | ValueNone -> ValueSome(Error(InvalidValue("--tier", text)))
+          | value -> value
 
-    match List.tryPick id [ errorOf jobs; errorOf maxDepth; errorOf maxFileSize; errorOf tier; encodingError ] with
-    | Some error -> Error error
-    | None ->
-      if reader.Error |> ValueOption.isSome then Error(ValueOption.get reader.Error)
-      elif positional.Count = 0 then Error(MissingArgument "<path>")
-      else
-        match validatePath "<path>" positional[0].Text with
-        | ValueSome error -> Error error
-        | ValueNone ->
-        let unwrap (value: Result<'T, ParseError> voption) =
+        let errorOf (value: Result<'T, ParseError> voption) =
           match value with
-          | ValueSome(Ok parsed) -> ValueSome parsed
+          | ValueSome(Error error) -> Some error
+          | ValueSome(Ok _)
+          | ValueNone -> None
+
+        let number (value: Result<int, ParseError> voption) (fallback: int) zeroIsDefault =
+          match value with
+          | ValueSome(Ok 0) when zeroIsDefault -> fallback
+          | ValueSome(Ok parsed) -> parsed
           | ValueSome(Error _)
-          | ValueNone -> ValueNone
+          | ValueNone -> fallback
 
-        finish reader positional 1 (fun () ->
-          Index
-            { RootPath = positional[0].Text
-              OutputDirectory = output
-              RepositoryId = repository
-              Jobs = unwrap jobs
-              MaxFileSizeBytes = unwrap maxFileSize
-              MaxDepth = unwrap maxDepth
-              Tier =
-                match unwrap tier with
-                | ValueSome value -> value
-                | ValueNone -> DefaultTier
-              AssumeEncoding = assumeEncoding
-              RespectIgnoreFiles = not noGitignore
-              FollowSymbolicLinks = followSymlinks
-              AllowPartial = allowPartial
-              Json = json })
-  | "search"
-  | "show"
-  | "neighbors"
-  | "path"
-  | "context" ->
-    let output = optionalPath "--out"
-    let root = optionalPath "--root"
-    let limit = boundedInt "--limit" 1 MaxLimit true
-    let budget = boundedInt "--budget" MinBudget MaxBudget true
-    let traversal = command = "neighbors" || command = "path"
-    let depth =
-      if traversal || command = "context" then boundedInt "--depth" 0 MaxQueryDepth false
-      else ValueNone
-    let direction = if traversal then optionalValue "--direction" else ValueNone
-    let edges = if traversal then optionalValue "--edge" else ValueNone
-    let ignoreCase = command = "search" && reader.Flag "--ignore-case"
+        match command with
+        | "index" ->
+          let output = optionalPath "--out"
+          let repository = optionalValue "--repo"
+          let jobs = boundedInt "--jobs" 1 Srcnet.Discovery.Walk.WalkOptions.MaxJobs true
+          let maxFileSize = optionalSize "--max-file-size"
+          let memoryLimit = optionalSize "--memory-limit"
+          let temporaryLimit = optionalSize "--temp-limit"
+          let maxDepth = boundedInt "--max-depth" 0 Srcnet.Core.Paths.MaxDepth false
+          let assumeEncoding = optionalValue "--assume-encoding"
 
-    let directionText =
-      match direction with
-      | ValueSome text -> text
-      | ValueNone -> "both"
+          let encodingError =
+            match assumeEncoding with
+            | ValueSome text when Srcnet.Text.Encodings.tryParse text |> ValueOption.isNone ->
+              Some(InvalidValue("--assume-encoding", text))
+            | _ -> None
 
-    let edgeKinds =
-      match edges with
-      | ValueNone -> Array.empty
-      | ValueSome text ->
-        text.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+          let noGitignore = reader.Flag "--no-gitignore"
+          let followSymlinks = reader.Flag "--follow-symlinks"
+          let allowPartial = reader.Flag "--allow-partial"
+          let progress = optionalValue "--progress" |> ValueOption.defaultValue "auto"
 
-    match List.tryPick id [ errorOf limit; errorOf budget; errorOf depth ] with
-    | Some error -> Error error
-    | None ->
+          // `--tier` は段階の番号をそのまま取る。3（ビルド構成に基づく解決）は未実装であり、
+          // 内部エラーではなく利用者エラーとして拒否する（backlog 021）。
+          let tier =
+            match reader.Value "--tier" with
+            | ValueNone -> ValueNone
+            | ValueSome text ->
+              match tryParseInt text with
+              | ValueSome 3 -> ValueSome(Error(UnsupportedValue("--tier", text, "T3 はビルド構成に基づく解決であり、この版では実装していません")))
+              | ValueSome value when value >= 0 && value <= 2 -> ValueSome(Ok value)
+              | ValueSome _
+              | ValueNone -> ValueSome(Error(InvalidValue("--tier", text)))
 
-    let limits =
-      { Limit = number limit DefaultLimit true
-        Budget = number budget DefaultBudget true }
+          let progressError =
+            if Array.contains progress [| "auto"; "always"; "never" |] then
+              None
+            else
+              Some(InvalidValue("--progress", progress))
 
-    let resolvedDepth = number depth DefaultDepth false
+          let sizeOr fallback =
+            function
+            | ValueSome(Ok size) -> size
+            | _ -> fallback
 
-    let parsedDirection = Query.Direction.tryParse directionText
+          let memoryBytes = sizeOr DefaultMemoryLimit memoryLimit
+          let temporaryBytes = sizeOr DefaultTemporaryLimit temporaryLimit
 
-    if parsedDirection.IsNone then
-      Error(InvalidValue("--direction", directionText))
-    elif edges.IsSome && edgeKinds.Length = 0 then
-      Error(InvalidValue("--edge", ""))
-    else
+          let resourceError =
+            if memoryBytes < 268435456L || memoryBytes > 1099511627776L then
+              Some(UnsupportedValue("--memory-limit", string memoryBytes, "256MiB..1TiB で指定してください"))
+            elif temporaryBytes <= 0L then
+              Some(InvalidValue("--temp-limit", string temporaryBytes))
+            else
+              None
 
-    let textError =
-      positional
-      |> Seq.tryPick (fun item -> validateQueryText "<query>" item.Text |> ValueOption.toOption)
+          match
+            List.tryPick
+              id
+              [ errorOf jobs
+                errorOf maxDepth
+                errorOf maxFileSize
+                errorOf tier
+                errorOf memoryLimit
+                errorOf temporaryLimit
+                encodingError
+                progressError
+                resourceError ]
+          with
+          | Some error -> Error error
+          | None ->
+            if reader.Error |> ValueOption.isSome then
+              Error(ValueOption.get reader.Error)
+            elif positional.Count = 0 then
+              Error(MissingArgument "<path>")
+            else
+              match validatePath "<path>" positional[0].Text with
+              | ValueSome error -> Error error
+              | ValueNone ->
+                let unwrap (value: Result<'T, ParseError> voption) =
+                  match value with
+                  | ValueSome(Ok parsed) -> ValueSome parsed
+                  | ValueSome(Error _)
+                  | ValueNone -> ValueNone
 
-    match textError with
-    | Some error -> Error error
-    | None ->
+                finish reader positional 1 (fun () ->
+                  Index
+                    { RootPath = positional[0].Text
+                      OutputDirectory = output
+                      RepositoryId = repository
+                      Jobs = unwrap jobs
+                      MaxFileSizeBytes = unwrap maxFileSize
+                      MaxDepth = unwrap maxDepth
+                      Tier =
+                        match unwrap tier with
+                        | ValueSome value -> value
+                        | ValueNone -> DefaultTier
+                      AssumeEncoding = assumeEncoding
+                      RespectIgnoreFiles = not noGitignore
+                      FollowSymbolicLinks = followSymlinks
+                      AllowPartial = allowPartial
+                      Progress = progress
+                      MemoryLimit = memoryBytes
+                      TemporaryLimit = temporaryBytes
+                      Json = json })
+        | "search"
+        | "show"
+        | "neighbors"
+        | "path"
+        | "context" ->
+          let output = optionalPath "--out"
+          let root = optionalPath "--root"
+          let limit = boundedInt "--limit" 1 MaxLimit true
+          let budget = boundedInt "--budget" MinBudget MaxBudget true
+          let traversal = command = "neighbors" || command = "path"
 
-    match command with
-    | "search" ->
-      if positional.Count = 0 then Error(MissingArgument "<text>")
-      else
-        finish reader positional 1 (fun () ->
-          Search
-            { OutputDirectory = output
-              RootPath = root
-              Text = positional[0].Text
-              IgnoreCase = ignoreCase
-              Limits = limits
-              Json = json })
-    | "show" ->
-      if positional.Count = 0 then Error(MissingArgument "<node>")
-      else
-        finish reader positional 1 (fun () ->
-          Show
-            { OutputDirectory = output
-              RootPath = root
-              Node = positional[0].Text
-              Limits = limits
-              Json = json })
-    | "neighbors" ->
-      if positional.Count = 0 then Error(MissingArgument "<node>")
-      else
-        finish reader positional 1 (fun () ->
-          Neighbors
-            { OutputDirectory = output
-              RootPath = root
-              Node = positional[0].Text
-              Edges = edgeKinds
-              Direction = directionText
-              Depth = resolvedDepth
-              Limits = limits
-              Json = json })
-    | "path" ->
-      if positional.Count < 2 then Error(MissingArgument "<from> <to>")
-      else
-        finish reader positional 2 (fun () ->
-          Path
-            { OutputDirectory = output
-              RootPath = root
-              From = positional[0].Text
-              To = positional[1].Text
-              Edges = edgeKinds
-              Direction = directionText
-              Depth = resolvedDepth
-              Limits = limits
-              Json = json })
-    | _ ->
-      if positional.Count = 0 then Error(MissingArgument "<keywords...>")
-      elif positional.Count > MaxContextKeywords then
-        Error(UnsupportedValue("<keywords...>", "", $"キーワードは {MaxContextKeywords} 個までです"))
-      else
-        // `context` は語をいくつでも取る。位置引数の上限を実際の個数に合わせる。
-        finish reader positional positional.Count (fun () ->
-          Context
-            { OutputDirectory = output
-              RootPath = root
-              Keywords = positional |> Seq.map (fun item -> item.Text) |> Seq.toArray
-              Depth = resolvedDepth
-              Limits = limits
-              Json = json })
-  | "export" ->
-    let output = optionalPath "--out"
-    let root = optionalPath "--root"
-    let file = optionalPath "--file"
-    let queryText = optionalValue "--query"
-    let node = optionalValue "--node"
-    let depth = boundedInt "--depth" 0 MaxQueryDepth false
-    let maxNodes = boundedInt "--max-nodes" 1 MaxExportNodes true
+          let depth =
+            if traversal || command = "context" then
+              boundedInt "--depth" 0 MaxQueryDepth false
+            else
+              ValueNone
 
-    match List.tryPick id [ errorOf depth; errorOf maxNodes ] with
-    | Some error -> Error error
-    | None ->
+          let direction = if traversal then optionalValue "--direction" else ValueNone
+          let edges = if traversal then optionalValue "--edge" else ValueNone
+          let ignoreCase = command = "search" && reader.Flag "--ignore-case"
 
-    if positional.Count = 0 then Error(MissingArgument "<format>")
-    elif positional[0].Text <> "html" then
-      Error(UnsupportedValue("export", positional[0].Text, "対応しているのは html だけです"))
-    elif queryText.IsSome && node.IsSome then
-      Error(UnsupportedValue("--query", "", "--node と同時には指定できません"))
-    else
+          let directionText =
+            match direction with
+            | ValueSome text -> text
+            | ValueNone -> "both"
 
-      let seedError =
-        [ "--query", queryText; "--node", node ]
-        |> List.tryPick (fun (name, value) ->
-          match value with
-          | ValueSome text -> validateQueryText name text |> ValueOption.toOption
-          | ValueNone -> None)
+          let edgeKinds =
+            match edges with
+            | ValueNone -> Array.empty
+            | ValueSome text ->
+              text.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
 
-      match seedError with
-      | Some error -> Error error
-      | None ->
+          match List.tryPick id [ errorOf limit; errorOf budget; errorOf depth ] with
+          | Some error -> Error error
+          | None ->
 
-      finish reader positional 1 (fun () ->
-        ExportHtml
-          { OutputDirectory = output
-            RootPath = root
-            File = file
-            Query =
-              match queryText with
-              | ValueSome text -> text
-              | ValueNone -> ""
-            Node =
-              match node with
-              | ValueSome text -> text
-              | ValueNone -> ""
-            Depth = number depth DefaultDepth false
-            MaxNodes = number maxNodes DefaultMaxNodes true
-            Json = json })
-  | "stats" ->
-    let output = optionalPath "--out"
+            let limits =
+              { Limit = number limit DefaultLimit true
+                Budget = number budget DefaultBudget true }
 
-    match if positional.Count > 0 then validatePath "<path>" positional[0].Text else ValueNone with
-    | ValueSome error -> Error error
-    | ValueNone ->
-    finish reader positional 1 (fun () ->
-      Stats
-        { OutputDirectory = output
-          RootPath = (if positional.Count > 0 then ValueSome positional[0].Text else ValueNone)
-          Json = json })
-  | "verify" ->
-    let output = optionalPath "--out"
-    let deterministic = reader.Flag "--deterministic"
+            let resolvedDepth = number depth DefaultDepth false
 
-    match reader.Error with
-    | ValueSome error -> Error error
-    | ValueNone ->
-    if deterministic && positional.Count = 0 then Error(MissingArgument "<path>")
-    else
-    match if positional.Count > 0 then validatePath "<path>" positional[0].Text else ValueNone with
-    | ValueSome error -> Error error
-    | ValueNone ->
-    finish reader positional 1 (fun () ->
-      Verify
-        { OutputDirectory = output
-          RootPath = (if positional.Count > 0 then ValueSome positional[0].Text else ValueNone)
-          Deterministic = deterministic
-          Json = json })
-  | other -> Error(UnknownCommand other)
+            let parsedDirection = Query.Direction.tryParse directionText
+
+            if parsedDirection.IsNone then
+              Error(InvalidValue("--direction", directionText))
+            elif edges.IsSome && edgeKinds.Length = 0 then
+              Error(InvalidValue("--edge", ""))
+            else
+
+              let textError =
+                positional
+                |> Seq.tryPick(fun item -> validateQueryText "<query>" item.Text |> ValueOption.toOption)
+
+              match textError with
+              | Some error -> Error error
+              | None ->
+
+                match command with
+                | "search" ->
+                  if positional.Count = 0 then
+                    Error(MissingArgument "<text>")
+                  else
+                    finish reader positional 1 (fun () ->
+                      Search
+                        { OutputDirectory = output
+                          RootPath = root
+                          Text = positional[0].Text
+                          IgnoreCase = ignoreCase
+                          Limits = limits
+                          Json = json })
+                | "show" ->
+                  if positional.Count = 0 then
+                    Error(MissingArgument "<node>")
+                  else
+                    finish reader positional 1 (fun () ->
+                      Show
+                        { OutputDirectory = output
+                          RootPath = root
+                          Node = positional[0].Text
+                          Limits = limits
+                          Json = json })
+                | "neighbors" ->
+                  if positional.Count = 0 then
+                    Error(MissingArgument "<node>")
+                  else
+                    finish reader positional 1 (fun () ->
+                      Neighbors
+                        { OutputDirectory = output
+                          RootPath = root
+                          Node = positional[0].Text
+                          Edges = edgeKinds
+                          Direction = directionText
+                          Depth = resolvedDepth
+                          Limits = limits
+                          Json = json })
+                | "path" ->
+                  if positional.Count < 2 then
+                    Error(MissingArgument "<from> <to>")
+                  else
+                    finish reader positional 2 (fun () ->
+                      Path
+                        { OutputDirectory = output
+                          RootPath = root
+                          From = positional[0].Text
+                          To = positional[1].Text
+                          Edges = edgeKinds
+                          Direction = directionText
+                          Depth = resolvedDepth
+                          Limits = limits
+                          Json = json })
+                | _ ->
+                  if positional.Count = 0 then
+                    Error(MissingArgument "<keywords...>")
+                  elif positional.Count > MaxContextKeywords then
+                    Error(UnsupportedValue("<keywords...>", "", $"キーワードは {MaxContextKeywords} 個までです"))
+                  else
+                    // `context` は語をいくつでも取る。位置引数の上限を実際の個数に合わせる。
+                    finish reader positional positional.Count (fun () ->
+                      Context
+                        { OutputDirectory = output
+                          RootPath = root
+                          Keywords = positional |> Seq.map(fun item -> item.Text) |> Seq.toArray
+                          Depth = resolvedDepth
+                          Limits = limits
+                          Json = json })
+        | "export" ->
+          let output = optionalPath "--out"
+          let root = optionalPath "--root"
+          let file = optionalPath "--file"
+          let queryText = optionalValue "--query"
+          let node = optionalValue "--node"
+          let depth = boundedInt "--depth" 0 MaxQueryDepth false
+          let maxNodes = boundedInt "--max-nodes" 1 MaxExportNodes true
+
+          match List.tryPick id [ errorOf depth; errorOf maxNodes ] with
+          | Some error -> Error error
+          | None ->
+
+            if positional.Count = 0 then
+              Error(MissingArgument "<format>")
+            elif positional[0].Text <> "html" then
+              Error(UnsupportedValue("export", positional[0].Text, "対応しているのは html だけです"))
+            elif queryText.IsSome && node.IsSome then
+              Error(UnsupportedValue("--query", "", "--node と同時には指定できません"))
+            else
+
+              let seedError =
+                [ "--query", queryText; "--node", node ]
+                |> List.tryPick(fun (name, value) ->
+                  match value with
+                  | ValueSome text -> validateQueryText name text |> ValueOption.toOption
+                  | ValueNone -> None)
+
+              match seedError with
+              | Some error -> Error error
+              | None ->
+
+                finish reader positional 1 (fun () ->
+                  ExportHtml
+                    { OutputDirectory = output
+                      RootPath = root
+                      File = file
+                      Query =
+                        match queryText with
+                        | ValueSome text -> text
+                        | ValueNone -> ""
+                      Node =
+                        match node with
+                        | ValueSome text -> text
+                        | ValueNone -> ""
+                      Depth = number depth DefaultDepth false
+                      MaxNodes = number maxNodes DefaultMaxNodes true
+                      Json = json })
+        | "agent-context" ->
+          let output = optionalPath "--out"
+          let root = optionalPath "--root"
+          let executable = optionalPath "--executable"
+          let write = reader.Flag "--write"
+          let migrate = reader.Flag "--migrate"
+
+          if (write || migrate) && (root.IsNone || executable.IsNone) then
+            Error(MissingArgument "--root <path> --executable <path>")
+          elif not(write || migrate) && (root.IsSome || executable.IsSome) then
+            Error(MissingArgument "--write")
+          else
+            finish reader positional 0 (fun () ->
+              AgentContext
+                { OutputDirectory = output
+                  RootPath = root
+                  Executable = executable
+                  Write = write || migrate
+                  Migrate = migrate
+                  Json = json })
+        | "freshness" ->
+          let output = optionalPath "--out"
+          let root = optionalPath "--root"
+
+          let invalidPath =
+            positional
+            |> Seq.tryPick(fun item ->
+              match validateQueryText "<file>" item.Text with
+              | ValueSome error -> Some error
+              | ValueNone ->
+                match Srcnet.Core.Paths.tryCreate item.Text with
+                | Error error ->
+                  Some(UnsupportedValue("<file>", item.Text, Srcnet.Core.Paths.PathError.describe error))
+                | Ok path when Srcnet.Core.Paths.isRoot path || item.Text.Contains ':' ->
+                  Some(InvalidValue("<file>", item.Text))
+                | Ok _ -> None)
+
+          match invalidPath with
+          | Some error -> Error error
+          | None ->
+            match root with
+            | ValueNone -> Error(MissingArgument "--root <path>")
+            | ValueSome rootPath ->
+              if positional.Count = 0 then
+                Error(MissingArgument "<files...>")
+              elif positional.Count > 32 then
+                Error(UnsupportedValue("<files...>", "", "32 ファイル以下で指定してください"))
+              else
+                finish reader positional positional.Count (fun () ->
+                  Freshness
+                    { OutputDirectory = output
+                      RootPath = rootPath
+                      Paths = positional |> Seq.map(fun item -> item.Text) |> Seq.distinct |> Seq.toArray
+                      Json = json })
+        | "stats" ->
+          let output = optionalPath "--out"
+
+          match
+            if positional.Count > 0 then
+              validatePath "<path>" positional[0].Text
+            else
+              ValueNone
+          with
+          | ValueSome error -> Error error
+          | ValueNone ->
+            finish reader positional 1 (fun () ->
+              Stats
+                { OutputDirectory = output
+                  RootPath =
+                    (if positional.Count > 0 then
+                       ValueSome positional[0].Text
+                     else
+                       ValueNone)
+                  Json = json })
+        | "verify" ->
+          let output = optionalPath "--out"
+          let deterministic = reader.Flag "--deterministic"
+
+          match reader.Error with
+          | ValueSome error -> Error error
+          | ValueNone ->
+            if deterministic && positional.Count = 0 then
+              Error(MissingArgument "<path>")
+            else
+              match
+                if positional.Count > 0 then
+                  validatePath "<path>" positional[0].Text
+                else
+                  ValueNone
+              with
+              | ValueSome error -> Error error
+              | ValueNone ->
+                finish reader positional 1 (fun () ->
+                  Verify
+                    { OutputDirectory = output
+                      RootPath =
+                        (if positional.Count > 0 then
+                           ValueSome positional[0].Text
+                         else
+                           ValueNone)
+                      Deterministic = deterministic
+                      Json = json })
+        | other -> Error(UnknownCommand other)
 
 /// リポジトリ ID を決める。指定がなければ解析ルートのディレクトリ名を使う。
 /// 絶対パスは含めない。成果物が実行環境に依存しなくなるため。
@@ -753,6 +953,8 @@ let usage =
       "  srcnet export html [オプション]       対話的な HTML グラフを出力する"
       "  srcnet stats [<path>] [オプション]    生成物の統計を表示する"
       "  srcnet verify [<path>] [オプション]   生成物の整合性を検証する"
+      "  srcnet freshness <files...> --root <path>  指定ファイルの鮮度を確認する"
+      "  srcnet agent-context --out <dir>      ローカル設定を表示する (実行はしない)"
       "  srcnet --version                   版を表示する"
       "  srcnet --help                      この説明を表示する"
       ""
@@ -767,9 +969,15 @@ let usage =
       "  --no-gitignore         .gitignore / .srcnetignore を無視する"
       "  --follow-symlinks      シンボリック リンクを追跡する (ルート外は拒否)"
       "  --allow-partial        不完全な走査結果での上書きを許可する"
+      "  --progress auto|always|never  stderr の進捗 (既定 auto: TTY のみ)"
+      "  --memory-limit <size>  生成時のメモリ予算 (256MiB..1TiB、既定 4GiB)"
+      "  --temp-limit <size>    退避と公開前セグメントの一時ディスク上限 (既定 16GiB)"
       ""
       "verify のオプション:"
       "  --deterministic        二度生成して成果物がバイト一致するか検証する"
+      "  freshness は最大 32 ファイル・合計 256 MiB・10 秒で確認を打ち切ります"
+      "  agent-context --write --root <path> --executable <path>  ローカル設定を保存"
+      "  agent-context --migrate --root <path> --executable <path>  旧 manifest 設定を移行"
       ""
       "照会 (search / show / neighbors / path / context) のオプション:"
       "  --root <path>          解析ルート (生成物の位置を決めるために使う)"

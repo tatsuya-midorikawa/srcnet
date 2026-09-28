@@ -79,6 +79,44 @@ RSS 上限は「守れなければ設計が誤り」という意味の制約で�
 
 本節には実測した値だけを記録する。目標値（4）と混同しないこと。
 
+### P1 改善の合成入力比較（2026-09-27、受け入れ未完了）
+
+| 条件 | 値 |
+| --- | --- |
+| 環境 | macOS 27.0 (26A428)、Darwin 27.0.0、arm64、Apple M1 Max、64 GiB、.NET SDK 10.0.102、Node 20.17.0 |
+| 比較基準 | 進捗・退避変更前に保存した Release publish。元の索引生成は `2522bb3` と同じ全量保持経路 |
+| 入力 | CJK を含むファイル名、各ファイル 64 関数と参照候補、固定の構成ガード。スクリプトから再生成 |
+| 条件 | T2、jobs=4、候補は memory-limit=4GiB / progress=always。プロセス起動を含む |
+| 測定 | `/usr/bin/time -l`、各系統を交互に実行。初回を除外。warm cache、OS キャッシュ消去なし |
+
+[測定スクリプト](../tests/tools/index-resource-check.mjs) は全件数と、分割断片を連結した各論理セグメントの SHA-256 一致を検査する。
+新しい抽出集計を含む manifest のバイト列は、旧版との比較対象にしない。同じ新実装内の決定性は別の CLI テストで確認する。
+
+| ファイル数 | warm 回数 | 基準の時間 | 候補の時間 | 基準のピーク RSS | 候補のピーク RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 3 | p50 2.641 s / p95・p99 2.755 s | p50 2.895 s / p95・p99 2.962 s | 415,580,160 bytes | 416,661,504 bytes |
+| 5,000 | 1 | 9.343 s | 16.595 s | 1,219,903,488 bytes | 896,745,472 bytes |
+
+3 回の p95/p99 は観測した最大値であり、安定した tail latency の推定ではない。5,000 ファイルは 1 回の参考比較で、分布を評価していない。
+1,000 ファイルでは 65,032 ノード、193,031 エッジ、128,000 参照候補、生成物 29,166,779 bytes を得た。
+入力 SHA-256 は `7bd77154ec4a50eb053a050c60c3de2dee6e8686d7f4f6b18ec8bbf9b71c4509`。
+
+候補の 1,000 ファイル時は割当量約 459 MB、一時ディスク最大 29,166,779 bytes。
+5,000 ファイル時は割当量 7,059,219,872 bytes、一時ディスク最大 304,567,877 bytes、生成物 146,650,779 bytes だった。
+基準の割当量・一時ディスクと、両系統の GC 回数・ハンドル・I/O 詳細は未計測である。
+
+再実行例（各パスは比較対象の publish 済み CLI）:
+
+```sh
+node tests/tools/index-resource-check.mjs artifacts/p1-baseline/srcnet artifacts/p1-candidate/srcnet 1000 64 3 artifacts/p1-resource-check-final
+node tests/tools/index-resource-check.mjs artifacts/p1-baseline/srcnet artifacts/p1-candidate/srcnet 5000 64 1 artifacts/p1-resource-check-large
+```
+
+判定: 合成入力では 4 GiB 内で完了し、グラフ内容は一致した。しかし時間は約 9.6% / 77.6% 悪化しており、**非劣化条件は未達**。
+常に退避する案は小規模でも遅かったため、予算内の小さい入力・lookup はメモリ内に残す方式へ変更した。それでも回帰は残る。
+厳密な RSS 上限、残る大域表と走査キューの有界化、Windows、cold cache、固定 SHA の Linux は未検証または未完了である。
+[037](../_drafts/037-memory-bounded-indexing.md) と [backlog 026](../backlogs/026-measure-linux-corpus-extraction.md) は完了にしない。
+
 ### 内容ハッシュ（2026-09 時点）
 
 | 条件 | 値 |
@@ -389,7 +427,7 @@ basename 4.663 µs、anchored 3.026 µs、recursive 260.9 ns、1 MiB の行数�
 異なる測定器の値を直接つないで改善率を計算しない。
 
 ```console
-$ dotnet run --project bench/Srcnet.Benchmarks -c Release -- --filter "*IgnoreBenchmarks*" "*LineCountBenchmarks*" "*LanguageLookupBenchmarks*" --warmupCount 3 --iterationCount 5
+dotnet run --project bench/Srcnet.Benchmarks -c Release -- --filter "*IgnoreBenchmarks*" "*LineCountBenchmarks*" "*LanguageLookupBenchmarks*" --warmupCount 3 --iterationCount 5
 ```
 
 CLI 全体は、5,003 ファイル・33,720,730 バイト（16 MiB ファイル 2 個を含む）、

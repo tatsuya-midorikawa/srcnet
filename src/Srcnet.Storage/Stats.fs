@@ -19,11 +19,13 @@ type LanguageCount =
     Lines: int64 }
 
 type EncodingCount =
-  { Encoding: Encodings.DetectedEncoding
+  {
+    Encoding: Encodings.DetectedEncoding
     Files: int
     /// 構造規則を満たす候補が複数あり、単一の符号化へ確定できなかったファイル数。
     /// 記録された符号化は候補の先頭にすぎないため、確定値として表示してはならない。
-    Ambiguous: int }
+    Ambiguous: int
+  }
 
 type FileStatistics =
   { Languages: LanguageCount[]
@@ -33,11 +35,13 @@ type FileStatistics =
 
 /// 未解決の参照候補の内訳。エッジ種別ごとの件数を返す。
 type ReferenceCount =
-  { Kind: EdgeKind
+  {
+    Kind: EdgeKind
     Count: int
     /// 解決前は `EXTRACTED`。`RESOLVED` / `AMBIGUOUS` へ変わるのは M3。
     Extracted: int
-    Ambiguous: int }
+    Ambiguous: int
+  }
 
 /// `.refs` セグメントを走査してエッジ種別ごとの件数を求める。
 ///
@@ -48,9 +52,10 @@ let readReferenceStatisticsWithCancellation
   (cancellation: CancellationToken)
   : Result<ReferenceCount[], Reader.OpenError> =
   cancellation.ThrowIfCancellationRequested()
+
   match
     manifest.Segments
-    |> Array.tryFind (fun segment -> segment.Name.EndsWith(".refs", StringComparison.Ordinal))
+    |> Array.tryFind(fun segment -> segment.Name.EndsWith(".refs", StringComparison.Ordinal))
   with
   | None -> Error(Reader.SegmentNotFound "refs")
   | Some descriptor ->
@@ -58,71 +63,82 @@ let readReferenceStatisticsWithCancellation
     | Error error -> Error(Reader.OpenFailed(descriptor.Name, Artifact.PathError.describe error))
     | Ok path ->
 
-    match Reader.MappedSegment.Open path with
-    | Error error -> Error error
-    | Ok segment ->
-      use segment = segment
+      match Reader.MappedSegment.Open(path, Manifest.segmentFileNames outputDirectory manifest) with
+      | Error error -> Error error
+      | Ok segment ->
+        use segment = segment
 
-      if segment.Header.Kind <> Format.References then
-        Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
-      elif segment.Header.PrimaryCount <> uint64 manifest.Counts.ReferenceCandidates then
-        Error(Reader.OpenFailed(path, "参照候補の件数がマニフェストと一致しません"))
-      else
-
-      let payload = segment.Payload
-      let count = int segment.Header.PrimaryCount
-      let totals = Dictionary<byte, int>()
-      let extracted = Dictionary<byte, int>()
-      let ambiguous = Dictionary<byte, int>()
-      let mutable invalid = false
-
-      let bump (table: Dictionary<byte, int>) key =
-        match table.TryGetValue key with
-        | true, existing -> table[key] <- existing + 1
-        | false, _ -> table[key] <- 1
-
-      for index in 0 .. count - 1 do
-        if index &&& 8191 = 0 then cancellation.ThrowIfCancellationRequested()
-        let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
-        let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
-        let confidence = record[Format.ReferenceRecord.ConfidenceOffset]
-
-        if
-          not (Format.ReferenceRecord.hasValidMetadata record)
-          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4)) >= uint32 manifest.Counts.Nodes
-          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4)) >= uint32 manifest.Counts.Strings
-          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4)) >= uint32 manifest.Counts.Strings
-        then
-          invalid <- true
+        if segment.Header.Kind <> Format.References then
+          Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
+        elif segment.Header.PrimaryCount <> uint64 manifest.Counts.ReferenceCandidates then
+          Error(Reader.OpenFailed(path, "参照候補の件数がマニフェストと一致しません"))
         else
-          bump totals edgeCode
-          if confidence = Confidence.toCode Extracted then bump extracted edgeCode
-          elif confidence = Confidence.toCode Ambiguous then bump ambiguous edgeCode
 
-      let lookup (table: Dictionary<byte, int>) key =
-        match table.TryGetValue key with
-        | true, value -> value
-        | false, _ -> 0
+          let payload = segment.Data
+          let count = int segment.Header.PrimaryCount
+          let totals = Dictionary<byte, int>()
+          let extracted = Dictionary<byte, int>()
+          let ambiguous = Dictionary<byte, int>()
+          let mutable invalid = false
 
-      if invalid then Error(Reader.OpenFailed(path, "参照候補の種別・確度・言語・段階・位置または参照が不正です"))
-      else
-      totals
-      |> Seq.choose (fun entry ->
-        EdgeKind.ofCode entry.Key
-        |> ValueOption.toOption
-        |> Option.map (fun kind ->
-          { Kind = kind
-            Count = entry.Value
-            Extracted = lookup extracted entry.Key
-            Ambiguous = lookup ambiguous entry.Key }))
-      // 件数の降順。同数は種別コード順で一意に定まる。
-      |> Seq.sortWith (fun left right ->
-        let byCount = compare right.Count left.Count
+          let bump (table: Dictionary<byte, int>) key =
+            match table.TryGetValue key with
+            | true, existing -> table[key] <- existing + 1
+            | false, _ -> table[key] <- 1
 
-        if byCount <> 0 then byCount
-        else compare (EdgeKind.toCode left.Kind) (EdgeKind.toCode right.Kind))
-      |> Seq.toArray
-      |> Ok
+          for index in 0 .. count - 1 do
+            if index &&& 8191 = 0 then
+              cancellation.ThrowIfCancellationRequested()
+
+            let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
+            let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
+            let confidence = record[Format.ReferenceRecord.ConfidenceOffset]
+
+            if
+              not(Format.ReferenceRecord.hasValidMetadata record)
+              || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4))
+                 >= uint32 manifest.Counts.Nodes
+              || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4))
+                 >= uint32 manifest.Counts.Strings
+              || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4))
+                 >= uint32 manifest.Counts.Strings
+            then
+              invalid <- true
+            else
+              bump totals edgeCode
+
+              if confidence = Confidence.toCode Extracted then
+                bump extracted edgeCode
+              elif confidence = Confidence.toCode Ambiguous then
+                bump ambiguous edgeCode
+
+          let lookup (table: Dictionary<byte, int>) key =
+            match table.TryGetValue key with
+            | true, value -> value
+            | false, _ -> 0
+
+          if invalid then
+            Error(Reader.OpenFailed(path, "参照候補の種別・確度・言語・段階・位置または参照が不正です"))
+          else
+            totals
+            |> Seq.choose(fun entry ->
+              EdgeKind.ofCode entry.Key
+              |> ValueOption.toOption
+              |> Option.map(fun kind ->
+                { Kind = kind
+                  Count = entry.Value
+                  Extracted = lookup extracted entry.Key
+                  Ambiguous = lookup ambiguous entry.Key }))
+            // 件数の降順。同数は種別コード順で一意に定まる。
+            |> Seq.sortWith(fun left right ->
+              let byCount = compare right.Count left.Count
+
+              if byCount <> 0 then
+                byCount
+              else
+                compare (EdgeKind.toCode left.Kind) (EdgeKind.toCode right.Kind))
+            |> Seq.toArray
+            |> Ok
 
 let private languageOfCode (code: uint16) = Language.ofCode code
 
@@ -139,7 +155,7 @@ let private encodingsByCode =
      Encodings.EucKr
      Encodings.Binary
      Encodings.Undetermined |]
-  |> Array.map (fun encoding -> Encodings.toCode encoding, encoding)
+  |> Array.map(fun encoding -> Encodings.toCode encoding, encoding)
   |> dict
 
 let private encodingOfCode (code: uint16) = encodingsByCode[code]
@@ -151,9 +167,10 @@ let readFileStatisticsWithCancellation
   (cancellation: CancellationToken)
   : Result<FileStatistics, Reader.OpenError> =
   cancellation.ThrowIfCancellationRequested()
+
   match
     manifest.Segments
-    |> Array.tryFind (fun segment -> segment.Name.EndsWith(".files", StringComparison.Ordinal))
+    |> Array.tryFind(fun segment -> segment.Name.EndsWith(".files", StringComparison.Ordinal))
   with
   | None -> Error(Reader.SegmentNotFound "files")
   | Some descriptor ->
@@ -163,105 +180,123 @@ let readFileStatisticsWithCancellation
     | Error error -> Error(Reader.OpenFailed(descriptor.Name, Artifact.PathError.describe error))
     | Ok path ->
 
-    match Reader.MappedSegment.Open path with
-    | Error error -> Error error
-    | Ok segment ->
-      use segment = segment
+      match Reader.MappedSegment.Open(path, Manifest.segmentFileNames outputDirectory manifest) with
+      | Error error -> Error error
+      | Ok segment ->
+        use segment = segment
 
-      // 種別の取り違えは破損である。ヘッダーで件数とレコード長の不変条件は
-      // 検証済みなので、以降の `Slice` は範囲内に収まる。
-      if segment.Header.Kind <> Format.Files then
-        Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
-      elif segment.Header.PrimaryCount <> uint64 manifest.Counts.Files then
-        Error(Reader.OpenFailed(path, "ファイル件数がマニフェストと一致しません"))
-      else
-
-      let payload = segment.Payload
-      let count = int segment.Header.PrimaryCount
-      let languageFiles = Dictionary<uint16, int>()
-      let languageBytes = Dictionary<uint16, int64>()
-      let languageLines = Dictionary<uint16, int64>()
-      let encodingFiles = Dictionary<uint16, int>()
-      let encodingAmbiguous = Dictionary<uint16, int>()
-      let mutable totalBytes = 0L
-      let mutable totalLines = 0L
-      let mutable invalid = false
-
-      let bump (table: Dictionary<uint16, int>) key value =
-        match table.TryGetValue key with
-        | true, existing -> table[key] <- existing + value
-        | false, _ -> table[key] <- value
-
-      let bumpLong (table: Dictionary<uint16, int64>) key value =
-        match table.TryGetValue key with
-        | true, existing -> table[key] <- existing + value
-        | false, _ -> table[key] <- value
-
-      for index in 0 .. count - 1 do
-        if index &&& 8191 = 0 then cancellation.ThrowIfCancellationRequested()
-        let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
-        let languageCode = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.LanguageOffset, 2))
-        let encodingCode = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2))
-        let flags = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4))
-        let lineCount = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4))
-        let sizeBytes = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8))
-
-        if
-          not (Format.FileRecord.hasValidMetadata record)
-          || sizeBytes > Int64.MaxValue - totalBytes
-          || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4)) >= uint32 manifest.Counts.Strings
-        then
-          invalid <- true
+        // 種別の取り違えは破損である。ヘッダーで件数とレコード長の不変条件は
+        // 検証済みなので、以降の `Slice` は範囲内に収まる。
+        if segment.Header.Kind <> Format.Files then
+          Error(Reader.InvalidFormat(path, Format.UnknownSegmentKind(Format.SegmentKind.toCode segment.Header.Kind)))
+        elif segment.Header.PrimaryCount <> uint64 manifest.Counts.Files then
+          Error(Reader.OpenFailed(path, "ファイル件数がマニフェストと一致しません"))
         else
-          bump languageFiles languageCode 1
-          bumpLong languageBytes languageCode sizeBytes
-          bumpLong languageLines languageCode (int64 lineCount)
-          bump encodingFiles encodingCode 1
 
-          if flags &&& uint32 NodeFlags.AmbiguousEncoding <> 0u then
-            bump encodingAmbiguous encodingCode 1
+          let payload = segment.Data
+          let count = int segment.Header.PrimaryCount
+          let languageFiles = Dictionary<uint16, int>()
+          let languageBytes = Dictionary<uint16, int64>()
+          let languageLines = Dictionary<uint16, int64>()
+          let encodingFiles = Dictionary<uint16, int>()
+          let encodingAmbiguous = Dictionary<uint16, int>()
+          let mutable totalBytes = 0L
+          let mutable totalLines = 0L
+          let mutable invalid = false
 
-          totalBytes <- totalBytes + sizeBytes
-          totalLines <- totalLines + int64 lineCount
+          let bump (table: Dictionary<uint16, int>) key value =
+            match table.TryGetValue key with
+            | true, existing -> table[key] <- existing + value
+            | false, _ -> table[key] <- value
 
-      if invalid then Error(Reader.OpenFailed(path, "ファイルのサイズ・行数・言語・符号化・フラグまたはパス参照が不正です"))
-      else
-      let languages =
-        languageFiles
-        |> Seq.map (fun entry ->
-          { Language = languageOfCode entry.Key
-            Files = entry.Value
-            Bytes = languageBytes[entry.Key]
-            Lines = languageLines[entry.Key] })
-        // 件数の降順。同数は言語コード順で一意に定まる。
-        |> Seq.sortWith (fun left right ->
-          let byFiles = compare right.Files left.Files
+          let bumpLong (table: Dictionary<uint16, int64>) key value =
+            match table.TryGetValue key with
+            | true, existing -> table[key] <- existing + value
+            | false, _ -> table[key] <- value
 
-          if byFiles <> 0 then byFiles
-          else compare (Language.toCode left.Language) (Language.toCode right.Language))
-        |> Seq.toArray
+          for index in 0 .. count - 1 do
+            if index &&& 8191 = 0 then
+              cancellation.ThrowIfCancellationRequested()
 
-      let encodings =
-        encodingFiles
-        |> Seq.map (fun entry ->
-          { Encoding = encodingOfCode entry.Key
-            Files = entry.Value
-            Ambiguous =
-              match encodingAmbiguous.TryGetValue entry.Key with
-              | true, count -> count
-              | false, _ -> 0 })
-        |> Seq.sortWith (fun left right ->
-          let byFiles = compare right.Files left.Files
+            let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
 
-          if byFiles <> 0 then byFiles
-          else compare (Encodings.toCode left.Encoding) (Encodings.toCode right.Encoding))
-        |> Seq.toArray
+            let languageCode =
+              BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.LanguageOffset, 2))
 
-      Ok
-        { Languages = languages
-          Encodings = encodings
-          TotalBytes = totalBytes
-          TotalLines = totalLines }
+            let encodingCode =
+              BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(Format.FileRecord.EncodingOffset, 2))
+
+            let flags =
+              BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.FlagsOffset, 4))
+
+            let lineCount =
+              BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.LineCountOffset, 4))
+
+            let sizeBytes =
+              BinaryPrimitives.ReadInt64LittleEndian(record.Slice(Format.FileRecord.SizeOffset, 8))
+
+            if
+              not(Format.FileRecord.hasValidMetadata record)
+              || sizeBytes > Int64.MaxValue - totalBytes
+              || BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.FileRecord.PathOffset, 4))
+                 >= uint32 manifest.Counts.Strings
+            then
+              invalid <- true
+            else
+              bump languageFiles languageCode 1
+              bumpLong languageBytes languageCode sizeBytes
+              bumpLong languageLines languageCode (int64 lineCount)
+              bump encodingFiles encodingCode 1
+
+              if flags &&& uint32 NodeFlags.AmbiguousEncoding <> 0u then
+                bump encodingAmbiguous encodingCode 1
+
+              totalBytes <- totalBytes + sizeBytes
+              totalLines <- totalLines + int64 lineCount
+
+          if invalid then
+            Error(Reader.OpenFailed(path, "ファイルのサイズ・行数・言語・符号化・フラグまたはパス参照が不正です"))
+          else
+            let languages =
+              languageFiles
+              |> Seq.map(fun entry ->
+                { Language = languageOfCode entry.Key
+                  Files = entry.Value
+                  Bytes = languageBytes[entry.Key]
+                  Lines = languageLines[entry.Key] })
+              // 件数の降順。同数は言語コード順で一意に定まる。
+              |> Seq.sortWith(fun left right ->
+                let byFiles = compare right.Files left.Files
+
+                if byFiles <> 0 then
+                  byFiles
+                else
+                  compare (Language.toCode left.Language) (Language.toCode right.Language))
+              |> Seq.toArray
+
+            let encodings =
+              encodingFiles
+              |> Seq.map(fun entry ->
+                { Encoding = encodingOfCode entry.Key
+                  Files = entry.Value
+                  Ambiguous =
+                    match encodingAmbiguous.TryGetValue entry.Key with
+                    | true, count -> count
+                    | false, _ -> 0 })
+              |> Seq.sortWith(fun left right ->
+                let byFiles = compare right.Files left.Files
+
+                if byFiles <> 0 then
+                  byFiles
+                else
+                  compare (Encodings.toCode left.Encoding) (Encodings.toCode right.Encoding))
+              |> Seq.toArray
+
+            Ok
+              { Languages = languages
+                Encodings = encodings
+                TotalBytes = totalBytes
+                TotalLines = totalLines }
 
 let readFileStatistics outputDirectory manifest =
   readFileStatisticsWithCancellation outputDirectory manifest CancellationToken.None

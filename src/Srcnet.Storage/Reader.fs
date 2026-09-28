@@ -11,8 +11,11 @@ module Srcnet.Storage.Reader
 
 open System
 open System.Buffers
+open System.Buffers.Binary
+open System.Collections.Generic
 open System.IO
 open System.IO.MemoryMappedFiles
+open System.Runtime.CompilerServices
 open System.Threading
 open Microsoft.FSharp.NativeInterop
 open Srcnet.Core
@@ -24,15 +27,25 @@ let internal checksum (path: string) (cancellation: CancellationToken) =
 
   try
     use stream =
-      new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read ||| FileShare.Delete, 1, FileOptions.SequentialScan)
+      new FileStream(
+        path,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read ||| FileShare.Delete,
+        1,
+        FileOptions.SequentialScan
+      )
 
     let mutable reading = true
 
     while reading do
       cancellation.ThrowIfCancellationRequested()
       let read = stream.Read(Span buffer)
-      if read = 0 then reading <- false
-      else hasher.Update(ReadOnlySpan(buffer, 0, read))
+
+      if read = 0 then
+        reading <- false
+      else
+        hasher.Update(ReadOnlySpan(buffer, 0, read))
 
     let digest = Array.zeroCreate<byte> Hashing.HashLength
     hasher.Finish(Span digest)
@@ -51,86 +64,241 @@ module OpenError =
   let describe error =
     match error with
     | SegmentNotFound path -> $"セグメントが見つかりません: {path}"
-    | SegmentTooLarge(path, byteLength) ->
-      $"セグメント {path} が {byteLength} バイトで、単一ビューの上限を超えています"
+    | SegmentTooLarge(path, byteLength) -> $"セグメント {path} が {byteLength} バイトで、単一ビューの上限を超えています"
     | InvalidFormat(path, error) -> $"{path}: {Format.FormatError.describe error}"
     | OpenFailed(path, message) -> $"{path}: {message}"
 
-/// マップされた 1 セグメント。`Payload` の有効期間はこのインスタンスの生存期間に一致する。
+[<Literal>]
+let DefaultPartBytes = 134217728
+
+[<Literal>]
+let MaxParts = 64
+
+let partPath (path: string) (index: int) =
+  if index = 0 then
+    path
+  else
+    path
+    + ".part-"
+    + index.ToString("D6", Globalization.CultureInfo.InvariantCulture)
+
 [<Sealed>]
-type MappedSegment
-  private (file: MemoryMappedFile, view: MemoryMappedViewAccessor, pointer: nativeptr<byte>, length: int, header: Format.Header)
-  =
+type internal MappedPart
+  private (file: MemoryMappedFile, view: MemoryMappedViewAccessor, pointer: nativeptr<byte>, length: int, offset: int) =
   let mutable disposed = false
+  member _.Length = length - offset
 
-  member _.Header = header
+  [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+  member _.Slice(start: int, count: int) : ReadOnlySpan<byte> =
+    ObjectDisposedException.ThrowIf(disposed, typeof<MappedPart>)
 
-  member _.ByteLength = length
+    if start < 0 || count < 0 || start > length - offset - count then
+      invalidArg (nameof start) "Part range is invalid"
 
-  /// ヘッダーを除いた本体。範囲はヘッダーが宣言した長さで確定しており、
-  /// ファイル長との一致は `Format.tryReadHeader` で検証済みである。
-  member _.Payload: ReadOnlySpan<byte> =
-    ObjectDisposedException.ThrowIf(disposed, typeof<MappedSegment>)
-    ReadOnlySpan<byte>(NativePtr.toVoidPtr(NativePtr.add pointer Format.HeaderLength), length - Format.HeaderLength)
+    ReadOnlySpan<byte>(NativePtr.toVoidPtr(NativePtr.add pointer (offset + start)), count)
 
-  static member Open(path: string) : Result<MappedSegment, OpenError> =
-    let length =
-      try
-        if File.Exists path then Ok(FileInfo(path).Length)
-        else Error(SegmentNotFound path)
-      with
-      | :? IOException as ex -> Error(OpenFailed(path, ex.Message))
-      | :? UnauthorizedAccessException -> Error(OpenFailed(path, "読み取り権限がありません"))
-
-    match length with
-    | Error error -> Error error
-    | Ok byteLength ->
-    // 単一の Span で扱える上限を超える場合は、黙って切り詰めず明示的に失敗させる。
-    // 分割ビューによる読み取りはセグメントが 2 GiB を超える規模で必要になる。
-    if byteLength > int64 Int32.MaxValue then Error(SegmentTooLarge(path, byteLength))
-    elif byteLength < int64 Format.HeaderLength then
-      Error(InvalidFormat(path, Format.TooShort))
-    else
-
+  static member Open(path: string, length: int, offset: int) =
     let mutable file = Unchecked.defaultof<MemoryMappedFile>
     let mutable view = Unchecked.defaultof<MemoryMappedViewAccessor>
     let mutable acquired = false
     let mutable pointer = NativePtr.nullPtr<byte>
 
     try
-      try
-        file <- MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0L, MemoryMappedFileAccess.Read)
-        view <- file.CreateViewAccessor(0L, byteLength, MemoryMappedFileAccess.Read)
-        view.SafeMemoryMappedViewHandle.AcquirePointer &pointer
-        acquired <- true
-        // ビューの先頭がページ境界へ切り下げられる場合があるため、必ず補正する。
-        let basePointer = NativePtr.add pointer (int view.PointerOffset)
-        let length = int byteLength
-
-        let headerSpan = ReadOnlySpan<byte>(NativePtr.toVoidPtr basePointer, Format.HeaderLength)
-
-        match Format.tryReadHeader headerSpan byteLength with
-        | Error error -> Error(InvalidFormat(path, error))
-        | Ok header ->
-          let segment = new MappedSegment(file, view, basePointer, length, header)
-          file <- Unchecked.defaultof<MemoryMappedFile>
-          view <- Unchecked.defaultof<MemoryMappedViewAccessor>
-          acquired <- false
-          Ok segment
-      with
-      | :? IOException as ex -> Error(OpenFailed(path, ex.Message))
-      | :? UnauthorizedAccessException -> Error(OpenFailed(path, "読み取り権限がありません"))
+      file <- MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0L, MemoryMappedFileAccess.Read)
+      view <- file.CreateViewAccessor(0L, int64 length, MemoryMappedFileAccess.Read)
+      view.SafeMemoryMappedViewHandle.AcquirePointer &pointer
+      acquired <- true
+      let basePointer = NativePtr.add pointer (int view.PointerOffset)
+      let part = new MappedPart(file, view, basePointer, length, offset)
+      file <- Unchecked.defaultof<MemoryMappedFile>
+      view <- Unchecked.defaultof<MemoryMappedViewAccessor>
+      acquired <- false
+      part
     finally
-      // 成功時は所有権が MappedSegment へ移るため、ここでは解放しない。
-      if acquired then view.SafeMemoryMappedViewHandle.ReleasePointer()
-      if not (isNull (box view)) then view.Dispose()
-      if not (isNull (box file)) then file.Dispose()
+      if acquired then
+        view.SafeMemoryMappedViewHandle.ReleasePointer()
+
+      if not(isNull(box view)) then
+        view.Dispose()
+
+      if not(isNull(box file)) then
+        file.Dispose()
 
   interface IDisposable with
-
     member _.Dispose() =
       if not disposed then
         disposed <- true
         view.SafeMemoryMappedViewHandle.ReleasePointer()
         view.Dispose()
         file.Dispose()
+
+[<Sealed>]
+type SegmentData internal (parts: MappedPart[], chunkBytes: int, length: int) =
+  member _.Length = length
+
+  member private _.SliceParts(offset: int, count: int) : ReadOnlySpan<byte> =
+    if offset < 0 || count < 0 || offset > length - count then
+      invalidArg (nameof offset) "Segment range is invalid"
+
+    if count = 0 then
+      parts[0].Slice(0, 0)
+    else
+      let index = offset / chunkBytes
+      let start = offset % chunkBytes
+
+      if count <= parts[index].Length - start then
+        parts[index].Slice(start, count)
+      else
+        if count > Format.Lookup.MaxKeyBytes then
+          invalidArg (nameof count) "Cross-part reads are limited to 1 MiB"
+
+        let result = Array.zeroCreate<byte> count
+        let mutable written = 0
+        let mutable position = offset
+
+        while written < count do
+          let partIndex = position / chunkBytes
+          let partOffset = position % chunkBytes
+          let copied = min (count - written) (parts[partIndex].Length - partOffset)
+
+          parts[partIndex]
+            .Slice(partOffset, copied)
+            .CopyTo(result.AsSpan(written, copied))
+
+          written <- written + copied
+          position <- position + copied
+
+        ReadOnlySpan result
+
+  [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+  member this.Slice(offset: int, count: int) : ReadOnlySpan<byte> =
+    if parts.Length = 1 then
+      parts[0].Slice(offset, count)
+    else
+      this.SliceParts(offset, count)
+
+  member this.Slice(offset: int) = this.Slice(offset, length - offset)
+
+  member this.Item
+    with get (offset: int) =
+      let bytes = this.Slice(offset, 1)
+      bytes[0]
+
+[<Sealed>]
+type MappedSegment private (parts: MappedPart[], length: int, header: Format.Header, chunkBytes: int) =
+  let data = SegmentData(parts, chunkBytes, int header.PayloadLength)
+  let mutable disposed = false
+  member _.Header = header
+  member _.ByteLength = length
+
+  member _.Data =
+    ObjectDisposedException.ThrowIf(disposed, typeof<MappedSegment>)
+    data
+
+  member _.Payload =
+    ObjectDisposedException.ThrowIf(disposed, typeof<MappedSegment>)
+    data.Slice(0, data.Length)
+
+  static member private OpenCore(path: string, allowedParts: ISet<string> voption) : Result<MappedSegment, OpenError> =
+    let owned = ResizeArray<MappedPart>()
+    let mutable transferred = false
+
+    try
+      try
+        if not(File.Exists path) then
+          Error(SegmentNotFound path)
+        elif Artifact.isLink path then
+          Error(OpenFailed(path, "Segment links are rejected"))
+        else
+          let byteLength = FileInfo(path).Length
+
+          if byteLength > int64 Int32.MaxValue then
+            Error(SegmentTooLarge(path, byteLength))
+          elif byteLength < int64 Format.HeaderLength then
+            Error(InvalidFormat(path, Format.TooShort))
+          else
+            let headerBytes = Array.zeroCreate<byte> Format.HeaderLength
+
+            do
+              use stream =
+                new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read ||| FileShare.Delete)
+
+              stream.ReadExactly headerBytes
+
+            let payloadLength =
+              BinaryPrimitives.ReadUInt64LittleEndian(headerBytes.AsSpan(40, 8))
+
+            if payloadLength > uint64(Int32.MaxValue - Format.HeaderLength) then
+              Error(SegmentTooLarge(path, Int64.MaxValue))
+            else
+              let logicalLength = int64 payloadLength + int64 Format.HeaderLength
+
+              match Format.tryReadHeader (ReadOnlySpan headerBytes) logicalLength with
+              | Error error -> Error(InvalidFormat(path, error))
+              | Ok header ->
+                let chunkBytes = int byteLength - Format.HeaderLength
+
+                if byteLength > logicalLength || (chunkBytes = 0 && payloadLength > 0UL) then
+                  Error(InvalidFormat(path, Format.LengthMismatch(payloadLength, byteLength)))
+                else
+                  let chunk = max 1 chunkBytes
+                  let partCount = max 1 (int((payloadLength + uint64 chunk - 1UL) / uint64 chunk))
+
+                  if partCount > MaxParts then
+                    Error(OpenFailed(path, $"Segment needs more than {MaxParts} parts"))
+                  else
+                    let mutable failure = ValueNone
+
+                    match allowedParts with
+                    | ValueNone -> ()
+                    | ValueSome names ->
+                      if names.Contains(Path.GetFullPath(partPath path partCount)) then
+                        failure <- ValueSome(OpenFailed(path, "Unexpected trailing segment part"))
+
+                    for index in 0 .. partCount - 1 do
+                      if failure.IsNone then
+                        let physical = partPath path index
+                        let offset = if index = 0 then Format.HeaderLength else 0
+                        let expected = offset + min chunk (int payloadLength - index * chunk)
+
+                        let listed =
+                          match allowedParts with
+                          | ValueNone -> true
+                          | ValueSome names -> names.Contains(Path.GetFullPath physical)
+
+                        if not listed then
+                          failure <- ValueSome(OpenFailed(physical, "Segment part is not listed in the manifest"))
+                        elif Artifact.isLink physical then
+                          failure <- ValueSome(OpenFailed(physical, "Segment part links are rejected"))
+                        elif not(File.Exists physical) then
+                          failure <- ValueSome(SegmentNotFound physical)
+                        elif FileInfo(physical).Length <> int64 expected then
+                          failure <- ValueSome(OpenFailed(physical, "Segment part length mismatch"))
+                        else
+                          owned.Add(MappedPart.Open(physical, expected, offset))
+
+                    match failure with
+                    | ValueSome error -> Error error
+                    | ValueNone ->
+                      transferred <- true
+                      Ok(new MappedSegment(owned.ToArray(), int byteLength, header, chunk))
+      with
+      | :? IOException as error -> Error(OpenFailed(path, error.Message))
+      | :? UnauthorizedAccessException -> Error(OpenFailed(path, "読み取り権限がありません"))
+    finally
+      if not transferred then
+        for part in owned do
+          (part :> IDisposable).Dispose()
+
+  static member Open(path: string) = MappedSegment.OpenCore(path, ValueNone)
+
+  static member Open(path: string, allowedParts: ISet<string>) =
+    MappedSegment.OpenCore(path, ValueSome allowedParts)
+
+  interface IDisposable with
+    member _.Dispose() =
+      if not disposed then
+        disposed <- true
+
+        for part in parts do
+          (part :> IDisposable).Dispose()

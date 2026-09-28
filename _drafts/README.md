@@ -1,11 +1,11 @@
 # 改善チケット
 
 2026-09-27 の調査に基づく、機能・使いやすさ・利用資料の改善候補を管理する。
-この調査では改善の実装は行わない。起票しただけのチケットは未完了として扱う。
+調査時点では起票のみだった。その後の実装状況は下表と各チケットに追記する。起票や実装だけで受け入れ完了とは扱わない。
 
 ## 調査結果
 
-15 件を起票した。P1 は 8 件、P2 は 6 件、P3 は 1 件で、すべて未着手である。
+15 件を起票した。P1 は 8 件、P2 は 6 件、P3 は 1 件で、調査時点ではすべて未着手だった。
 導入資料、生成物の活用、結果の信頼性、継続利用、CLI / HTML の操作を対象とした。
 既存のヘルプ・スキル・HTML 機能は実装済みとして扱い、不足する部分をチケットの範囲にした。
 
@@ -35,14 +35,14 @@
 
 | ID | 優先度 | 改善項目 | 状態 |
 | --- | --- | --- | --- |
-| 030 | P1 | [実行可能な入門手順](030-first-success-guide.md) | 未着手 |
-| 031 | P1 | [成果物の利用・保存・共有ガイド](031-artifact-use-and-sharing-guide.md) | 未着手 |
-| 032 | P1 | [グラフと機械固有の設定の分離](032-separate-agent-context-metadata.md) | 未着手 |
-| 033 | P1 | [管理コマンドの JSON エラー契約](033-management-json-errors.md) | 未着手 |
-| 034 | P1 | [元ソースに対する索引の鮮度確認](034-source-freshness-check.md) | 未着手 |
-| 035 | P1 | [言語別の抽出状況と縮退理由](035-extraction-coverage-diagnostics.md) | 未着手 |
-| 036 | P1 | [索引生成中の進捗表示](036-indexing-progress.md) | 未着手 |
-| 037 | P1 | [メモリ予算を守る索引生成](037-memory-bounded-indexing.md) | 未着手 |
+| 030 | P1 | [実行可能な入門手順](030-first-success-guide.md) | 対応中: Windows 検証待ち |
+| 031 | P1 | [成果物の利用・保存・共有ガイド](031-artifact-use-and-sharing-guide.md) | 対応中: Windows 検証待ち |
+| 032 | P1 | [グラフと機械固有の設定の分離](032-separate-agent-context-metadata.md) | 対応中: Windows 検証待ち |
+| 033 | P1 | [管理コマンドの JSON エラー契約](033-management-json-errors.md) | 対応中: Windows 検証待ち |
+| 034 | P1 | [元ソースに対する索引の鮮度確認](034-source-freshness-check.md) | 対応中: 検証残あり |
+| 035 | P1 | [言語別の抽出状況と縮退理由](035-extraction-coverage-diagnostics.md) | 対応中: 検証残あり |
+| 036 | P1 | [索引生成中の進捗表示](036-indexing-progress.md) | 対応中: 性能・Windows 検証残 |
+| 037 | P1 | [メモリ予算を守る索引生成](037-memory-bounded-indexing.md) | 対応中: 有界化・性能未達 |
 | 038 | P2 | [検索の種別・パス絞り込み](038-search-scope-filters.md) | 未着手 |
 | 039 | P2 | [C / C++ の include 関係の解決](039-resolve-local-includes.md) | 未着手 |
 | 040 | P3 | [完全生成と等価な増分更新](040-incremental-index-updates.md) | 未着手 |
@@ -51,7 +51,24 @@
 | 043 | P2 | [コマンド別のヘルプ](043-command-specific-help.md) | 未着手 |
 | 044 | P2 | [走査から除外された理由の確認](044-explain-discovery-exclusions.md) | 未着手 |
 
-## 調査と検証
+## P1 実装・検証の追記（2026-09-27）
+
+030〜036 の資料・機能と、037 の退避・外部ソート・物理分割・予算保護の基礎を追加した。
+Windows 実機・CI の検証は今回実行できていない。037 は大域表などの有界化が残り、時間の非劣化も未達である。
+受け入れ条件を満たしていないため、全 8 件を対応中とし、`_completed` へ移動しない。
+
+- 環境: macOS 27.0 arm64、Apple M1 Max / 64 GiB、.NET SDK 10.0.102、PowerShell 7.5.4。
+- `dotnet build srcnet.slnx -c Release`: 成功。`dotnet test srcnet.slnx -c Release`: 478 件成功。
+- `dotnet test tests/Srcnet.Tests/Srcnet.Tests.fsproj -c Release -p:IncludeNativeParser=false --artifacts-path artifacts/p1-no-parser-tests`: 469 件成功、解析器が必要な 9 件を明示的にスキップ。
+- 変更 F# の Fantomas チェック、ビルド用 Python テスト 11 件、固定文法・符号化表、製品依存閉包、NuGet 脆弱性検査が成功した。
+- `.github/scripts/tool_contract.py --without-parser`: パッケージ導入・起動・T2 縮退・決定性・CJK 検索が成功。既存 query contract も成功。
+- 入門の zsh / PowerShell コマンド、索引一式のコピー、HTML の 1280×800 / 390×844 描画と横方向のはみ出しを確認した。
+- SIGINT で終了コード 5 と単一 JSON、旧 manifest 保持、staging 除去を確認した。
+- 合成入力の内容一致と RSS・時間を [性能](../docs/performance.md) に記録した。Linux 実測は backlog 026 の残課題を維持する。
+- 変更した資料 24 ファイルのローカルリンク 193 件を、見出しアンカーも含めて検証した。リンク切れなし。
+- 日本語 lint は依存の取得がネットワークエラーで失敗。手動チェックと Markdown 診断で確認したが、機械的 lint の成功とは扱わない。
+
+## 調査時点の検証記録
 
 - 対象コミット: `2522bb3`。調査開始時の作業ツリーに既存変更はなかった。
 - 環境: macOS arm64、.NET SDK 10.0.102、srcnet 0.1.0。
@@ -62,7 +79,7 @@
 - HTML の選択範囲を比較して 041 を再現した。統合ブラウザーと Playwright で 1280 x 800 / 390 x 844 の描画、横方向のはみ出し、選択パネルの操作項目を確認した。
 - 全 15 件の必須項目、採番・依存先・一覧との対応、ローカルリンク 93 件、Markdown 診断を検証し、エラーがないことを確認した。アプリの実装への変更はない。
 
-Windows の実行、大規模コーパスの再測定、ソリューション全体のテストは今回実施していない。
+この調査時点では Windows の実行、大規模コーパスの再測定、ソリューション全体のテストは実施していない。
 n-gram 索引、T2 対応言語の拡大、MCP、impact / explain は [ロードマップ](../docs/roadmap.md) の既存計画として参照し、今回のチケットには混在させない。
 
 ## 調査の読み方

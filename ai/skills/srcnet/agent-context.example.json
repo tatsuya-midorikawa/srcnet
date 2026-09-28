@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "SRCNET": "/path/to/srcnet",
+  "SOURCE_ROOT": "/path/to/source",
+  "INDEX_DIR": "/path/to/index"
+}

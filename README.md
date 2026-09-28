@@ -24,7 +24,7 @@ srcnet はリポジトリの構造を事前に一度だけ解析してグラフ�
 | 実装 | F# 10 / .NET 10 |
 | 構文解析 | 固定した tree-sitter 文法。T2 のグラフ抽出は現在 C / C++ |
 | 保存形式 | 固定長レコード、memory-mapped セグメント、CSR 隣接表 |
-| 規模目標 | 数十万〜百万ファイル / 数千万行。T2 全体のメモリ有界化は未実装 |
+| 規模目標 | 数十万〜百万ファイル / 数千万行。退避と予算制御を実装、全体の受け入れは未達 |
 | LLM | 生成・照会ともに不使用 |
 | 検索 | 名前・修飾名・パスの字句一致 + 構造探索 |
 
@@ -60,10 +60,14 @@ srcnet はリポジトリの構造を事前に一度だけ解析してグラフ�
 
 .NET 10 SDK が必要です（[global.json](global.json) で版を固定しています）。
 
+初回は [同梱ソースで索引から HTML まで試す](docs/first-success.md) を参照してください。
+macOS と PowerShell の実行例で、検索結果の ID と元ソースを結び付けます。
+生成後の使い分け、別の場所へのコピー、共有時の注意は [成果物の利用ガイド](docs/artifact-guide.md) にまとめています。
+
 ```console
-$ dotnet build srcnet.slnx -c Release
-$ dotnet test srcnet.slnx -c Release
-$ dotnet run --project src/Srcnet.Cli -c Release -- --help
+dotnet build srcnet.slnx -c Release
+dotnet test srcnet.slnx -c Release
+dotnet run --project src/Srcnet.Cli -c Release -- --help
 ```
 
 以下の `srcnet` はビルドした実行ファイルを指します。PATH へ配置していない場合は
@@ -76,8 +80,8 @@ $ dotnet run --project src/Srcnet.Cli -c Release -- --help
 ビルド時の NuGet 復元は、依存がキャッシュされていなければネットワークを使います。
 
 ```console
-$ dotnet pack src/Srcnet.Cli -c Release -o artifacts/packages -p:IncludeNativeParser=false
-$ dotnet tool install Srcnet.Cli --version 0.1.0 --source ./artifacts/packages --tool-path ./artifacts/bin
+dotnet pack src/Srcnet.Cli -c Release -o artifacts/packages -p:IncludeNativeParser=false
+dotnet tool install Srcnet.Cli --version 0.1.0 --source ./artifacts/packages --tool-path ./artifacts/bin
 ```
 
 macOS では `./artifacts/bin/srcnet --help`、Windows の PowerShell では
@@ -100,15 +104,15 @@ C / C++ の T2 が必要なら、先に `python3 tools/build_native.py --languag
 索引・整合性検査に加えて、部分グラフを予算内で照会できます。
 
 ```console
-$ srcnet index <path> [--out <dir>] [--jobs <n>] [--no-gitignore] [--json]
-$ srcnet stats [<path>] [--out <dir>] [--json]
-$ srcnet verify [<path>] [--out <dir>] [--deterministic] [--json]
-$ srcnet search <text> --root <path> --json --limit 20 --budget 4000
-$ srcnet show <node-id> --root <path> --json
-$ srcnet neighbors <node-id> --root <path> --direction in --depth 2 --json
-$ srcnet path <from-id> <to-id> --root <path> --depth 16 --json
-$ srcnet context <keywords...> --root <path> --budget 4000 --json
-$ srcnet export html --root <path> --node <node-id> --depth 2 --max-nodes 2000
+srcnet index <path> [--out <dir>] [--jobs <n>] [--no-gitignore] [--json]
+srcnet stats [<path>] [--out <dir>] [--json]
+srcnet verify [<path>] [--out <dir>] [--deterministic] [--json]
+srcnet search <text> --root <path> --json --limit 20 --budget 4000
+srcnet show <node-id> --root <path> --json
+srcnet neighbors <node-id> --root <path> --direction in --depth 2 --json
+srcnet path <from-id> <to-id> --root <path> --depth 16 --json
+srcnet context <keywords...> --root <path> --budget 4000 --json
+srcnet export html --root <path> --node <node-id> --depth 2 --max-nodes 2000
 ```
 
 JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、省略件数を明示します。
@@ -125,7 +129,7 @@ JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、
 同じ出力先への同時書き込みは排他ロックで拒否します。既存世代の破損を検出した場合は、
 その不変パスを上書きせず、別の出力先への再索引を求めます。
 
-`stdout` には結果のみを出力し、進捗・警告・診断は `stderr` へ出します。終了コードは
+`stdout` には結果のみを出力し、進捗は `stderr` へ出します。`--json` の管理コマンドは失敗時も単一 JSON を返し、診断の詳細と省略を含みます。終了コードは
 [クエリと CLI](docs/query-and-cli.md) 2.2 に従います。
 各コマンドの `--help` / `-h` でも説明を表示できます。`--` 以降は位置引数として扱うため、
 `srcnet search --json -- --option-name` のようにオプションに見える名前も検索できます。
@@ -133,6 +137,11 @@ JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、
 エージェント向けには、索引を作る `srcnet-index` と既存索引を照会する `srcnet` の
 [配布用スキル](ai/skills/README.md) があります。導入先と、ソース・実行ファイル・索引の
 パスの渡し方は同文書を参照してください。
+
+現在のソースとの一致は `freshness <相対ファイル...> --root <source> --out <index> --json` で明示的に確認します。
+対象は最大 32 ファイルで、通常の search や verify が鮮度を保証するわけではありません。
+生成時は `--progress auto|always|never`、`--memory-limit`、`--temp-limit` を指定できます。
+ローカル設定は `agent-context.json` に分離し、manifest 自体は決定性検証の対象に保ちます。
 
 ## 実装の構成
 
@@ -158,8 +167,8 @@ JSON の予算は封筒・エッジ・診断を含む出力全体へ適用し、
 診断付きの生成は終了コード 4 になるため、自動化では終了コードと `complete` を区別して扱ってください。
 
 ```console
-$ python3 tools/build_native.py                       # 全言語
-$ python3 tools/build_native.py --languages c python  # 一部の言語
+python3 tools/build_native.py                       # 全言語
+python3 tools/build_native.py --languages c python  # 一部の言語
 ```
 
 同梱できる文法は C, C++, Python, Rust, Go, Java, JavaScript, C#, TypeScript, TSX, F# です。
@@ -170,6 +179,8 @@ C コンパイラと、初回のみ GitHub への到達性が必要です。詳�
 
 | 文書 | 内容 |
 | --- | --- |
+| [入門手順](docs/first-success.md) | 同梱コーパスから ID・元ソース・HTML までの実行例 |
+| [成果物の利用](docs/artifact-guide.md) | JSON / HTML の使い分け、安全な保存・移動・共有 |
 | [要件](docs/requirements.md) | 機能要件、非機能要件、スコープ境界、受け入れ基準 |
 | [アーキテクチャ](docs/architecture.md) | パイプライン、並列化、決定性、モジュール境界 |
 | [グラフ モデル](docs/graph-model.md) | ノード種別、エッジ種別、ID 体系、確度 |

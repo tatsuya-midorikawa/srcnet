@@ -40,6 +40,9 @@ type private Indexed(corpus: string, assumeEncoding: Srcnet.Text.Encodings.Detec
         RespectIgnoreFiles = true
         FollowSymbolicLinks = false
         AllowPartial = true
+        Progress = "never"
+        MemoryLimit = Srcnet.Cli.Args.DefaultMemoryLimit
+        TemporaryLimit = Srcnet.Cli.Args.DefaultTemporaryLimit
         Json = true }
 
     let code =
@@ -377,7 +380,10 @@ let ``同じ引数からは同じ JSON が出る`` () =
 let ``JSON は定めた項目をすべて持つ`` () =
   task {
     use indexed = new Indexed("micro")
-    let! struct (_, payload, _) = Corpus.runCli [ "search"; "shapes"; "--out"; indexed.Output; "--json"; "--limit"; "2" ]
+
+    let! struct (_, payload, _) =
+      Corpus.runCli [ "search"; "shapes"; "--out"; indexed.Output; "--json"; "--limit"; "2" ]
+
     use document = JsonDocument.Parse payload
     let root = document.RootElement
 
@@ -690,7 +696,10 @@ let ``file nodes are found from the dense schema without scanning names`` () =
 let ``publication replaces a manifest held by a delete-sharing reader`` () =
   use indexed = new Indexed("micro")
   let original = readManifest indexed.Output
-  let replacement = { original with Complete = not original.Complete }
+
+  let replacement =
+    { original with
+        Complete = not original.Complete }
 
   use held =
     new FileStream(
@@ -998,7 +1007,8 @@ type internal TestGraph(names: string[], connections: struct (int * int * EdgeKi
             NodeKinds = written.NodeKinds
             EdgeKinds = counts.ToArray() |> Array.sortBy(fun entry -> entry.Kind) }
         Segments = Manifest.qualify generation ordered
-        Diagnostics = Array.empty }
+        Diagnostics = Array.empty
+        Extraction = ValueNone }
 
     match Manifest.publish output generation manifest with
     | Ok() -> ()
@@ -1069,14 +1079,37 @@ let ``full lookup validation checks every normal and folded key and posting`` fo
 
   mutate graph.Output "lookup" (fun bytes ->
     let keys = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 16, 8)))
-    let postings = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 24, 8)))
+
+    let postings =
+      int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, 24, 8)))
+
     let prelude = Format.HeaderLength
-    let normal = int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, prelude + 24, 4)))
-    let key = prelude + Format.Lookup.PreludeLength + (if folded then normal else 0) * Format.Lookup.KeyLength
-    let blob = prelude + Format.Lookup.PreludeLength + keys * Format.Lookup.KeyLength + postings * Format.Lookup.PostingLength
-    let offset = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, key, 8)))
-    let first = int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, key + 12, 4)))
-    let posting = prelude + Format.Lookup.PreludeLength + keys * Format.Lookup.KeyLength + first * Format.Lookup.PostingLength
+
+    let normal =
+      int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, prelude + 24, 4)))
+
+    let key =
+      prelude
+      + Format.Lookup.PreludeLength
+      + (if folded then normal else 0) * Format.Lookup.KeyLength
+
+    let blob =
+      prelude
+      + Format.Lookup.PreludeLength
+      + keys * Format.Lookup.KeyLength
+      + postings * Format.Lookup.PostingLength
+
+    let offset =
+      int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(bytes, key, 8)))
+
+    let first =
+      int(BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan(bytes, key + 12, 4)))
+
+    let posting =
+      prelude
+      + Format.Lookup.PreludeLength
+      + keys * Format.Lookup.KeyLength
+      + first * Format.Lookup.PostingLength
 
     match variant with
     | 0 -> BinaryPrimitives.WriteUInt32LittleEndian(Span(bytes, key + 20, 4), 1u)
@@ -1102,8 +1135,13 @@ let ``full lookup validation detects structurally valid missing postings`` () =
   use graph = new TestGraph([| "aaaa"; "bbbb" |], Array.empty)
   let path = segmentPath graph.Output "lookup"
   let original = File.ReadAllBytes path
-  let keys = int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 16, 8)))
-  let postings = BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 24, 8))
+
+  let keys =
+    int(BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 16, 8)))
+
+  let postings =
+    BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan(original, 24, 8))
+
   let firstKey = Format.HeaderLength + Format.Lookup.PreludeLength
   let postingBase = firstKey + keys * Format.Lookup.KeyLength
   let bytes = Array.zeroCreate<byte>(original.Length - Format.Lookup.PostingLength)
@@ -1634,9 +1672,7 @@ let ``proved shortest paths do not exhaust the rest of a dense layer`` () =
   use view = graph.View
 
   let route: Query.EdgeView[] =
-    [| { From = 0
-         To = 2
-         Kind = Contains }
+    [| { From = 0; To = 2; Kind = Contains }
        { From = 2
          To = half + 2
          Kind = Contains }
@@ -1653,8 +1689,10 @@ let ``proved shortest paths do not exhaust the rest of a dense layer`` () =
       Query.shortestPath view source target [| Contains |] direction 3 CancellationToken.None
 
     let expected =
-      if source = 0 then [| 0; 2; half + 2; 1 |]
-      else [| 1; half + 2; 2; 0 |]
+      if source = 0 then
+        [| 0; 2; half + 2; 1 |]
+      else
+        [| 1; half + 2; 2; 0 |]
 
     let expectedEdges = if source = 0 then route else Array.rev route
 

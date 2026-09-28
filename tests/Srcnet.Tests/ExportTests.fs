@@ -55,6 +55,9 @@ let private indexPath (root: string) (output: string) =
       RespectIgnoreFiles = true
       FollowSymbolicLinks = false
       AllowPartial = true
+      Progress = "never"
+      MemoryLimit = Args.DefaultMemoryLimit
+      TemporaryLimit = Args.DefaultTemporaryLimit
       Json = true }
 
   let code =

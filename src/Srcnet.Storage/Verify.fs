@@ -58,11 +58,17 @@ type Report =
       | _ -> false)
 
 let inline private checkCancellation (cancellation: CancellationToken) index =
-  if index &&& 8191 = 0 then cancellation.ThrowIfCancellationRequested()
+  if index &&& 8191 = 0 then
+    cancellation.ThrowIfCancellationRequested()
 
 /// 文字列オフセット表が単調非減少で、末尾が blob 長に一致することを確かめる。
-let private checkStringOffsets (cancellation: CancellationToken) (name: string) (segment: Reader.MappedSegment) (issues: ResizeArray<Issue>) =
-  let payload = segment.Payload
+let private checkStringOffsets
+  (cancellation: CancellationToken)
+  (name: string)
+  (segment: Reader.MappedSegment)
+  (issues: ResizeArray<Issue>)
+  =
+  let payload = segment.Data
   let count = int segment.Header.PrimaryCount
   let expectedLength = (count + 1) * 8
 
@@ -100,19 +106,31 @@ let private checkStringBytes
 
   while index < int strings.Header.PrimaryCount && not invalid do
     checkCancellation cancellation index
-    let first = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(index * 8, 8))
-    let last = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice((index + 1) * 8, 8))
+
+    let first =
+      BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(index * 8, 8))
+
+    let last =
+      BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice((index + 1) * 8, 8))
 
     try
-      Strings.utf8.GetCharCount(strings.Payload.Slice(int first, int (last - first))) |> ignore
+      Strings.utf8.GetCharCount(strings.Data.Slice(int first, int(last - first)))
+      |> ignore
     with :? Text.DecoderFallbackException ->
       issues.Add(SegmentUnreadable(name, $"文字列 {index} が UTF-8 ではありません"))
       invalid <- true
 
     index <- index + 1
 
-let private checkCsr (cancellation: CancellationToken) (name: string) (segment: Reader.MappedSegment) (nodeCount: int) (expectedEdges: int) (issues: ResizeArray<Issue>) =
-  let payload = segment.Payload
+let private checkCsr
+  (cancellation: CancellationToken)
+  (name: string)
+  (segment: Reader.MappedSegment)
+  (nodeCount: int)
+  (expectedEdges: int)
+  (issues: ResizeArray<Issue>)
+  =
+  let payload = segment.Data
   let count = int segment.Header.PrimaryCount
   let edgeCount = int64 segment.Header.SecondaryCount
 
@@ -122,58 +140,77 @@ let private checkCsr (cancellation: CancellationToken) (name: string) (segment: 
     issues.Add(CountMismatch(name, int64 expectedEdges, edgeCount))
   else
 
-  let expectedLength = int64 (count + 1) * 8L + edgeCount * 4L
+    let expectedLength = int64(count + 1) * 8L + edgeCount * 4L
 
-  if int64 payload.Length <> expectedLength then
-    issues.Add(LengthMismatch(name, expectedLength, int64 payload.Length))
-  else
-    let targetsOffset = (count + 1) * 8
-    let mutable previous = 0UL
-    let mutable index = 0
-    let mutable reported = false
+    if int64 payload.Length <> expectedLength then
+      issues.Add(LengthMismatch(name, expectedLength, int64 payload.Length))
+    else
+      let targetsOffset = (count + 1) * 8
+      let mutable previous = 0UL
+      let mutable index = 0
+      let mutable reported = false
 
-    while index <= count && not reported do
-      checkCancellation cancellation index
-      let offset = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(index * 8, 8))
+      while index <= count && not reported do
+        checkCancellation cancellation index
+        let offset = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(index * 8, 8))
 
-      if index = 0 && offset <> 0UL then
-        issues.Add(OrderViolation(name, "先頭の CSR オフセットが 0 ではありません"))
-        reported <- true
-      elif offset < previous then
-        issues.Add(OrderViolation(name, $"オフセット {index} が減少しています"))
-        reported <- true
-      elif offset > uint64 edgeCount then
-        issues.Add(ReferenceOutOfRange(name, $"オフセット {index} が隣接要素数を超えています"))
-        reported <- true
-
-      previous <- offset
-      index <- index + 1
-
-    if not reported && previous <> uint64 edgeCount then
-      issues.Add(CountMismatch(name, edgeCount, int64 previous))
-
-    let mutable source = 0
-    while source < nodeCount && not reported do
-      checkCancellation cancellation source
-      let first = int (BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(source * 8, 8)))
-      let finish = int (BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice((source + 1) * 8, 8)))
-      let mutable target = first
-      let mutable previousTarget = 0u
-      while target < finish && not reported do
-        checkCancellation cancellation target
-        let value = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(targetsOffset + target * 4, 4))
-        if value >= uint32 nodeCount then
-          issues.Add(ReferenceOutOfRange(name, $"隣接要素 {target} がノード数 {nodeCount} を超えています"))
+        if index = 0 && offset <> 0UL then
+          issues.Add(OrderViolation(name, "先頭の CSR オフセットが 0 ではありません"))
           reported <- true
-        elif target > first && value <= previousTarget then
-          issues.Add(OrderViolation(name, $"ノード {source} の隣接要素が重複または降順です"))
+        elif offset < previous then
+          issues.Add(OrderViolation(name, $"オフセット {index} が減少しています"))
           reported <- true
-        previousTarget <- value
-        target <- target + 1
-      source <- source + 1
+        elif offset > uint64 edgeCount then
+          issues.Add(ReferenceOutOfRange(name, $"オフセット {index} が隣接要素数を超えています"))
+          reported <- true
 
-let private checkIdMap (cancellation: CancellationToken) (nodes: Reader.MappedSegment) (name: string) (segment: Reader.MappedSegment) (nodeCount: int) (issues: ResizeArray<Issue>) =
-  let payload = segment.Payload
+        previous <- offset
+        index <- index + 1
+
+      if not reported && previous <> uint64 edgeCount then
+        issues.Add(CountMismatch(name, edgeCount, int64 previous))
+
+      let mutable source = 0
+
+      while source < nodeCount && not reported do
+        checkCancellation cancellation source
+
+        let first =
+          int(BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(source * 8, 8)))
+
+        let finish =
+          int(BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice((source + 1) * 8, 8)))
+
+        let mutable target = first
+        let mutable previousTarget = 0u
+
+        while target < finish && not reported do
+          checkCancellation cancellation target
+
+          let value =
+            BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(targetsOffset + target * 4, 4))
+
+          if value >= uint32 nodeCount then
+            issues.Add(ReferenceOutOfRange(name, $"隣接要素 {target} がノード数 {nodeCount} を超えています"))
+            reported <- true
+          elif target > first && value <= previousTarget then
+            issues.Add(OrderViolation(name, $"ノード {source} の隣接要素が重複または降順です"))
+            reported <- true
+
+          previousTarget <- value
+          target <- target + 1
+
+        source <- source + 1
+
+let private checkIdMap
+  (cancellation: CancellationToken)
+  (nodes: Reader.MappedSegment)
+  (name: string)
+  (segment: Reader.MappedSegment)
+  (nodeCount: int)
+  (issues: ResizeArray<Issue>)
+  =
+  let payload = segment.Data
   let count = int segment.Header.PrimaryCount
   let expectedLength = count * (Ids.NodeIdLength + 4)
 
@@ -188,6 +225,7 @@ let private checkIdMap (cancellation: CancellationToken) (nodes: Reader.MappedSe
 
     while index < count && not reported do
       checkCancellation cancellation index
+
       if index > 0 then
         let previous = payload.Slice((index - 1) * Ids.NodeIdLength, Ids.NodeIdLength)
         let current = payload.Slice(index * Ids.NodeIdLength, Ids.NodeIdLength)
@@ -197,14 +235,18 @@ let private checkIdMap (cancellation: CancellationToken) (nodes: Reader.MappedSe
           issues.Add(OrderViolation(name, $"ID {index} が昇順になっていません"))
           reported <- true
 
-      let dense = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(indicesOffset + index * 4, 4))
+      let dense =
+        BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(indicesOffset + index * 4, 4))
 
       if dense >= uint32 nodeCount then
         issues.Add(ReferenceOutOfRange(name, $"密インデックス {dense} がノード数 {nodeCount} を超えています"))
         reported <- true
       elif
-        not (payload.Slice(index * Ids.NodeIdLength, Ids.NodeIdLength)
-          .SequenceEqual(nodes.Payload.Slice(int dense * Format.RecordLength, Ids.NodeIdLength)))
+        not(
+          payload
+            .Slice(index * Ids.NodeIdLength, Ids.NodeIdLength)
+            .SequenceEqual(nodes.Data.Slice(int dense * Format.RecordLength, Ids.NodeIdLength))
+        )
       then
         issues.Add(ReferenceOutOfRange(name, $"ID {index} と密インデックス {dense} のノード ID が一致しません"))
         reported <- true
@@ -220,7 +262,7 @@ let private checkReferences
   (stringCount: int)
   (issues: ResizeArray<Issue>)
   =
-  let payload = segment.Payload
+  let payload = segment.Data
   let count = int segment.Header.PrimaryCount
   let expectedLength = count * Format.RecordLength
 
@@ -233,9 +275,16 @@ let private checkReferences
     while index < count && not reported do
       checkCancellation cancellation index
       let record = payload.Slice(index * Format.RecordLength, Format.RecordLength)
-      let source = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4))
-      let target = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4))
-      let qualifier = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4))
+
+      let source =
+        BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.SourceOffset, 4))
+
+      let target =
+        BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.TargetOffset, 4))
+
+      let qualifier =
+        BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.ReferenceRecord.QualifierOffset, 4))
+
       let edgeCode = record[Format.ReferenceRecord.EdgeKindOffset]
 
       if source >= uint32 nodeCount then
@@ -247,32 +296,40 @@ let private checkReferences
       elif edgeCode = 0uy || edgeCode > EdgeKind.toCode MemberOf then
         issues.Add(UnknownEdgeKind(name, edgeCode))
         reported <- true
-      elif not (Format.ReferenceRecord.hasValidMetadata record) then
+      elif not(Format.ReferenceRecord.hasValidMetadata record) then
         issues.Add(SegmentUnreadable(name, $"参照 {index} の言語・確度・段階または位置が不正です"))
         reported <- true
 
       index <- index + 1
 
 let private checkGraph (view: Query.GraphView) (cancellation: CancellationToken) =
-  let corrupt name detail = raise(Query.QueryException(Query.SegmentCorrupt(name, detail)))
+  let corrupt name detail =
+    raise(Query.QueryException(Query.SegmentCorrupt(name, detail)))
+
   let kinds = Array.zeroCreate<int> 256
+
   for index in 0 .. view.NodeCount - 1 do
     checkCancellation cancellation index
     let node = view.Node index
-    kinds[int (NodeKind.toCode node.Kind)] <- kinds[int (NodeKind.toCode node.Kind)] + 1
-    if index = 0 && node.Kind <> Repository then corrupt "nodes" "The first node is not a repository"
+    kinds[int(NodeKind.toCode node.Kind)] <- kinds[int(NodeKind.toCode node.Kind)] + 1
+
+    if index = 0 && node.Kind <> Repository then
+      corrupt "nodes" "The first node is not a repository"
+
     if index > 0 && index <= view.Manifest.Counts.Directories && node.Kind <> Directory then
       corrupt "nodes" "Directory nodes disagree with the dense schema"
 
   for entry in view.Manifest.Counts.NodeKinds do
     let actual =
       kinds
-      |> Array.mapi (fun code count ->
-        match NodeKind.ofCode (byte code) with
+      |> Array.mapi(fun code count ->
+        match NodeKind.ofCode(byte code) with
         | ValueSome kind when NodeKind.name kind = entry.Kind -> count
         | _ -> 0)
       |> Array.sum
-    if actual <> entry.Count then corrupt "nodes" $"Node kind count disagrees: {entry.Kind}"
+
+    if actual <> entry.Count then
+      corrupt "nodes" $"Node kind count disagrees: {entry.Kind}"
 
   for index in 0 .. view.FileCount - 1 do
     checkCancellation cancellation index
@@ -282,6 +339,7 @@ let private checkGraph (view: Query.GraphView) (cancellation: CancellationToken)
   for kind in view.EdgeKinds do
     for source in 0 .. view.NodeCount - 1 do
       checkCancellation cancellation source
+
       match view.Adjacency(source, kind, false) with
       | ValueNone -> ()
       | ValueSome(struct (forward, offset, count)) ->
@@ -289,18 +347,23 @@ let private checkGraph (view: Query.GraphView) (cancellation: CancellationToken)
           checkCancellation cancellation position
           let target = view.Target(forward, offset, position)
           let mutable found = false
+
           match view.Adjacency(target, kind, true) with
           | ValueNone -> ()
           | ValueSome(struct (backward, reverseOffset, reverseCount)) ->
             let mutable low = 0
             let mutable high = reverseCount - 1
+
             while low <= high && not found do
               let middle = low + (high - low) / 2
               let candidate = view.Target(backward, reverseOffset, middle)
+
               if candidate = source then found <- true
               elif candidate < source then low <- middle + 1
               else high <- middle - 1
-          if not found then corrupt (EdgeKind.name kind) "Forward and reverse CSR disagree"
+
+          if not found then
+            corrupt (EdgeKind.name kind) "Forward and reverse CSR disagree"
 
 /// 成果物へ記録された文法の版と、現在の実行ファイルの版を突き合わせる。
 ///
@@ -312,13 +375,14 @@ let private checkGrammars (manifest: Manifest.Manifest) (issues: ResizeArray<Iss
     | ValueNone -> issues.Add(GrammarVersionDiffers(recorded.Language, recorded.Version, "（同梱していません）"))
     | ValueSome current ->
       if
-        not (String.Equals(current.Version, recorded.Version, StringComparison.Ordinal))
-        || not (String.Equals(current.Sha256, recorded.Sha256, StringComparison.Ordinal))
+        not(String.Equals(current.Version, recorded.Version, StringComparison.Ordinal))
+        || not(String.Equals(current.Sha256, recorded.Sha256, StringComparison.Ordinal))
       then
         issues.Add(GrammarVersionDiffers(recorded.Language, recorded.Version, current.Version))
 
 let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (cancellation: CancellationToken) =
   let issues = ResizeArray<Issue>()
+  let allowedParts = Manifest.segmentFileNames outputDirectory manifest
   let mutable bytesChecked = 0L
   let mutable checkedSegments = 0
 
@@ -331,34 +395,40 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
     | Error error -> issues.Add(SegmentPathRejected(descriptor.Name, Artifact.PathError.describe error))
     | Ok path ->
 
-    // 権限や、検証中に退役した世代による読み取り失敗は、破損した成果物と同じく
-    // 想定内の失敗である。内部エラーで終わらせず問題として記録し、
-    // `readStable` にマニフェストを読み直させる。
-    try
-      if not (File.Exists path) then issues.Add(SegmentMissing descriptor.Name)
-      else
-        let actualLength = FileInfo(path).Length
-
-        if actualLength <> descriptor.ByteLength then
-          issues.Add(LengthMismatch(descriptor.Name, descriptor.ByteLength, actualLength))
+      // 権限や、検証中に退役した世代による読み取り失敗は、破損した成果物と同じく
+      // 想定内の失敗である。内部エラーで終わらせず問題として記録し、
+      // `readStable` にマニフェストを読み直させる。
+      try
+        if not(File.Exists path) then
+          issues.Add(SegmentMissing descriptor.Name)
         else
-          let actual = Reader.checksum path cancellation
+          let actualLength = FileInfo(path).Length
 
-          if not (String.Equals(actual, descriptor.Checksum, StringComparison.Ordinal)) then
-            issues.Add(ChecksumMismatch(descriptor.Name, descriptor.Checksum, actual))
+          if actualLength <> descriptor.ByteLength then
+            issues.Add(LengthMismatch(descriptor.Name, descriptor.ByteLength, actualLength))
+          else
+            let actual = Reader.checksum path cancellation
 
-          bytesChecked <- bytesChecked + actualLength
-          checkedSegments <- checkedSegments + 1
-    with
-    | :? FileNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
-    | :? DirectoryNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
-    | :? IOException as ex -> issues.Add(SegmentUnreadable(descriptor.Name, ex.Message))
-    | :? UnauthorizedAccessException -> issues.Add(SegmentUnreadable(descriptor.Name, "読み取り権限がありません"))
+            if not(String.Equals(actual, descriptor.Checksum, StringComparison.Ordinal)) then
+              issues.Add(ChecksumMismatch(descriptor.Name, descriptor.Checksum, actual))
 
-  let openSegment (suffix: string) (kind: Format.SegmentKind) (expectedCount: int) (check: string -> Reader.MappedSegment -> unit) =
+            bytesChecked <- bytesChecked + actualLength
+            checkedSegments <- checkedSegments + 1
+      with
+      | :? FileNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
+      | :? DirectoryNotFoundException -> issues.Add(SegmentMissing descriptor.Name)
+      | :? IOException as ex -> issues.Add(SegmentUnreadable(descriptor.Name, ex.Message))
+      | :? UnauthorizedAccessException -> issues.Add(SegmentUnreadable(descriptor.Name, "読み取り権限がありません"))
+
+  let openSegment
+    (suffix: string)
+    (kind: Format.SegmentKind)
+    (expectedCount: int)
+    (check: string -> Reader.MappedSegment -> unit)
+    =
     let candidates =
       manifest.Segments
-      |> Array.filter (fun segment -> segment.Name.EndsWith("." + suffix, StringComparison.Ordinal))
+      |> Array.filter(fun segment -> segment.Name.EndsWith("." + suffix, StringComparison.Ordinal))
 
     match candidates with
     | [||] -> issues.Add(SegmentMissing suffix)
@@ -366,10 +436,11 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
       match Artifact.tryResolveSegment outputDirectory descriptor.Name with
       | Error error -> issues.Add(SegmentPathRejected(descriptor.Name, Artifact.PathError.describe error))
       | Ok path ->
-        match Reader.MappedSegment.Open path with
+        match Reader.MappedSegment.Open(path, allowedParts) with
         | Error error -> issues.Add(SegmentUnreadable(descriptor.Name, Reader.OpenError.describe error))
         | Ok segment ->
           use segment = segment
+
           if segment.Header.Kind <> kind then
             issues.Add(SegmentUnreadable(descriptor.Name, $"セグメント種別が {kind} ではありません"))
           elif segment.Header.PrimaryCount <> uint64 expectedCount then
@@ -386,11 +457,15 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
       else
         openSegment "stroffsets" Format.StringOffsets manifest.Counts.Strings (fun offsetName offsets ->
           if offsets.Header.SecondaryCount <> strings.Header.SecondaryCount then
-            issues.Add(CountMismatch(offsetName, int64 strings.Header.SecondaryCount, int64 offsets.Header.SecondaryCount))
+            issues.Add(
+              CountMismatch(offsetName, int64 strings.Header.SecondaryCount, int64 offsets.Header.SecondaryCount)
+            )
           else
             let before = issues.Count
             checkStringOffsets cancellation offsetName offsets issues
-            if issues.Count = before then checkStringBytes cancellation name strings offsets issues))
+
+            if issues.Count = before then
+              checkStringBytes cancellation name strings offsets issues))
 
     openSegment "nodes" Format.Nodes manifest.Counts.Nodes (fun _ segment ->
       openSegment "idmap" Format.IdMap manifest.Counts.Nodes (fun idName idMap ->
@@ -401,6 +476,7 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
     for entry in manifest.Counts.EdgeKinds do
       openSegment $"edges.{entry.Kind}" Format.AdjacencyCsr manifest.Counts.Nodes (fun name segment ->
         checkCsr cancellation name segment manifest.Counts.Nodes entry.Count issues)
+
       openSegment $"redges.{entry.Kind}" Format.AdjacencyCsr manifest.Counts.Nodes (fun name segment ->
         checkCsr cancellation name segment manifest.Counts.Nodes entry.Count issues)
 
@@ -412,12 +488,17 @@ let private inspect (outputDirectory: string) (manifest: Manifest.Manifest) (can
       | Error error -> issues.Add(SegmentUnreadable("graph", Query.QueryError.describe error))
       | Ok view ->
         use view = view
+
         if view.Manifest <> manifest then
           issues.Add(ManifestUnreadable(Query.QueryError.describe Query.GenerationChanged))
         else
           try
             checkGraph view cancellation
-            if manifest.Segments |> Array.exists (fun segment -> segment.Name.EndsWith(".lookup", StringComparison.Ordinal)) then
+
+            if
+              manifest.Segments
+              |> Array.exists(fun segment -> segment.Name.EndsWith(".lookup", StringComparison.Ordinal))
+            then
               Query.validateLookup view cancellation
           with Query.QueryException error ->
             issues.Add(SegmentUnreadable("graph", Query.QueryError.describe error))

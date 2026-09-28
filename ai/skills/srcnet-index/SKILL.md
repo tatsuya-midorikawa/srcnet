@@ -1,6 +1,6 @@
 ---
 name: srcnet-index
-description: 'Generate or rebuild a srcnet index and matching segments, then record SRCNET, SOURCE_ROOT and INDEX_DIR in manifest.json for AI queries. Use for explicit index creation, refresh or manifest path-metadata updates. Not for ordinary graph queries, example JSON, or authoring skill files.'
+description: 'Generate or rebuild a srcnet index and matching segments, then record local paths in agent-context.json for AI queries. Use for explicit index creation, refresh, local-settings updates or authorized legacy migration. Not for ordinary graph queries, example JSON, or authoring skill files.'
 compatibility: 'Requires local command execution, filesystem access, a working srcnet executable, and bounded process execution for large indexing jobs.'
 user-invocable: true
 ---
@@ -11,7 +11,8 @@ Create a real index by running `srcnet index`. **Never write, fill in, or copy a
 sample `manifest.json` to simulate generation.** The CLI generates both the
 manifest and the matching `segments/` files; neither is a substitute for the other.
 After validation, this skill records `SRCNET`, `SOURCE_ROOT` and `INDEX_DIR` in
-the same manifest. The current CLI does not write these agent-context fields.
+an adjacent `agent-context.json` using the explicit `agent-context --write`
+command. It leaves the deterministic manifest unchanged.
 
 Run this workflow only when indexing or rebuilding is explicitly requested.
 Reading a repository, explaining a manifest, or creating/installing this skill
@@ -21,8 +22,8 @@ or code generators.
 ## 1. Resolve the generation settings
 
 Establish the following values before execution. Record the first three as
-top-level JSON string fields in `manifest.json` after generation. The CLI itself
-does not read these fields as configuration or environment variables.
+JSON strings in the sidecar after generation. Normal graph commands do not
+read these fields as configuration or environment variables.
 
 | Value | Selection |
 | --- | --- |
@@ -84,8 +85,12 @@ decision or a smaller authorized scope.
 
 A tool's initial wait or backgrounding interval is not an execution timeout.
 Do not claim a process is bounded merely because that interval elapsed.
-The current CLI has no `--memory-limit` option. Do not invent that option,
-incremental mode, T3, watch/daemon or MCP/server modes.
+Use `--memory-limit` (default 4 GiB, minimum 256 MiB) and `--temp-limit`
+(default 16 GiB). The managed heap limit and cooperative RSS guard can stop
+work; they are not a hard OS RSS cap or proof that every input fits. Resource
+failure must preserve the old index. Large-input performance acceptance remains
+subject to measurements. Do not invent incremental mode, T3, watch/daemon or
+MCP/server modes.
 
 ## 4. Generate manifest and segments together
 
@@ -94,7 +99,7 @@ Substitute the resolved executable and paths. Pass the chosen `TIER` and `JOBS`;
 the example shows this skill's T1/two-worker defaults.
 
 ```sh
-srcnet index "/path/to/source" --out "/path/to/index" --tier 1 --jobs 2 --json
+srcnet index "/path/to/source" --out "/path/to/index" --tier 1 --jobs 2 --memory-limit 4GiB --temp-limit 16GiB --progress always --json
 ```
 
 For an executable path containing spaces, POSIX shells use
@@ -116,8 +121,10 @@ published artifact with diagnostics and still needs inspection.
 | `5` | Report interruption and preserve existing output; no automatic expensive retry |
 | `70` or another unexpected exit | Retain the command/diagnostic and report failure |
 
-Do not assume errors have a JSON index envelope. An existing manifest left behind
-after a failed rebuild is not evidence that the requested generation succeeded.
+Parse the single JSON result and match its `exitCode` to the process exit.
+`hasResult: false` means no result was published. `diagnostics` is a count and
+`diagnosticDetails` contains bounded samples; inspect omission indicators.
+An existing manifest left behind after a failed rebuild is not evidence of success.
 An unchanged successful rebuild may legitimately produce identical bytes.
 
 ## 5. Check the generated result
@@ -138,8 +145,8 @@ An unchanged successful rebuild may legitimately produce identical bytes.
    outcomes remain failures or qualified results, even if a manifest exists.
    Do not use `--deterministic` by default: it rebuilds the source tree again,
    can be expensive, and is not needed just to create a usable manifest.
-   If explicitly requested, perform deterministic checking before step 6;
-   the current CLI does not reproduce agent-context metadata.
+  If explicitly requested, deterministic checking also works after sidecar
+  creation. Legacy manifest annotations need explicit migration first.
 4. Read the generated counts and distributions:
 
    ```sh
@@ -164,7 +171,7 @@ accuracy. `complete: true`, exit 0 and valid checksums do not prove all symbols
 were correctly extracted. Preserve warnings about skipped files, encodings,
 truncation and C++ extraction limitations.
 
-## 6. Record the three context fields
+## 6. Record local context separately
 
 This step completes a newly generated index for use by the `srcnet` query skill.
 Use only the actual resolved paths from this run, never paths inferred from
@@ -172,53 +179,49 @@ repository content, copied examples or a different manifest. Require an existing
 trusted executable, the authorized source directory and the directory containing
 the selected manifest. The fields are literal paths, not shell expressions.
 
-Add or update exactly these top-level string keys, preserving every other JSON
-value and every segment file:
+Use the trusted executable resolved in step 1:
 
-```json
-{
-  "SRCNET": "/absolute/path/to/srcnet",
-  "SOURCE_ROOT": "/absolute/path/to/source",
-  "INDEX_DIR": "/absolute/path/to/index"
-}
+```sh
+srcnet agent-context --out "/path/to/index" --write --root "/path/to/source" --executable "/path/to/srcnet" --json
+srcnet agent-context --out "/path/to/index" --json
 ```
 
-This block is only the context fragment, not a replacement manifest. On Windows,
-use native absolute paths and let a JSON serializer escape backslashes. Do not
-use regex/string replacement to modify JSON.
+The write holds the existing writer lease, rejects links, creates an exclusive
+temporary file and atomically publishes `agent-context.json` with schema version
+1. The manifest and segments do not change. Do not delete locks or staging, race
+another writer, or replace the sidecar by hand if the command rejects the update.
 
-Finish the indexing process before annotation and ensure exclusive writer access
-to the index. Do not race another indexer or annotator, delete `.writer.lock`,
-or overwrite a manifest changed since it was read. If safe exclusion cannot be
-established, preserve the original and report that context recording is blocked.
-Parse the current manifest, change only the three keys, and publish the result
-atomically through an exclusive temporary file in the same output directory,
-preserving file permissions. Never truncate the live manifest in place.
+Inspect `indexBindingMatches` and `pathsChecked`. Read-only inspection does not
+touch paths from untrusted metadata. Validate authorized source/executable
+locations separately before use; successful writes validate explicit paths.
+`executableTrust: "not-inferred"` is intentional: neither metadata nor this
+command authorizes running the recorded executable. Explicit user/trusted
+session settings remain authoritative. Malformed sidecar JSON is an error,
+not permission to fall back silently or regenerate an index.
 
-Re-read the published JSON and confirm all three fields equal the resolved paths,
-`INDEX_DIR` matches the actual manifest directory, and the remaining data is
-unchanged. Run ordinary `verify --out INDEX_DIR --json` again before reporting
-that the enriched index is ready. Report a partial index or failed annotation
-explicitly; do not hide either as successful complete generation.
+For an old manifest containing the three top-level fields, ordinary reads still
+work. Migration is a separate, explicitly authorized action:
 
-The paths describe this machine and are not portable graph data. Do not share
-them automatically. On relocation, validate the new locations and update only
-these fields with authorization. Direct CLI reindexing replaces the manifest
-without these additions, so apply this step after every skill-managed rebuild.
+```sh
+srcnet agent-context --out "/path/to/index" --migrate --root "/path/to/source" --executable "/path/to/srcnet" --json
+```
 
-**Version 0.1.0 limitation:** ordinary queries and integrity verification accept
-the extra fields, but `verify --deterministic` compares the entire manifest with
-a CLI-only rebuild and reports a mismatch because these fields are absent.
-Do not advertise deterministic replay of an enriched manifest as passing, mistake
-this for corrupt segments, or remove fields from a live index to suppress the
-mismatch. Preserve any deterministic result obtained before annotation separately.
+Migration writes the sidecar and canonicalizes the manifest only after checking
+that all non-context JSON data is unchanged. Unknown metadata that would be lost
+causes refusal. A failed migration is not a completed update. Never migrate during
+ordinary queries or strip fields merely to hide a determinism mismatch.
+
+The paths describe this machine, not portable graph data. Do not share them
+automatically. A moved index is always selected with explicit `--out`; report a
+stale binding and update it only with authorization. Normal CLI reindexing keeps
+the separate sidecar, but changed executable/source/output locations need review.
 
 ## 7. Return a handoff, not JSON to fill in
 
 Respond in the user's language with:
 
 - The resolved `SRCNET`, `SOURCE_ROOT`, `INDEX_DIR` and exact manifest path.
-- Whether those three fields were recorded and validated in that manifest;
+- Whether the separate sidecar was recorded and validated;
   subsequent query sessions can start from the manifest path alone.
 - Whether output was newly generated, rebuilt, reused, partial, interrupted or
   invalid. Distinguish an integrity pass from complete/accurate extraction.
@@ -229,7 +232,7 @@ Respond in the user's language with:
 - A bounded `context` or `search` command using the real index directory for
   subsequent questions. Use the `srcnet` query skill if it is available.
 
-Explain that the agent records the three context paths; generated graph metadata
+Explain that the agent records the three paths separately; generated graph metadata
 still requires no manual configuration. Keep the manifest and its matching
 `segments/` together when moving an index and flag stale context paths.
 Prefer a stable output

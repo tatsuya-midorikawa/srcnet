@@ -108,6 +108,14 @@ type WalkResult =
     Tiers: TierCounts
   }
 
+type Progress =
+  { Phase: string
+    Files: int
+    Directories: int
+    Bytes: int64 }
+
+exception SinkFailure of exn
+
 [<Literal>]
 let private GitIgnoreFileName = ".gitignore"
 
@@ -250,10 +258,13 @@ let private readIgnoreFile
 ///
 /// 例外を投げるのは取り消し時のみで、個々のファイルやディレクトリの失敗は診断として
 /// 記録し走査を続ける。docs/architecture.md 5 を参照。
-let run
+let runTo
   (physicalRoot: string)
   (options: WalkOptions)
   (diagnostics: DiagnosticSink)
+  (progress: Progress -> unit)
+  (onDirectory: LogicalPath -> unit)
+  (onFile: DiscoveredFile -> unit)
   (cancellation: CancellationToken)
   : Task<WalkResult> =
   task {
@@ -277,8 +288,6 @@ let run
 
     let excludedPaths = HashSet<string>(options.ExcludedPaths, StringComparer.Ordinal)
 
-    let files = ConcurrentBag<DiscoveredFile>()
-    let directories = ConcurrentBag<LogicalPath>()
     let queue = ConcurrentQueue<WorkItem>()
     let failures = ConcurrentQueue<exn>()
 
@@ -286,6 +295,23 @@ let run
     // 取り消し元を用意する。これがないと 1 つの失敗が全体の停止になる。
     use failureCancellation =
       CancellationTokenSource.CreateLinkedTokenSource cancellation
+
+    let userCancellation = cancellation
+    let cancellation = failureCancellation.Token
+
+    let emitDirectory path =
+      try
+        onDirectory path
+      with
+      | :? OperationCanceledException -> reraise()
+      | error -> raise(SinkFailure error)
+
+    let emitFile file =
+      try
+        onFile file
+      with
+      | :? OperationCanceledException -> reraise()
+      | error -> raise(SinkFailure error)
 
     use available = new SemaphoreSlim(0)
     let mutable pending = 0
@@ -296,7 +322,19 @@ let run
     let mutable syntaxFiles = 0
     let mutable lineOrientedFiles = 0
     let mutable notExtractedFiles = 0
+    let mutable processedEntries = 0
+    let mutable processedBytes = 0L
     let missingGrammars = ConcurrentDictionary<Language, byte>()
+
+    let report phase =
+      progress
+        { Phase = phase
+          Files =
+            Volatile.Read &syntaxFiles
+            + Volatile.Read &lineOrientedFiles
+            + Volatile.Read &notExtractedFiles
+          Directories = min options.MaxEntries (Volatile.Read &directoryCount)
+          Bytes = Volatile.Read &processedBytes }
 
     let enqueue item =
       Interlocked.Increment &pending |> ignore
@@ -430,7 +468,7 @@ let run
                 elif Interlocked.Increment(&directoryCount) > options.MaxEntries then
                   noteTruncation $"ディレクトリ項目数が上限 {options.MaxEntries} を超えました"
                 else
-                  directories.Add childPath
+                  emitDirectory childPath
 
                   enqueue
                     { Path = childPath
@@ -457,6 +495,8 @@ let run
 
                   match reader.Read(entry.FullName, fileInfo.Length, cancellation) with
                   | Ok summary ->
+                    Interlocked.Add(&processedBytes, fileInfo.Length) |> ignore
+
                     if summary.Encoding = Encodings.Undetermined then
                       diagnostics.Add(UndeterminedEncoding, childValue, "置換文字で復号します")
 
@@ -518,7 +558,7 @@ let run
                     | ValueSome(Model.UnsupportedEncoding _)
                     | ValueNone -> ()
 
-                    files.Add
+                    emitFile
                       { Path = childPath
                         SizeBytes = fileInfo.Length
                         Language = language
@@ -543,7 +583,7 @@ let run
 
                     Interlocked.Increment &notExtractedFiles |> ignore
 
-                    files.Add
+                    emitFile
                       { Path = childPath
                         SizeBytes = fileInfo.Length
                         Language = language
@@ -556,6 +596,9 @@ let run
 
       for entry in entries do
         cancellation.ThrowIfCancellationRequested()
+
+        if Interlocked.Increment(&processedEntries) &&& 255 = 0 then
+          report "discovery/extraction"
 
         try
           processEntry entry
@@ -620,17 +663,13 @@ let run
     do! Task.WhenAll(Array.init workerCount (fun _ -> Task.Run(fun () -> worker())))
 
     // 取り消しが先に立つ。利用者の中断を内部エラーとして報告しない。
-    cancellation.ThrowIfCancellationRequested()
+    userCancellation.ThrowIfCancellationRequested()
 
     match failures.TryDequeue() with
     | true, ex -> ExceptionDispatchInfo.Capture(ex).Throw()
     | false, _ -> ()
 
-    let orderedDirectories = directories.ToArray()
-    Array.sortInPlaceWith comparePath orderedDirectories
-
-    let orderedFiles = files.ToArray()
-    Array.sortInPlaceWith (fun (a: DiscoveredFile) (b: DiscoveredFile) -> comparePath a.Path b.Path) orderedFiles
+    report "sort"
 
     // 走査の網羅性を損なう診断。個々のファイルの読み取り失敗と違い、
     // これらは「どれだけ見落としたか分からない」状態を意味する。
@@ -681,8 +720,8 @@ let run
         diagnostics.Add(ExtractionDegraded, "", $"{Language.name language} の文法を利用できないため、抽出は T1（行指向）までで実行しました")
 
     return
-      { Directories = orderedDirectories
-        Files = orderedFiles
+      { Directories = Array.empty
+        Files = Array.empty
         Complete = complete
         AppliedTier = appliedTier
         ParserAvailable = parserAvailable
@@ -691,3 +730,22 @@ let run
             LineOriented = Volatile.Read &lineOrientedFiles
             NotExtracted = Volatile.Read &notExtractedFiles } }
   }
+
+let runWithProgress physicalRoot options diagnostics progress cancellation =
+  task {
+    let files = ConcurrentBag<DiscoveredFile>()
+    let directories = ConcurrentBag<LogicalPath>()
+    let! result = runTo physicalRoot options diagnostics progress directories.Add files.Add cancellation
+    let orderedDirectories = directories.ToArray()
+    Array.sortInPlaceWith comparePath orderedDirectories
+    let orderedFiles = files.ToArray()
+    Array.sortInPlaceWith (fun (left: DiscoveredFile) right -> comparePath left.Path right.Path) orderedFiles
+
+    return
+      { result with
+          Directories = orderedDirectories
+          Files = orderedFiles }
+  }
+
+let run physicalRoot options diagnostics cancellation =
+  runWithProgress physicalRoot options diagnostics ignore cancellation

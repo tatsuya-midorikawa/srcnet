@@ -34,16 +34,32 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
 
       // 構文解析器は任意の構成要素なので、解析できる言語を版と一緒に示す。
       // 構築の有無を確かめる手段がないと、抽出結果が変わった原因を切り分けられない。
-      match Srcnet.Extraction.Parsing.availableLanguages () with
+      match Srcnet.Extraction.Parsing.availableLanguages() with
       | [||] -> Terminal.outLine "構文解析器: 未構築 (python3 tools/build_native.py で構築します)"
       | languages ->
         let joined = String.Join(", ", languages)
         Terminal.outLine $"構文解析器: {joined}"
 
       return Commands.ExitCode.Success
-    | Ok(Args.Index arguments) -> return! Commands.index arguments cancellation
+    | Ok(Args.Index arguments) ->
+      let configured =
+        try
+          let heapLimit =
+            min (arguments.MemoryLimit / 4L * 3L) (GC.GetGCMemoryInfo().TotalAvailableMemoryBytes)
+
+          AppContext.SetData("GCHeapHardLimit", uint64 heapLimit)
+          GC.RefreshMemoryLimit()
+          Ok()
+        with :? InvalidOperationException as error ->
+          Error error.Message
+
+      match configured with
+      | Error message -> return Commands.writeManagementError "index" Commands.ExitCode.UserError message arguments.Json
+      | Ok() -> return! Commands.index arguments cancellation
     | Ok(Args.Stats arguments) -> return Commands.statsWithCancellation arguments cancellation
     | Ok(Args.Verify arguments) -> return! Commands.verify arguments cancellation
+    | Ok(Args.Freshness arguments) -> return! FreshnessCommands.run arguments cancellation
+    | Ok(Args.AgentContext arguments) -> return AgentContextCommands.run arguments
     | Ok(Args.Search arguments) -> return QueryCommands.search arguments cancellation
     | Ok(Args.Show arguments) -> return QueryCommands.show arguments cancellation
     | Ok(Args.Neighbors arguments) -> return QueryCommands.neighbors arguments cancellation
@@ -54,7 +70,7 @@ let private run (arguments: string[]) (cancellation: CancellationToken) : Task<i
 
 [<EntryPoint>]
 let main arguments =
-  configureConsole ()
+  configureConsole()
   use cancellation = new CancellationTokenSource()
 
   let handler =
@@ -69,12 +85,13 @@ let main arguments =
     try
       (run arguments cancellation.Token).GetAwaiter().GetResult()
     with
-    | :? OperationCanceledException ->
-      QueryCommands.writeArgumentError arguments Commands.ExitCode.Interrupted "中断しました"
+    | :? OperationCanceledException -> QueryCommands.writeArgumentError arguments Commands.ExitCode.Interrupted "中断しました"
     | ex ->
       // 想定外の障害。文脈を失わないよう型と本文を残す。
-      QueryCommands.writeArgumentError arguments Commands.ExitCode.InternalError
+      QueryCommands.writeArgumentError
+        arguments
+        Commands.ExitCode.InternalError
         $"内部エラー: {ex.GetType().Name}: {ex.Message}"
   finally
     Console.CancelKeyPress.RemoveHandler handler
-    Terminal.flush ()
+    Terminal.flush()

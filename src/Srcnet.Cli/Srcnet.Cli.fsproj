@@ -19,6 +19,8 @@
         <Compile Include="Commands.fs" />
         <Compile Include="QueryOutput.fs" />
         <Compile Include="QueryCommands.fs" />
+        <Compile Include="FreshnessCommands.fs" />
+        <Compile Include="AgentContextCommands.fs" />
         <Compile Include="ExportCommands.fs" />
         <Compile Include="Program.fs" />
     </ItemGroup>

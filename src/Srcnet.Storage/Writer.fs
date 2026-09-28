@@ -91,6 +91,12 @@ type IndexInput =
     Files: FileInput[]
   }
 
+[<NoEquality; NoComparison>]
+type IndexSource =
+  { Repository: RepositoryId
+    Directories: IReadOnlyList<LogicalPath>
+    Files: IReadOnlyList<FileInput> }
+
 type SegmentDescriptor =
   {
     /// セグメント ディレクトリ内の名前。公開時に `segments/<generation>/` を前置きする。
@@ -124,7 +130,7 @@ type WriteResult =
 /// 1 セグメント分の書き出し器。書きながらチェックサムを計算するため、
 /// 完全性検証のための再読み込みが不要になる。
 [<Sealed>]
-type private SegmentWriter(directory: string, name: string) =
+type private SegmentWriter(directory: string, name: string, budget: ExternalSort.TemporaryBudget) =
   let fullPath =
     Path.Combine(directory, name.Replace('/', Path.DirectorySeparatorChar))
 
@@ -150,6 +156,7 @@ type private SegmentWriter(directory: string, name: string) =
     )
 
   let hasher = new Hashing.Hasher()
+  let output = new ExternalSort.BudgetedStream(stream, budget)
   let buffer = ArrayPool<byte>.Shared.Rent WriteBufferBytes
   let mutable position = 0
   let mutable total = 0L
@@ -157,7 +164,7 @@ type private SegmentWriter(directory: string, name: string) =
   member private _.FlushBuffer() =
     if position > 0 then
       let span = ReadOnlySpan(buffer, 0, position)
-      stream.Write span
+      output.Write span
       hasher.Update span
       total <- total + int64 position
       position <- 0
@@ -181,11 +188,14 @@ type private SegmentWriter(directory: string, name: string) =
       position <- position + source.Length
     else
       this.FlushBuffer()
-      stream.Write source
+      output.Write source
       hasher.Update source
       total <- total + int64 source.Length
 
   member this.WriteHeader(header: Format.Header) =
+    if header.PayloadLength > uint64(Int32.MaxValue - Format.HeaderLength) then
+      raise(ExternalSort.ResourceLimitExceeded "Segment exceeds the current reader view limit; index a smaller scope")
+
     Format.writeHeader (this.Reserve Format.HeaderLength) header
 
   member this.Complete() =
@@ -203,7 +213,7 @@ type private SegmentWriter(directory: string, name: string) =
     member _.Dispose() =
       ArrayPool<byte>.Shared.Return buffer
       (hasher :> IDisposable).Dispose()
-      stream.Dispose()
+      output.Dispose()
 
 let private segmentName (suffix: string) = $"{InitialSegmentId}.{suffix}"
 
@@ -219,7 +229,11 @@ exception LookupBuildException of LookupBuildError
 /// publication: append the returned descriptor, recompute the generation from the full
 /// descriptor list, and qualify/publish the new manifest and generation together.
 /// This never reads source files or changes the existing base segments.
-let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : SegmentDescriptor =
+let private buildLookupExternal
+  (segmentDirectory: string)
+  (budget: ExternalSort.TemporaryBudget)
+  (cancellation: CancellationToken)
+  : SegmentDescriptor =
   let corrupt name detail =
     raise(LookupBuildException(LookupSourceCorrupt(name, detail)))
 
@@ -249,8 +263,283 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     corrupt "stroffsets" "String counts disagree"
 
   if
-    BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(0, 8)) <> 0UL
-    || BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(stringCount * 8, 8))
+    BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(0, 8)) <> 0UL
+    || BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(stringCount * 8, 8))
+       <> strings.Header.SecondaryCount
+  then
+    corrupt "stroffsets" "Invalid first or terminal string offset"
+
+  let cache = Dictionary<uint32, struct (string * string)>()
+
+  let key (reference: uint32) =
+    if reference >= uint32 stringCount then
+      corrupt "nodes/files" "String reference out of range"
+
+    let index = int reference
+
+    match cache.TryGetValue reference with
+    | true, value -> value
+    | false, _ ->
+      let first =
+        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(index * 8, 8))
+
+      let last =
+        BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice((index + 1) * 8, 8))
+
+      if last < first || last > uint64 strings.Data.Length then
+        corrupt "stroffsets" "String offsets out of range"
+
+      if last - first > uint64 Format.Lookup.MaxKeyBytes then
+        raise(LookupBuildException(LookupTooLarge "Source key exceeds the 1 MiB UTF-8 limit"))
+
+      let text =
+        try
+          Strings.utf8.GetString(strings.Data.Slice(int first, int(last - first)))
+        with :? Text.DecoderFallbackException ->
+          corrupt "strings" "Invalid UTF-8"
+
+      let normal = Strings.lookupKey false text
+      let pair = struct (normal, Strings.lookupKey true normal)
+
+      if cache.Count >= 4096 then
+        cache.Clear()
+
+      cache[reference] <- pair
+      pair
+
+  let comparePosting
+    (struct (leftFold, leftKey: string, leftNode, leftTarget))
+    (struct (rightFold, rightKey: string, rightNode, rightTarget))
+    =
+    let folded = compare leftFold rightFold
+
+    if folded <> 0 then
+      folded
+    else
+      let key = String.CompareOrdinal(leftKey, rightKey)
+
+      if key <> 0 then
+        key
+      else
+        let node = compare leftNode rightNode
+        if node <> 0 then node else compare leftTarget rightTarget
+
+  let writePosting (writer: BinaryWriter) (struct (folded: bool, key: string, node: int, target: int)) =
+    writer.Write folded
+    writer.Write key
+    writer.Write node
+    writer.Write target
+
+  let readPosting (reader: BinaryReader) =
+    struct (reader.ReadBoolean(), reader.ReadString(), reader.ReadInt32(), reader.ReadInt32())
+
+  let temporary =
+    Path.Combine(segmentDirectory, ".lookup-" + Guid.NewGuid().ToString "N")
+
+  Directory.CreateDirectory temporary |> ignore
+
+  try
+    use sorter =
+      new ExternalSort.Sorter<struct (bool * string * int * int)>(
+        temporary,
+        67108864L,
+        budget,
+        comparePosting,
+        writePosting,
+        readPosting,
+        cancellation
+      )
+
+    let add node target reference =
+      let struct (normal, folded) = key reference
+
+      if normal.Length > 0 then
+        sorter.Add(struct (false, normal, node, target), 64L + int64 normal.Length * 2L)
+        sorter.Add(struct (true, folded, node, target), 64L + int64 folded.Length * 2L)
+
+    for index in 0 .. nodeCount - 1 do
+      checkCancellation cancellation index
+      let record = nodes.Data.Slice(index * Format.RecordLength, Format.RecordLength)
+
+      match NodeKind.ofCode record[Format.NodeRecord.KindOffset] with
+      | ValueNone -> corrupt "nodes" "Unknown node kind"
+      | ValueSome _ -> ()
+
+      add index 0 (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.NameOffset, 4)))
+      add index 1 (BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.QualifiedNameOffset, 4)))
+
+      let file =
+        BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(Format.NodeRecord.FileIndexOffset, 4))
+
+      if file <> Format.NodeRecord.NoFile then
+        if file >= uint32 fileCount then
+          corrupt "nodes" "File reference out of range"
+
+        add index 2 (BinaryPrimitives.ReadUInt32LittleEndian(files.Data.Slice(int file * Format.RecordLength, 4)))
+
+    cache.Clear()
+    let keysPath = Path.Combine(temporary, "keys")
+    let postingsPath = Path.Combine(temporary, "postings")
+    let blobPath = Path.Combine(temporary, "blob")
+
+    let newPart path =
+      new BinaryWriter(
+        new ExternalSort.BudgetedStream(
+          new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536),
+          budget
+        ),
+        Strings.utf8
+      )
+
+    let mutable keyCount = 0
+    let mutable postingCount = 0
+    let mutable normalCount = 0
+    let mutable blobBytes = 0UL
+
+    do
+      use keys = newPart keysPath
+      use postings = newPart postingsPath
+      use blob = newPart blobPath
+      let mutable previous = ValueNone
+      let mutable groupFirst = 0
+      let mutable groupLength = 0
+      let mutable groupOffset = 0UL
+
+      let finishGroup () =
+        if previous.IsSome then
+          keys.Write groupOffset
+          keys.Write(uint32 groupLength)
+          keys.Write(uint32 groupFirst)
+          keys.Write(uint32(postingCount - groupFirst))
+          keys.Write 0u
+
+      let mutable scratch = ArrayPool<byte>.Shared.Rent 4096
+
+      try
+        for struct (folded, text, node, target) in sorter.Read() do
+          if previous <> ValueSome(struct (folded, text)) then
+            finishGroup()
+            groupFirst <- postingCount
+            groupOffset <- blobBytes
+            groupLength <- Strings.utf8.GetByteCount text
+
+            if groupLength > Format.Lookup.MaxKeyBytes then
+              raise(LookupBuildException(LookupTooLarge "Lookup key exceeds the UTF-8 limit"))
+
+            if groupLength > scratch.Length then
+              ArrayPool<byte>.Shared.Return scratch
+              scratch <- ArrayPool<byte>.Shared.Rent groupLength
+
+            let written = Strings.utf8.GetBytes(text.AsSpan(), Span scratch)
+            blob.Write(scratch, 0, written)
+            blobBytes <- blobBytes + uint64 written
+            keyCount <- keyCount + 1
+
+            if not folded then
+              normalCount <- normalCount + 1
+
+            previous <- ValueSome(struct (folded, text))
+
+          postings.Write(uint32 node)
+          postings.Write(uint32 target)
+          postingCount <- postingCount + 1
+
+          if postingCount > (Int32.MaxValue - Format.HeaderLength - Format.Lookup.PreludeLength) / 8 then
+            raise(ExternalSort.ResourceLimitExceeded "Lookup posting count exceeds the reader limit")
+
+        finishGroup()
+      finally
+        ArrayPool<byte>.Shared.Return scratch
+
+    let payloadLength =
+      uint64 Format.Lookup.PreludeLength
+      + uint64 keyCount * 24UL
+      + uint64 postingCount * 8UL
+      + blobBytes
+
+    use writer = new SegmentWriter(segmentDirectory, segmentName "lookup", budget)
+
+    writer.WriteHeader
+      { Kind = Format.LexicalLookup
+        PrimaryCount = uint64 keyCount
+        SecondaryCount = uint64 postingCount
+        RecordLength = uint32 Format.Lookup.KeyLength
+        PayloadLength = payloadLength }
+
+    let prelude = writer.Reserve Format.Lookup.PreludeLength
+    BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(0, 4), Format.Lookup.Version)
+    BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(4, 4), uint32 nodeCount)
+    BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(8, 4), uint32 fileCount)
+    BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(12, 4), uint32 stringCount)
+    BinaryPrimitives.WriteUInt64LittleEndian(prelude.Slice(16, 8), blobBytes)
+    BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(24, 4), uint32 normalCount)
+    let scratch = ArrayPool<byte>.Shared.Rent 65536
+
+    try
+      for path in [| keysPath; postingsPath; blobPath |] do
+        use input =
+          new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536)
+
+        let mutable reading = true
+
+        while reading do
+          cancellation.ThrowIfCancellationRequested()
+          let count = input.Read(scratch, 0, 65536)
+
+          if count = 0 then
+            reading <- false
+          else
+            writer.WriteRaw(ReadOnlySpan(scratch, 0, count))
+
+      writer.Complete()
+    finally
+      ArrayPool<byte>.Shared.Return scratch
+  finally
+    if Directory.Exists temporary then
+      for path in Directory.EnumerateFiles(temporary, "*", SearchOption.AllDirectories) do
+        let length = FileInfo(path).Length
+        File.Delete path
+        budget.Release length
+
+      Directory.Delete(temporary, true)
+
+/// 論理パスからノード名（最後のセグメント）を取り出す。ルートは空文字列。
+let private buildLookupInMemory
+  (segmentDirectory: string)
+  (budget: ExternalSort.TemporaryBudget)
+  (cancellation: CancellationToken)
+  =
+  let corrupt name detail =
+    raise(LookupBuildException(LookupSourceCorrupt(name, detail)))
+
+  let openSource suffix kind =
+    match Reader.MappedSegment.Open(Path.Combine(segmentDirectory, segmentName suffix)) with
+    | Error error -> raise(LookupBuildException(LookupSourceUnavailable(suffix, error)))
+    | Ok segment ->
+      if segment.Header.Kind <> kind then
+        (segment :> IDisposable).Dispose()
+        corrupt suffix "Unexpected segment kind"
+
+      segment
+
+  cancellation.ThrowIfCancellationRequested()
+  use nodes = openSource "nodes" Format.Nodes
+  use files = openSource "files" Format.Files
+  use strings = openSource "strings" Format.Strings
+  use offsets = openSource "stroffsets" Format.StringOffsets
+  let nodeCount = int nodes.Header.PrimaryCount
+  let stringCount = int strings.Header.PrimaryCount
+  let fileCount = int files.Header.PrimaryCount
+
+  if
+    offsets.Header.PrimaryCount <> strings.Header.PrimaryCount
+    || offsets.Header.SecondaryCount <> strings.Header.SecondaryCount
+  then
+    corrupt "stroffsets" "String counts disagree"
+
+  if
+    BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(0, 8)) <> 0UL
+    || BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(stringCount * 8, 8))
        <> strings.Header.SecondaryCount
   then
     corrupt "stroffsets" "Invalid first or terminal string offset"
@@ -269,30 +558,41 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     | ValueSome value -> value
     | ValueNone ->
       let value =
-        if ignoreCase then Strings.lookupKey true (key reference false)
+        if ignoreCase then
+          Strings.lookupKey true (key reference false)
         else
-          let first = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice(index * 8, 8))
-          let last = BinaryPrimitives.ReadUInt64LittleEndian(offsets.Payload.Slice((index + 1) * 8, 8))
+          let first =
+            BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice(index * 8, 8))
 
-          if last < first || last > uint64 strings.Payload.Length then
+          let last =
+            BinaryPrimitives.ReadUInt64LittleEndian(offsets.Data.Slice((index + 1) * 8, 8))
+
+          if last < first || last > uint64 strings.Data.Length then
             corrupt "stroffsets" "String offsets out of range"
+
           if last - first > uint64 Format.Lookup.MaxKeyBytes then
-            raise(LookupBuildException(LookupTooLarge "Source key exceeds the 1 MiB UTF-8 limit"))
+            raise(LookupBuildException(LookupTooLarge "Source key exceeds the UTF-8 limit"))
 
           let text =
             try
-              Strings.utf8.GetString(strings.Payload.Slice(int first, int(last - first)))
+              Strings.utf8.GetString(strings.Data.Slice(int first, int(last - first)))
             with :? Text.DecoderFallbackException ->
               corrupt "strings" "Invalid UTF-8"
+
           Strings.lookupKey false text
+
       cache[index] <- ValueSome value
       value
 
-  // Folded references use the complemented index: three ints instead of a bool/string tuple.
   let postings = ResizeArray<struct (int * int * int)>()
 
   let cachedKey reference =
-    let cached = if reference < 0 then folded[~~~reference] else normal[reference]
+    let cached =
+      if reference < 0 then
+        folded[~~~reference]
+      else
+        normal[reference]
+
     match cached with
     | ValueSome text -> text
     | ValueNone -> invalidOp "Lookup posting refers to an uninitialized key"
@@ -307,7 +607,7 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
 
   for index in 0 .. nodeCount - 1 do
     checkCancellation cancellation index
-    let record = nodes.Payload.Slice(index * Format.RecordLength, Format.RecordLength)
+    let record = nodes.Data.Slice(index * Format.RecordLength, Format.RecordLength)
 
     match NodeKind.ofCode record[Format.NodeRecord.KindOffset] with
     | ValueNone -> corrupt "nodes" "Unknown node kind"
@@ -323,30 +623,29 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
       if file >= uint32 fileCount then
         corrupt "nodes" "File reference out of range"
 
-      add index 2 (BinaryPrimitives.ReadUInt32LittleEndian(files.Payload.Slice(int file * Format.RecordLength, 4)))
-
-    if postings.Count > (Int32.MaxValue - Format.HeaderLength - Format.Lookup.PreludeLength) / 8 then
-      raise(LookupBuildException(LookupTooLarge "Posting table exceeds the mapped segment limit"))
+      add index 2 (BinaryPrimitives.ReadUInt32LittleEndian(files.Data.Slice(int file * Format.RecordLength, 4)))
 
   let mutable comparisons = 0
 
-  let comparePosting (struct (lk, ln, lt)) (struct (rk, rn, rt)) =
+  let comparePosting (struct (leftKey, leftNode, leftTarget)) (struct (rightKey, rightNode, rightTarget)) =
     comparisons <- comparisons + 1
     checkCancellation cancellation comparisons
-    let byFold = compare (lk < 0) (rk < 0)
+    let folded = compare (leftKey < 0) (rightKey < 0)
 
-    if byFold <> 0 then
-      byFold
+    if folded <> 0 then
+      folded
     else
-      let byKey = if lk = rk then 0 else String.CompareOrdinal(cachedKey lk, cachedKey rk)
+      let key =
+        if leftKey = rightKey then
+          0
+        else
+          String.CompareOrdinal(cachedKey leftKey, cachedKey rightKey)
 
-      if byKey <> 0 then
-        byKey
+      if key <> 0 then
+        key
       else
-        let byNode = compare ln rn
-        if byNode <> 0 then byNode else compare lt rt
-
-  cancellation.ThrowIfCancellationRequested()
+        let node = compare leftNode rightNode
+        if node <> 0 then node else compare leftTarget rightTarget
 
   try
     postings.Sort(Comparison comparePosting)
@@ -354,7 +653,6 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     cancellation.ThrowIfCancellationRequested()
     reraise()
 
-  cancellation.ThrowIfCancellationRequested()
   let keys = ResizeArray<struct (string * int * int * int)>()
   let mutable normalCount = 0
   let mutable blobBytes = 0UL
@@ -364,7 +662,7 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     checkCancellation cancellation position
     let first = position
     let struct (reference, _, _) = postings[position]
-    let fold = reference < 0
+    let folded = reference < 0
     let text = cachedKey reference
     position <- position + 1
     let mutable same = true
@@ -372,8 +670,11 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     while same && position < postings.Count do
       let struct (nextReference, _, _) = postings[position]
 
-      if fold = (nextReference < 0)
-         && (reference = nextReference || String.Equals(text, cachedKey nextReference, StringComparison.Ordinal)) then
+      if
+        folded = (nextReference < 0)
+        && (reference = nextReference
+            || String.Equals(text, cachedKey nextReference, StringComparison.Ordinal))
+      then
         checkCancellation cancellation position
         position <- position + 1
       else
@@ -382,32 +683,27 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
     let length = Strings.utf8.GetByteCount text
 
     if length > Format.Lookup.MaxKeyBytes then
-      raise(LookupBuildException(LookupTooLarge $"Key exceeds {Format.Lookup.MaxKeyBytes} UTF-8 bytes"))
+      raise(LookupBuildException(LookupTooLarge "Key exceeds the UTF-8 limit"))
 
     keys.Add(struct (text, first, position - first, length))
 
-    if not fold then
+    if not folded then
       normalCount <- normalCount + 1
 
     blobBytes <- blobBytes + uint64 length
 
-  let payloadLength =
-    uint64 Format.Lookup.PreludeLength
-    + uint64 keys.Count * 24UL
-    + uint64 postings.Count * 8UL
-    + blobBytes
-
-  if payloadLength > uint64(Int32.MaxValue - Format.HeaderLength) then
-    raise(LookupBuildException(LookupTooLarge "Lookup exceeds the mapped segment limit"))
-
-  use writer = new SegmentWriter(segmentDirectory, segmentName "lookup")
+  use writer = new SegmentWriter(segmentDirectory, segmentName "lookup", budget)
 
   writer.WriteHeader
     { Kind = Format.LexicalLookup
       PrimaryCount = uint64 keys.Count
       SecondaryCount = uint64 postings.Count
       RecordLength = uint32 Format.Lookup.KeyLength
-      PayloadLength = payloadLength }
+      PayloadLength =
+        uint64 Format.Lookup.PreludeLength
+        + uint64 keys.Count * 24UL
+        + uint64 postings.Count * 8UL
+        + blobBytes }
 
   let prelude = writer.Reserve Format.Lookup.PreludeLength
   BinaryPrimitives.WriteUInt32LittleEndian(prelude.Slice(0, 4), Format.Lookup.Version)
@@ -453,7 +749,25 @@ let buildLookup (segmentDirectory: string) (cancellation: CancellationToken) : S
   finally
     ArrayPool<byte>.Shared.Return scratch
 
-/// 論理パスからノード名（最後のセグメント）を取り出す。ルートは空文字列。
+let private buildLookupWithBudget segmentDirectory budget cancellation =
+  let fits suffix limit =
+    let path = Path.Combine(segmentDirectory, segmentName suffix)
+
+    try
+      File.Exists path
+      && FileInfo(path).Length <= limit
+      && not(File.Exists(Reader.partPath path 1))
+    with :? IOException ->
+      false
+
+  if fits "nodes" 8388608L && fits "strings" 8388608L && fits "stroffsets" 4194304L then
+    buildLookupInMemory segmentDirectory budget cancellation
+  else
+    buildLookupExternal segmentDirectory budget cancellation
+
+let buildLookup segmentDirectory cancellation =
+  buildLookupWithBudget segmentDirectory (ExternalSort.TemporaryBudget Int64.MaxValue) cancellation
+
 let private nodeName (path: LogicalPath) = fileName path
 
 /// M2 が生成するエッジ種別。docs/storage.md 2 の `<id>.edges.<kind>` に対応する。
@@ -496,6 +810,7 @@ let private buildCsr (nodeCount: int) (edges: struct (int * int)[]) (cancellatio
 
 /// CSR を 1 セグメントとして書き出す。
 let private writeCsr
+  (budget: ExternalSort.TemporaryBudget)
   (segmentDirectory: string)
   (name: string)
   (nodeCount: int)
@@ -503,7 +818,7 @@ let private writeCsr
   (targets: uint32[])
   (cancellation: CancellationToken)
   =
-  use writer = new SegmentWriter(segmentDirectory, name)
+  use writer = new SegmentWriter(segmentDirectory, name, budget)
   let payloadLength = uint64(nodeCount + 1) * 8UL + uint64 targets.Length * 4UL
 
   writer.WriteHeader
@@ -538,12 +853,13 @@ let private writeCsr
 /// バイト位置順、構成シンボルは名前の序数昇順に並ぶ。この順序が決定性の基礎になる。
 let private writeBase
   (segmentDirectory: string)
-  (input: IndexInput)
+  (input: IndexSource)
   (diagnostics: DiagnosticSink)
+  (budget: ExternalSort.TemporaryBudget)
   (cancellation: CancellationToken)
   : WriteResult =
-  let directoryCount = input.Directories.Length
-  let fileCount = input.Files.Length
+  let directoryCount = input.Directories.Count
+  let fileCount = input.Files.Count
   let structuralCount = 1 + directoryCount + fileCount
 
   // --- シンボルの密インデックスを決める ---
@@ -794,7 +1110,7 @@ let private writeBase
   let blobLength = stringOffsets[strings.Count]
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "strings")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "strings", budget)
 
     writer.WriteHeader
       { Kind = Format.Strings
@@ -824,7 +1140,7 @@ let private writeBase
       ArrayPool<byte>.Shared.Return scratch
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "stroffsets")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "stroffsets", budget)
     let payloadLength = uint64(stringOffsets.Length * 8)
 
     writer.WriteHeader
@@ -844,7 +1160,7 @@ let private writeBase
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "files")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "files", budget)
     let payloadLength = uint64 fileCount * uint64 Format.RecordLength
 
     writer.WriteHeader
@@ -888,7 +1204,7 @@ let private writeBase
   let nodeKindCounts = Dictionary<NodeKind, int>()
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "nodes")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "nodes", budget)
     let payloadLength = uint64 nodeCount * uint64 Format.RecordLength
 
     writer.WriteHeader
@@ -1034,7 +1350,14 @@ let private writeBase
     let struct (offsets, targets) = csrByKind[kind]
 
     descriptors.Add(
-      writeCsr segmentDirectory (segmentName $"edges.{EdgeKind.name kind}") nodeCount offsets targets cancellation
+      writeCsr
+        budget
+        segmentDirectory
+        (segmentName $"edges.{EdgeKind.name kind}")
+        nodeCount
+        offsets
+        targets
+        cancellation
     )
 
     // 後方 CSR。「このノードを指すのは誰か」を全走査せずに解けるようにする。
@@ -1042,6 +1365,7 @@ let private writeBase
 
     descriptors.Add(
       writeCsr
+        budget
         segmentDirectory
         (segmentName $"redges.{EdgeKind.name kind}")
         nodeCount
@@ -1051,7 +1375,7 @@ let private writeBase
     )
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "refs")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "refs", budget)
     let payloadLength = uint64 referenceTotal * uint64 Format.RecordLength
 
     writer.WriteHeader
@@ -1122,7 +1446,7 @@ let private writeBase
     descriptors.Add(writer.Complete())
 
   do
-    use writer = new SegmentWriter(segmentDirectory, segmentName "idmap")
+    use writer = new SegmentWriter(segmentDirectory, segmentName "idmap", budget)
     let payloadLength = uint64 nodeCount * uint64(Ids.NodeIdLength + 4)
 
     writer.WriteHeader
@@ -1186,14 +1510,121 @@ let private writeBase
 
 /// 基本セグメントの構築用配列を照会索引の構築中まで保持しない。
 /// 並び・形式・公開方法は変えず、二つの大きな作業領域の寿命だけを分ける。
-let write
+let splitSegments
   (segmentDirectory: string)
-  (input: IndexInput)
+  (partBytes: int)
+  (budget: ExternalSort.TemporaryBudget)
+  (segments: SegmentDescriptor[])
+  (cancellation: CancellationToken)
+  =
+  if partBytes < 64 || partBytes > Reader.DefaultPartBytes then
+    invalidArg (nameof partBytes) "Segment part size must be between 64 bytes and 128 MiB"
+
+  let result = ResizeArray<SegmentDescriptor>()
+  let buffer = ArrayPool<byte>.Shared.Rent 65536
+
+  try
+    for segment in segments do
+      cancellation.ThrowIfCancellationRequested()
+      let payloadLength = segment.ByteLength - int64 Format.HeaderLength
+
+      if payloadLength <= int64 partBytes then
+        result.Add segment
+      else
+        let count = int((payloadLength + int64 partBytes - 1L) / int64 partBytes)
+
+        if count > Reader.MaxParts then
+          raise(ExternalSort.ResourceLimitExceeded $"Segment needs more than {Reader.MaxParts} parts")
+
+        let original = Path.Combine(segmentDirectory, segment.Name)
+        let temporary = original + ".split.tmp"
+
+        do
+          use input =
+            new FileStream(original, FileMode.Open, FileAccess.Read, FileShare.Read, 65536)
+
+          for index in 0 .. count - 1 do
+            cancellation.ThrowIfCancellationRequested()
+            let name = Reader.partPath segment.Name index
+
+            let path =
+              if index = 0 then
+                temporary
+              else
+                Path.Combine(segmentDirectory, name)
+
+            use output =
+              new ExternalSort.BudgetedStream(
+                new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536),
+                budget
+              )
+
+            use hasher = new Hashing.Hasher()
+
+            let length =
+              (if index = 0 then int64 Format.HeaderLength else 0L)
+              + min (int64 partBytes) (payloadLength - int64 index * int64 partBytes)
+
+            let mutable remaining = length
+
+            while remaining > 0L do
+              cancellation.ThrowIfCancellationRequested()
+              let copied = int(min 65536L remaining)
+              input.ReadExactly(Span(buffer, 0, copied))
+              output.Write(ReadOnlySpan(buffer, 0, copied))
+              hasher.Update(ReadOnlySpan(buffer, 0, copied))
+              remaining <- remaining - int64 copied
+
+            output.Flush()
+            let digest = Array.zeroCreate<byte> Hashing.HashLength
+            hasher.Finish(Span digest)
+
+            result.Add
+              { Name = name
+                ByteLength = length
+                Checksum = Convert.ToHexStringLower digest }
+
+        Artifact.replaceFile temporary original
+        budget.Release segment.ByteLength
+
+    let ordered = result.ToArray()
+    Array.sortInPlaceWith (fun left right -> String.CompareOrdinal(left.Name, right.Name)) ordered
+    ordered
+  finally
+    ArrayPool<byte>.Shared.Return buffer
+
+let writeSourceWithBudget
+  (segmentDirectory: string)
+  (input: IndexSource)
   (diagnostics: DiagnosticSink)
+  (budget: ExternalSort.TemporaryBudget)
   (cancellation: CancellationToken)
   : WriteResult =
-  let result = writeBase segmentDirectory input diagnostics cancellation
-  let lookup = buildLookup segmentDirectory cancellation
-  let segments = Array.append result.Segments [| lookup |]
-  Array.sortInPlaceWith (fun (left: SegmentDescriptor) right -> String.CompareOrdinal(left.Name, right.Name)) segments
+  let result = writeBase segmentDirectory input diagnostics budget cancellation
+
+  if GC.GetTotalMemory false > 1073741824L then
+    GC.Collect(2, GCCollectionMode.Aggressive, true, true)
+
+  let lookup = buildLookupWithBudget segmentDirectory budget cancellation
+
+  let segments =
+    splitSegments
+      segmentDirectory
+      Reader.DefaultPartBytes
+      budget
+      (Array.append result.Segments [| lookup |])
+      cancellation
+
   { result with Segments = segments }
+
+let writeSource segmentDirectory input diagnostics cancellation =
+  writeSourceWithBudget segmentDirectory input diagnostics (ExternalSort.TemporaryBudget Int64.MaxValue) cancellation
+
+let write segmentDirectory (input: IndexInput) diagnostics cancellation =
+  writeSource
+    segmentDirectory
+    { Repository = input.Repository
+      Directories = input.Directories
+      Files = input.Files }
+    diagnostics
+    cancellation

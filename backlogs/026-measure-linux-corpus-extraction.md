@@ -53,6 +53,10 @@ Windows のピーク RSS 計測も必要で、現行 CI の経過時間だけで
 
 ## 完了条件
 
+2026-09-27 追記: [_drafts 037](../_drafts/037-memory-bounded-indexing.md) で退避・外部ソート・物理分割・予算保護の基礎を追加した。
+合成入力の参考測定は [性能](../docs/performance.md) にあるが、Linux の正しい固定 SHA の再測定を代替しない。
+本チケットの macOS / Windows 実測と両 OS の一致は引き続き未完了である。
+
 - `linux` コーパスの走査と抽出が完了し、成果物が公開される
 - macOS と Windows の成果物がバイト単位で一致する
 - 実測値が [性能](../docs/performance.md) に記録される

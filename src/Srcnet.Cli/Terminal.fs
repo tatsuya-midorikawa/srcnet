@@ -20,8 +20,8 @@ let private makeWriter (stream: Stream) =
   writer.NewLine <- Newline
   writer
 
-let private standardOutput = makeWriter (Console.OpenStandardOutput())
-let private standardError = makeWriter (Console.OpenStandardError())
+let private standardOutput = makeWriter(Console.OpenStandardOutput())
+let private standardError = makeWriter(Console.OpenStandardError())
 
 /// 端末以外（パイプ、リダイレクト）へは制御シーケンスを一切出力しない。
 let isInteractive = not Console.IsOutputRedirected && not Console.IsErrorRedirected
@@ -29,7 +29,10 @@ let isInteractive = not Console.IsOutputRedirected && not Console.IsErrorRedirec
 /// 端末の桁数。取得できない場合の既定値は 80。
 let width =
   try
-    if Console.IsOutputRedirected then 80 else max 20 Console.WindowWidth
+    if Console.IsOutputRedirected then
+      80
+    else
+      max 20 Console.WindowWidth
   with :? IO.IOException ->
     80
 
@@ -38,6 +41,10 @@ let out (text: string) = standardOutput.Write text
 let outLine (text: string) = standardOutput.WriteLine text
 
 let errLine (text: string) = standardError.WriteLine text
+
+let progressLine (text: string) =
+  standardError.WriteLine text
+  standardError.Flush()
 
 /// リポジトリ由来の文字列を含む行を `stderr` へ出す。
 let diagnosticLine (text: string) =
@@ -50,7 +57,11 @@ let resultLine (text: string) =
 /// 端末の桁数に収まるよう、東アジア文字幅を考慮して切り詰める。
 let fitToWidth (text: string) =
   let sanitized = Sanitize.forTerminal text
-  if Unicode.displayWidth sanitized <= width then sanitized else Unicode.truncateToWidth (width - 1) sanitized + "…"
+
+  if Unicode.displayWidth sanitized <= width then
+    sanitized
+  else
+    Unicode.truncateToWidth (width - 1) sanitized + "…"
 
 let flush () =
   standardOutput.Flush()

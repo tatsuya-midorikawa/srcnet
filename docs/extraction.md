@@ -64,6 +64,37 @@ T2 以降の構文解析には **tree-sitter を再利用する**（[設計判�
 解析器の一部だけを構築した場合も、要求した C / C++ の文法がなければ
 言語ごとに縮退を診断する。別言語の文法があるだけで完全な T2 と報告しない。
 
+### 3.3 言語別の到達状況を読む
+
+index と stats の JSON は同じ保存済み `extractionCoverage` を返す。言語ごとに files / tier2 / tier1 / notExtracted を示し、
+`syntaxSupported`（T2 抽出の実装）と `grammarAvailable`（その生成時の文法可用性）を分ける。
+T0 を要求した場合の notExtracted は正常な結果である。到達段階だけで品質や意味的な正確さを保証しない。
+
+| 対象 | T0 | T1 | T2 要求時 |
+| --- | --- | --- | --- |
+| C / C++ とヘッダー | 構造・ハッシュ | 行指向の候補 | 対応する文法があれば構文抽出 |
+| その他のテキスト | 構造・ハッシュ | 対応する行パターン | T1。文法があっても現在の T2 抽出には未対応 |
+| バイナリ・復号不能・制限超過 | 構造と判明した属性 | 条件により見送り | 条件により見送り |
+
+`reasons` はファイルごとの主な理由を 1 件として数える。言語別の段階合計・理由合計は files と一致する。
+各理由の例はパス順の最大 2 件、各パス最大 512 UTF-16 code unit で、合計件数と `examplesTruncated` は別に示す。
+他の診断がないという意味ではない。旧索引に集計がない場合は `coverageAvailable: false` を返す。
+
+| 理由 | 現行で取れる対応 |
+| --- | --- |
+| `requested-tier` | 要求どおりの段階。T0/T1 ならそれ自体は障害でない |
+| `syntax-unsupported` | T1 の候補と元ソースを確認する。文法だけを追加しても T2 にはならない |
+| `parser-unavailable` / `grammar-unavailable` | 信頼済みの CLI に必要な解析器・文法を含める |
+| `file-size-limit` | `--max-file-size` と実行環境の余裕を見直す |
+| `extraction-size-limit` | ハッシュの対象でも抽出上限を超える。対象を分けるか元ソースを読む |
+| `parse-timeout` / `parse-failed` | T1 に留まった結果を区別し、問題の入力と解析器を確認する |
+| `binary` / `unsupported-encoding` | 文字コードと元データを確認する。本文を推測で置換しない |
+| `ambiguous-encoding` | 正しい符号化が分かる場合だけ `--assume-encoding` を指定する |
+| `extraction-limit` | 件数・行・深さ等の抽出上限。未抽出部分の不在を証明しない |
+| `read-error` | ソースの存在と読み取り権限を確認する |
+
+詳細な利用例は [入門手順](first-success.md) を参照する。
+
 ## 4. C / C++ 固有の扱い
 
 目標リポジトリの中心であるため、方針を明示する。

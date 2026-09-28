@@ -22,6 +22,8 @@ srcnet は自然言語を理解しない。クエリは **字句一致 + 構造�
 | `srcnet export html` | 監査・探索用の対話的な HTML グラフを出力する |
 | `srcnet stats` | グラフ統計 |
 | `srcnet verify` | 整合性・決定性の検証 |
+| `srcnet freshness <files...> --root <path>` | 指定した少数ファイルの内容ハッシュを照合する |
+| `srcnet agent-context --out <dir>` | 機械固有の設定を読み取る。書き込み・旧形式移行は明示指定のみ |
 
 ### 2.1 主なオプション
 
@@ -35,6 +37,9 @@ srcnet index <path>
   --assume-encoding <名> 符号化が曖昧なファイルへ適用する符号化
   --no-gitignore         .gitignore / .srcnetignore を無視
   --allow-partial        不完全な走査結果での上書きを許可
+  --progress auto|always|never  stderr の進捗（既定 auto: TTY のみ）
+  --memory-limit <size>  メモリ予算（256MiB..1TiB、既定 4GiB）
+  --temp-limit <size>    退避・公開前セグメントの一時ディスク上限（既定 16GiB）
 
 srcnet search <text>
   --root <path>          解析ルート（生成物の位置を決めるために使う）
@@ -62,7 +67,7 @@ neighbors / path / context:
 `.gitignore` などのドットファイルは、この規則だけでは除外しない。
 
 `--budget` は JSON 照会の出力全体に適用する（256..1000000、既定 8000）。
-`--incremental` / `--memory-limit` / T3 は未実装であり、現行の利用例には指定しない。
+`--incremental` / T3 は未実装であり、現行の利用例には指定しない。
 空・不正なパス、範囲外の数値、未対応の符号化名は入力誤りとして拒否する。
 `--ignore-case` は `search`、`--edge` / `--direction` は `neighbors` / `path` 専用である。
 他のコマンドへ指定しても黙って無視せず拒否する。
@@ -107,6 +112,30 @@ JSON 照会は失敗時も `stdout` に単一の封筒を返し、終了コー�
 テキスト出力は結果を `stdout`、診断を `stderr` に分ける。
 `verify` が破損を検出した場合は 3、文法版の違いや決定性の不一致だけの場合は 4 を返す。
 `verify --deterministic` は入力の再生成を伴うため、解析ルートを省略すると 2 になる。
+
+`index` / `stats` / `verify` の `--json` も、入力誤り・欠損・破損・中断を含めて単一 JSON を返す。
+従来の成功フィールドを残し、`command`、`exitCode`、`hasResult` を揃える。
+`hasResult: false` は今回の結果がないことを示し、過去の manifest が残っていることとは区別する。
+`complete` は走査の完全性であり、終了コード 4 と同時に true になり得る。
+
+管理系の `diagnostics` は合計件数、`diagnosticDetails` は最大 32 件の `{kind,path,detail}` である。
+path/detail は各 2048 UTF-16 code unit までとし、サロゲート対を壊さず省略する。
+`diagnosticsTruncated` と `omittedDiagnosticCount` も返す。verify の `issues` も最大 32 件。
+stats は保存済みの診断合計を返すが、元の詳細を保存していないため省略として示す。
+進捗は stderr に限る。強制終了や OS による起動失敗には JSON を保証しない。
+
+### 2.3 進捗と資源上限
+
+進捗は走査・抽出、整列、保存、公開、終了の段階と、判明したファイル・ディレクトリ・バイト数、経過時間を示す。
+全件数が未知の段階で完了率や残り時間は推定しない。TTY は最大毎秒、リダイレクト時の `always` は最大 5 秒ごとの更新とし、段階の切替は別途表示する。
+改行付きの出力で、制御シーケンスは使わない。中断要求と後始末も stderr に表示する。
+
+メモリ予算に応じて並列数を抑え、抽出結果と大きな検索索引の構築で退避を使う。
+CLI は managed heap に予算の 3/4 以下を設定し、RSS を 100 ms ごとに監視して 7/8 に達した時点で中断を要求する。
+これは協調的な保護であり、OS のハード制限ではない。急な native/mmap 増加も含めた厳密な RSS 上限の保証は未達である。
+許容できない予算や一時ディスク上限への到達は終了コード 2、利用者による中断は 5 とし、旧索引を保持する。
+ディスク予算にはソート中の新旧 run、退避入力、公開前のセグメント、分割時のコピーを含む。既存の公開世代は含まない。
+現時点の制限と測定結果は [性能](performance.md) を参照する。
 
 ## 3. ランキング
 
@@ -178,8 +207,10 @@ JSON 照会は失敗時も `stdout` に単一の封筒を返し、終了コー�
 既知の省略件数だけを示す。到達可能性を確定できなかった経路は、完全な「経路なし」と区別する。
 `path` の `complete` は探索の確定性、`truncated` は探索または出力の打ち切りを表す。
 
-`--json` を指定した場合、診断も封筒の中の `diagnostics` に入れる。機械が読む先を 1 つに保ち、
+照会で `--json` を指定した場合、診断も封筒の中の `diagnostics` に入れる。機械が読む先を 1 つに保ち、
 `stdout` を JSON だけに保つためである。テキスト出力では結果を `stdout`、診断を `stderr` へ分ける。
+
+正常に開いた索引からの照会には `generation` を付ける。世代も出力予算に含め、別索引の NodeId や異なる世代の位置情報を混用しない。
 
 `tokenEstimate` は決定的な近似で、`tokenEstimateMethod` にその方法を明示する。現在の方法は
 `ascii/4 + cjk*1 + other/2` である。これはモデル固有のトークン数を保証する上限ではない。
@@ -251,6 +282,8 @@ LLM を使わないため、`explain` は散文を生成せず、構造的事実
 
 CLI をシェルから呼ぶだけでよい。専用の SDK もネットワーク待ち受けも要らない。
 
+以下はコマンドの形を示す例である。実在する入力と返却 ID を使って最後まで試す場合は [入門手順](first-success.md) を参照する。
+
 ```sh
 # 1. 一度だけ索引を作る
 srcnet index /path/to/repo --tier 2
@@ -285,3 +318,40 @@ MCP アダプターは同じ照会サービスの上の薄い層として後続�
 CLI と JSON 出力を一次界面とする。MCP サーバー モードは、同じ照会サービスの上の薄いアダプターとして後続マイルストーンで追加する（[ロードマップ](roadmap.md)）。二重実装は行わない。
 
 MCP を追加する場合も、既定は標準入出力での接続とし、ネットワーク待ち受けは行わない（[セキュリティ](security.md)）。
+
+## 8. 指定ファイルの鮮度を確認する
+
+`freshness <files...> --root <source> --out <index> --json` は、明示したリポジトリ相対ファイルだけを SHA-256 で照合する。
+通常の照会や verify はソースをハッシュしない。更新時刻を戻した同サイズの変更も、内容ハッシュで区別する。
+最大 32 ファイル、合計読取 256 MiB、10 秒で確認を打ち切り、Ctrl+C を受け付ける。ルート外参照・絶対ファイル名・リンク経由の読み取りは許可しない。
+
+| `files[].status` | 意味 |
+| --- | --- |
+| `unchanged` | 今回取得したハッシュが索引の内容ハッシュと一致した |
+| `changed` | 内容ハッシュが異なる |
+| `deleted` | 対象パスが見つからない。改名の場合も旧パスはこの状態になる |
+| `unreadable` | 読取拒否、I/O 障害、リンク拒否など。変更なしとは判断できない |
+| `unchecked` | 未索引、索引にハッシュがない、時間・バイト・検索上限などで未確認 |
+
+結果は `scope: "selected-files"`、対象の `files`、`checkedFiles`、`uncheckedFiles`、`bytesRead`、`generation` を含む。
+`checkedFiles` はハッシュ確認数、`uncheckedFiles` は未指定・確認見送りの索引内ファイル数である。読取不可・削除は `files` の状態も併せて読む。
+全指定ファイルが unchanged のときだけ終了コード 0、それ以外は 4。索引欠損は 3、引数誤りは 2、中断は 5。
+ソースの全体一致、未索引ファイルの追加がないこと、読み取り後に変更が起きないことは保証しない。自動再生成もしない。
+
+## 9. 機械固有設定を分離する
+
+`agent-context --out <index> --json` は設定を読むだけで、実行ファイルを起動しない。
+隣の `agent-context.json` があれば schemaVersion 1 と 3 つの絶対パスを検証し、ない場合だけ旧 manifest の `SRCNET` / `SOURCE_ROOT` / `INDEX_DIR` を読む。
+壊れた sidecar から旧設定へ黙って切り替えない。設定不在・不正は入力エラー、移動済みの束縛は終了コード 4 と検査結果を返す。
+読み取りだけでは設定中のパスへアクセスせず、`pathsChecked: false` を返す。存在確認は明示的な書き込み時の root/executable に限る。
+
+`--write --root <source> --executable <trusted-srcnet>` を明示すると、writer lease のもとで sidecar を原子的に保存する。
+通常の index・照会はこの設定を自動使用しない。選択した `--out` と信頼済みの利用者設定が優先される。
+`executableTrust: "not-inferred"` は、パスの存在を確認しても実行の承認にはならないことを示す。
+
+`--migrate` は同じ root/executable の明示指定を必要とし、旧 3 フィールドを取り除いても他の JSON データが変わらないことを確かめてから移行する。
+未知のメタデータが失われる場合は拒否する。通常照会では移行しない。
+決定性検証は root 直下の `agent-context.json` だけを比較対象から除き、manifest の比較とチェックサム検証は維持する。
+旧版との生成条件・形式・追加集計の差は、設定の移行だけでは解消しない。必要な場合は別出力先へ再索引する。
+
+設定の配布と信頼境界は [AI skills](../ai/skills/README.md)、保存と共有は [成果物の利用ガイド](artifact-guide.md) を参照する。
